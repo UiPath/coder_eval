@@ -4,6 +4,7 @@
 from coder_eval.agents.antigravity_agent import AntigravityAgent
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.agents.codex_agent import CodexAgent
+from coder_eval.agents.delegate_agent import DelegateAgent
 from coder_eval.agents.noop_agent import NoOpAgent
 from coder_eval.agents.opencode_agent import OpenCodeAgent
 from coder_eval.agents.pi_agent import PiAgent
@@ -12,17 +13,23 @@ from coder_eval.models import AgentKind
 
 
 def register_builtins(registry: type[AgentRegistry]) -> None:
-    """Register the built-in agents (Claude/Codex/Antigravity/OpenCode/Pi/NoOp) onto ``registry``.
+    """Register the built-in agents (Claude/Codex/Antigravity/OpenCode/Pi/Delegate/NoOp) onto ``registry``.
 
     This is the target of coder-eval's own ``coder_eval.plugins`` entry point, so
     the built-in agents travel the identical discovery path as any third-party
     plugin (see :mod:`coder_eval.plugins`). Importing the agent modules above
     fires their ``@AgentRegistry.register`` decorators; this hook only has to
     ensure those modules are imported, which the package import already did.
+
+    ``delegate`` registers unconditionally, exactly like every sibling agent
+    (``codex``/``antigravity``): its Node/``@uipath/delegate-sdk`` prerequisite
+    is resolved lazily in ``start()``, which raises a clear ``AgentConfigError``
+    if it is missing. There is no conditional-registration gate — that would be
+    a second, ad-hoc dispatch mechanism the registry pattern already replaces.
     """
     # Reference the imported classes so the registration side effect is explicit
     # and a future refactor that drops the top-level imports fails loudly here.
-    _ = (ClaudeCodeAgent, CodexAgent, AntigravityAgent, OpenCodeAgent, PiAgent, NoOpAgent)
+    _ = (ClaudeCodeAgent, CodexAgent, AntigravityAgent, OpenCodeAgent, PiAgent, DelegateAgent, NoOpAgent)
     # The decorators fire on import, but assert anyway: a lazy-import refactor
     # would leave the import-cached modules' decorators un-run, and this fails
     # loudly instead of registering nothing.
@@ -32,6 +39,7 @@ def register_builtins(registry: type[AgentRegistry]) -> None:
         AgentKind.ANTIGRAVITY,
         AgentKind.OPENCODE,
         AgentKind.PI,
+        AgentKind.DELEGATE,
         AgentKind.NONE,
     ):
         if registry.get(kind) is None:
@@ -43,6 +51,7 @@ __all__ = [
     "AntigravityAgent",
     "ClaudeCodeAgent",
     "CodexAgent",
+    "DelegateAgent",
     "NoOpAgent",
     "OpenCodeAgent",
     "PiAgent",

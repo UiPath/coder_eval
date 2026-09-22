@@ -87,6 +87,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
 | [Pi](agents/PI.md) | Running the Pi agent on open-weight models |
+| [Delegate](agents/DELEGATE.md) | Running UiPath Autopilot's Delegate agent |
 | [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |

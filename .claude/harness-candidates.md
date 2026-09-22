@@ -1009,3 +1009,16 @@ re-derive from scratch.
   f-string placeholders are `Path`s) that an AST-only rule does not have, and the existing
   CLI has many pre-existing unescaped lines a literal rule would flag at once. Caught in:
   Phase 5 quality review.
+- [ ] **A subprocess-driven agent must force-kill before dropping its process handle on
+  EVERY dead-or-dying exit path, not just the obvious ones.** `DelegateAgent`'s
+  `_drain_stdout` signals EOF (posts `None`) on a genuine pipe close AND on a buffer-limit
+  overrun AND on its own unexpected exception — only the first guarantees the host already
+  exited. Two review passes (independently) caught `communicate()`'s EOF/`fatal` branches
+  and `_read_until`'s EOF branch clearing `self._process = None` without confirming the host
+  was dead first, which orphans a still-alive Node host (and its interop child) rather than
+  respawning cleanly. Fixed in all three sites; `kill_sync()` also now clears the handle.
+  Deferred as a lint rule because the pattern ("this branch sets `self._X = None`; was a kill
+  awaited on this path first?") needs control-flow reasoning an AST-only CE0xx rule doesn't
+  have, and it is a recurring class ONLY within one file so far — worth promoting to a rule
+  if a second subprocess-driven agent repeats it. Caught in: final cross-phase review,
+  delegate agent port.

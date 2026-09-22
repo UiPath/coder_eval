@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
 version = "0.12.4"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, Pi) with sandboxed, reproducible YAML task suites."
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, Pi, Delegate) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -9,7 +9,7 @@ authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
 keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
-    "gemini", "antigravity", "opencode", "pi", "sandbox", "code-generation", "agent-evaluation",
+    "gemini", "antigravity", "opencode", "pi", "delegate", "uipath", "sandbox", "code-generation", "agent-evaluation",
     "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
     "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
     "agent-testing", "llmops",
@@ -44,7 +44,7 @@ dependencies = [
     # mirror anthropic's own bound on it (`httpx2<3,>=2.0.0`).
     "httpx2>=2.12.0,<3.0.0",
     "claude-agent-sdk>=0.2.124",
-    "anyio>=4.13.0",
+    "anyio>=4.14.2",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
     "jmespath>=1.1.0",
@@ -83,6 +83,10 @@ dev = [
 # Optional extra that enables UiPath-specific features:
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with
 #     tasks that invoke `uv run uipath eval ...`)
+#   - the Delegate agent's home in the packaging metadata (`agent.type: delegate`).
+#     Like `opencode`/`pi` below, its real prerequisite is a Node package
+#     (`npm install @uipath/delegate-sdk`, genuinely public — no token needed),
+#     so nothing new is added to THIS list; it just shares this extra's name.
 # Without this extra, the framework still installs and runs; UiPath-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 # NOTE: the LLM judge and the prompt `rephrase` mutation route through the

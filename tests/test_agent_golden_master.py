@@ -236,6 +236,10 @@ SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
 _NO_GOLDEN_COVERAGE: dict[AgentKind, str] = {
     AgentKind.NONE: "agentless backend — runs no model, streams nothing",
     AgentKind.UNKNOWN: "sentinel for an undeterminable type — never registered",
+    # SDK event field shapes UNVERIFIED against a live backend; a snapshot built
+    # on guessed names would pin the guess as "correct". See delegate_agent.py.
+    # Rationale: .claude/notes/agents.md § Delegate agent
+    AgentKind.DELEGATE: "field shapes UNVERIFIED against a live backend — see delegate_agent.py",
 }
 
 

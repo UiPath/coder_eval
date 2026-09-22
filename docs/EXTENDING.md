@@ -286,7 +286,8 @@ The base package ships **no** plugin rates; only the built-in table.
 
 - [Claude Code](agents/CLAUDE_CODE.md) · [Codex](agents/CODEX.md) ·
   [Antigravity](agents/ANTIGRAVITY.md) · [OpenCode](agents/OPENCODE.md) ·
-  [Pi](agents/PI.md) — the built-in agents, each registered via this same SPI
+  [Pi](agents/PI.md) · [Delegate](agents/DELEGATE.md) — the built-in agents,
+  each registered via this same SPI
 - [Task Definition Guide](TASK_DEFINITION_GUIDE.md) — the criterion catalogue
 - [CLAUDE.md](https://github.com/UiPath/coder_eval/blob/main/CLAUDE.md) — architecture
   and extension points in depth

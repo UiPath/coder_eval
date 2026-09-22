@@ -39,7 +39,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, token/USD budget caps, tools, plugins, and SDK options. |
 | `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-5`) |
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
-| `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `pi`, or a plugin kind). |
+| `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `pi`, `delegate`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
 | `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
 | `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of in a container of the task's own image (the default); the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
@@ -429,6 +429,7 @@ Set these in `.env` (copy from `.env.example`).
 | `BEDROCK_SMALL_MODEL` | No | Cross-region Bedrock small/fast model ID |
 | `CODEX_API_KEY` / `CODEX_BASE_URL` / `CODEX_MODEL` / `CODEX_API_VERSION` | For Codex | Codex agent auth & endpoint routing — see [Codex Agent Guide](agents/CODEX.md#endpoint-routing). |
 | `GEMINI_API_KEY` / `ANTIGRAVITY_MODEL` | For Antigravity | Antigravity (Gemini) agent auth & model — see [Antigravity Agent Guide](agents/ANTIGRAVITY.md#setup). |
+| `DELEGATE_ENV` / `DELEGATE_BACKEND_URL` / `AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` / `TENANT_SLUG` / `DELEGATE_SDK_NODE_MODULES` / `DELEGATE_SDK_PATH` | For Delegate | Delegate agent backend routing, auth & SDK install location — see [Delegate Agent Guide](agents/DELEGATE.md#setup). |
 | `UIPATH_PLUGIN_MARKETPLACE_DIR` | No | Conventional base directory for local plugins. Not special-cased by the framework: **any** `$VAR` / `${VAR}` referenced in a plugin `path` is expanded from the environment, so a plugin path like `$UIPATH_PLUGIN_MARKETPLACE_DIR/my-plugin` resolves against this variable. (An undefined variable in a plugin path logs a warning.) |
 | `PLUGIN_TOOLS_DIR` | No | A *separate* mechanism from the above: the canonical `node_modules/@uipath` directory used to pin UiPath CLI plugin discovery (not path substitution). When unset, the sandbox auto-derives it from the resolved `uip` binary. |
 | `CODER_EVAL_REMEDIATE_HOME_PLUGINS` | No | **DESTRUCTIVE.** Truthy deletes `$HOME/node_modules/@uipath` at sandbox setup to clear sibling-task pollution on dedicated eval hosts. Off by default; do **not** enable on developer workstations. |

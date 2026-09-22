@@ -47,6 +47,7 @@ AGENT_DISPLAY_NAMES: dict[str, tuple[str, ...]] = {
     "antigravity": ("Antigravity", "Gemini"),
     "opencode": ("OpenCode",),
     "pi": ("Pi",),
+    "delegate": ("Delegate",),
 }
 
 
@@ -75,6 +76,9 @@ ROSTER_SURFACES: tuple[tuple[str, str, Callable[[str], str]], ...] = (
     ("mkdocs.yml", "the docs-site description (search results, link previews)", _mkdocs_site_description),
     (".github/pages-stub/index.html", "the coder-eval.com root stub", _whole_file),
     ("pyproject.toml", "the PyPI description and keywords", _pyproject_marketing_text),
+    ("docs/USER_GUIDE.md", "the --type list and env-var table a user actually configures from", _whole_file),
+    ("experiments/default.yaml", "the always-loaded default layer's agent.type comment", _whole_file),
+    ("docs/EXTENDING.md", "the 'See also' built-in agent list", _whole_file),
 )
 
 
