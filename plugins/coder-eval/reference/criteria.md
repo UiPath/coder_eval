@@ -259,6 +259,36 @@ Binary classifier: did the agent engage the target skill during the run?
 | `expected_skill` | The row's expected skill (after substitution); empty string '' for negatives. |
 | `skill_name` | Only count Skill invocations whose 'skill' parameter matches this name. |
 
+### `system_one_judge`
+
+Grade the task's final state with a System One model instead of a text LLM.
+
+| Field | What it is |
+| --- | --- |
+| `questions` | The rubric: a map of question id to a typed question. Ids are the author's own (they come back on the answers under the same keys) and appear verbatim in ``findings``, so name them for a reader — 'tests_pass', not 'q1'. All questions are answered in ONE request, so a wide rubric costs the same round trip as a narrow one. |
+
+Optional:
+
+| Field | What it is |
+| --- | --- |
+| `enabled` | Master toggle for this criterion. When False no API call is made — the criterion returns a skipped result (score=1.0, details='(skipped: enabled=false)'). Useful for A/B comparisons across experiment variants where the criterion stays in the YAML but does not run under a specific variant. |
+| `prompt` | Optional shared context placed at the head of the state, for framing that would otherwise be repeated in every question's ``instructions`` (what the task was, what 'correct' means here). Unlike ``llm_judge.prompt`` this is NOT the grading instruction — the questions are. |
+| `scoring` | How an answer becomes a value. 'expected' (default) takes the probability-weighted mean over the answer's whole distribution, so a half-confident model lands mid-scale; 'argmax' takes the value of the single top answer, discarding confidence. Use 'argmax' when the rubric is a gate and partial credit would be misleading. |
+| `files` | Paths whose contents go into the state. Plain entries are sandbox-relative; entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host filesystem relative to the task YAML's parent directory. Missing files are rendered as '<file not found>' so the rubric can penalize them. |
+| `include_reference` | When true (default) and task.reference is set, inline the WHOLE reference directory into the state. Silently omitted if no reference is configured. Never shown to the agent. |
+| `include_agent_output` | When true, include the latest agent turn's raw output in the state. |
+| `include_tool_calls` | When true, include a summary of the latest agent turn's tool calls in the state. |
+| `include_dialog` | When true, include the full user<->agent conversation across all turns. In simulation mode the user side is LLM-generated and may invent premises — write the questions so a claim made only by the simulated user does not by itself penalize the agent. |
+| `max_dialog_chars` | Aggregate cap on dialog text placed in the state. Per-message truncation uses max_file_chars; trailing turns are dropped when this budget is exceeded. |
+| `max_file_chars` | Per-file content truncation applied before building the state. |
+| `max_state_chars` | Aggregate cap on the rendered state, applied per section after the per-file caps. The API rejects a request over its own context limit outright, so the default is deliberately well inside it; raise it only alongside a model that accepts more. |
+| `model` | System One model id (default 'jev-latest'). Unlike ``llm_judge`` this never falls back to checker_context.api_route.model — a System One model is not interchangeable with a text model, so the route's judge model would be the wrong default. |
+| `base_url` | API root for the System One endpoint (default 'https://api.typesafe.ai/v1'). Point it at a gateway or a recording proxy without touching the rubric. '/systemone' is appended. |
+| `api_key_env` | NAME of the env var holding the bearer token (default 'TYPESAFE_API_KEY'). Only the name is stored on the criterion and persisted to run records — never the value. |
+| `timeout_seconds` | Per-attempt wall-clock timeout. System One answers in well under a second, so the default is slack for the network, not for the model. |
+| `capture_transcript` | When true, persist a ``JudgeTranscript`` (the raw answers plus the rendered state) to a sibling ``judge-<idx>.yaml`` file next to ``task.json``. Set to false when on-disk size matters. ``findings`` is persisted regardless. |
+| `max_transcript_chars` | Aggregate cap on captured transcript text. Truncation marks it ``truncated=True``. |
+
 ### `uipath_eval`
 
 Check evaluation results against UiPath agent performance.

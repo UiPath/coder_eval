@@ -138,6 +138,9 @@ _PRICING: dict[str, ModelPricing] = {
     "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
     "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
     "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
+    # TypeSafe System One bills input only: it emits probabilities, not tokens.
+    "jev-latest": ModelPricing(0.042, 0.0, 0.042, 0.0),
+    "jev-1.13.0": ModelPricing(0.042, 0.0, 0.042, 0.0),
     # These providers cache prefixes implicitly, so cache-creation is priced at
     # input (unused). HEADLINE rates only: OpenRouter routes per request, so the
     # real bill depends on the provider a call lands on -- which is why the litellm

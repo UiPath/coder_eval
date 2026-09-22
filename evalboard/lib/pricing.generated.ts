@@ -69,6 +69,8 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5.6-luna": { inputPerMTok: 0.2, outputPerMTok: 1.2, cacheWritePerMTok: 0.2, cacheReadPerMTok: 0.02 },
     "gpt-5.6-sol": { inputPerMTok: 4.0, outputPerMTok: 20.0, cacheWritePerMTok: 4.0, cacheReadPerMTok: 0.4 },
     "gpt-5.6-terra": { inputPerMTok: 2.0, outputPerMTok: 12.0, cacheWritePerMTok: 2.0, cacheReadPerMTok: 0.2 },
+    "jev-1.13.0": { inputPerMTok: 0.042, outputPerMTok: 0.0, cacheWritePerMTok: 0.042, cacheReadPerMTok: 0.0 },
+    "jev-latest": { inputPerMTok: 0.042, outputPerMTok: 0.0, cacheWritePerMTok: 0.042, cacheReadPerMTok: 0.0 },
     "kimi-k2-7-code": { inputPerMTok: 0.95, outputPerMTok: 4.0, cacheWritePerMTok: 0.0, cacheReadPerMTok: 0.19 },
     "moonshotai.kimi-k2.5": { inputPerMTok: 0.72, outputPerMTok: 3.6, cacheWritePerMTok: 0.72, cacheReadPerMTok: 0.0 },
     "virtuoso-1-5": { inputPerMTok: 0.95, outputPerMTok: 4.0, cacheWritePerMTok: 0.0, cacheReadPerMTok: 0.16 },

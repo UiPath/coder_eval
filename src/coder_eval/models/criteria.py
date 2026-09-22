@@ -24,8 +24,14 @@ from coder_eval.models.cli_match import (
     verb_spellings_of,
 )
 from coder_eval.models.enums import AgentKind
-from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
+from coder_eval.models.judge_defaults import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_SYSTEM_ONE_API_KEY_ENV,
+    DEFAULT_SYSTEM_ONE_BASE_URL,
+    DEFAULT_SYSTEM_ONE_MODEL,
+)
 from coder_eval.models.sandbox import RECORD_CLI_LOG
+from coder_eval.models.system_one import SystemOneQuestion
 
 
 # SECURITY: the judge's ignore_patterns FLOOR, enforced unconditionally in
@@ -1367,6 +1373,176 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         return _reject_removed_verdict_channel(data)
 
 
+class SystemOneJudgeCriterion(BaseSuccessCriterion):
+    """Grade the task's final state with a System One model instead of a text LLM.
+
+    A System One model (TypeSafe's ``jev``) never generates text. It reads one
+    state and answers the map of typed questions under ``questions`` — ``noul``,
+    ``choice``, ``score`` — with calibrated probabilities, in one round trip.
+
+    The 0..1 score is computed here, not by the model: each question resolves to
+    a value in [0.0, 1.0] via its own ``expected`` / ``values``, and the score is
+    their weighted mean, deterministic given the answers and itemized in
+    ``findings``.
+
+    Continuous scoring. Transport failure escalates (eval infrastructure, not
+    agent quality); a question left unanswered or answered with the wrong
+    primitive scores 0.0 at full weight and is named in ``findings``.
+
+    Rationale: .claude/notes/contracts.md § System One rubric scoring
+    """
+
+    # Strict YAML-key validation: a typo becomes a load-time error rather than a
+    # silently misconfigured rubric.
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["system_one_judge"] = "system_one_judge"
+
+    # Overrides the 0.9 default, which is calibrated for binary checks. A rubric
+    # mean over calibrated probabilities rarely reaches 1.0 even for a clean solution.
+    pass_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass (default 0.7).")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master toggle for this criterion. When False no API call is made — the criterion "
+            "returns a skipped result (score=1.0, details='(skipped: enabled=false)'). Useful for "
+            "A/B comparisons across experiment variants where the criterion stays in the YAML but "
+            "does not run under a specific variant."
+        ),
+    )
+    questions: dict[str, SystemOneQuestion] = Field(
+        description=(
+            "The rubric: a map of question id to a typed question. Ids are the author's own "
+            "(they come back on the answers under the same keys) and appear verbatim in "
+            "``findings``, so name them for a reader — 'tests_pass', not 'q1'. All questions "
+            "are answered in ONE request, so a wide rubric costs the same round trip as a narrow one."
+        ),
+    )
+    prompt: str = Field(
+        default="",
+        description=(
+            "Optional shared context placed at the head of the state, for framing that would "
+            "otherwise be repeated in every question's ``instructions`` (what the task was, what "
+            "'correct' means here). Unlike ``llm_judge.prompt`` this is NOT the grading "
+            "instruction — the questions are."
+        ),
+    )
+    scoring: Literal["expected", "argmax"] = Field(
+        default="expected",
+        description=(
+            "How an answer becomes a value. 'expected' (default) takes the probability-weighted "
+            "mean over the answer's whole distribution, so a half-confident model lands mid-scale; "
+            "'argmax' takes the value of the single top answer, discarding confidence. Use "
+            "'argmax' when the rubric is a gate and partial credit would be misleading."
+        ),
+    )
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths whose contents go into the state. Plain entries are sandbox-relative; entries "
+            "prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host filesystem "
+            "relative to the task YAML's parent directory. Missing files are rendered as "
+            "'<file not found>' so the rubric can penalize them."
+        ),
+    )
+    include_reference: bool = Field(
+        default=True,
+        description=(
+            "When true (default) and task.reference is set, inline the WHOLE reference directory "
+            "into the state. Silently omitted if no reference is configured. Never shown to the agent."
+        ),
+    )
+    include_agent_output: bool = Field(
+        default=False,
+        description="When true, include the latest agent turn's raw output in the state.",
+    )
+    include_tool_calls: bool = Field(
+        default=False,
+        description="When true, include a summary of the latest agent turn's tool calls in the state.",
+    )
+    include_dialog: bool = Field(
+        default=False,
+        description=(
+            "When true, include the full user<->agent conversation across all turns. In simulation "
+            "mode the user side is LLM-generated and may invent premises — write the questions so a "
+            "claim made only by the simulated user does not by itself penalize the agent."
+        ),
+    )
+    max_dialog_chars: int = Field(
+        default=80_000,
+        gt=0,
+        description=(
+            "Aggregate cap on dialog text placed in the state. Per-message truncation uses "
+            "max_file_chars; trailing turns are dropped when this budget is exceeded."
+        ),
+    )
+    max_file_chars: int = Field(
+        default=20_000,
+        gt=0,
+        description="Per-file content truncation applied before building the state.",
+    )
+    max_state_chars: int = Field(
+        default=100_000,
+        gt=0,
+        description=(
+            "Aggregate cap on the rendered state, applied per section after the per-file caps. "
+            "The API rejects a request over its own context limit outright, so the default is "
+            "deliberately well inside it; raise it only alongside a model that accepts more."
+        ),
+    )
+    model: str = Field(
+        default=DEFAULT_SYSTEM_ONE_MODEL,
+        description=(
+            f"System One model id (default {DEFAULT_SYSTEM_ONE_MODEL!r}). Unlike ``llm_judge`` this "
+            "never falls back to checker_context.api_route.model — a System One model is not "
+            "interchangeable with a text model, so the route's judge model would be the wrong default."
+        ),
+    )
+    base_url: str = Field(
+        default=DEFAULT_SYSTEM_ONE_BASE_URL,
+        description=(
+            f"API root for the System One endpoint (default {DEFAULT_SYSTEM_ONE_BASE_URL!r}). "
+            "Point it at a gateway or a recording proxy without touching the rubric. "
+            "'/systemone' is appended."
+        ),
+    )
+    api_key_env: str = Field(
+        default=DEFAULT_SYSTEM_ONE_API_KEY_ENV,
+        description=(
+            f"NAME of the env var holding the bearer token (default {DEFAULT_SYSTEM_ONE_API_KEY_ENV!r}). "
+            "Only the name is stored on the criterion and persisted to run records — never the value."
+        ),
+    )
+    timeout_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        description=(
+            "Per-attempt wall-clock timeout. System One answers in well under a second, so the "
+            "default is slack for the network, not for the model."
+        ),
+    )
+    capture_transcript: bool = Field(
+        default=True,
+        description=(
+            "When true, persist a ``JudgeTranscript`` (the raw answers plus the rendered state) to "
+            "a sibling ``judge-<idx>.yaml`` file next to ``task.json``. Set to false when on-disk "
+            "size matters. ``findings`` is persisted regardless."
+        ),
+    )
+    max_transcript_chars: int = Field(
+        default=100_000,
+        gt=0,
+        description="Aggregate cap on captured transcript text. Truncation marks it ``truncated=True``.",
+    )
+
+    @model_validator(mode="after")
+    def _check_rubric(self) -> Self:
+        if not self.questions:
+            raise ValueError("system_one_judge needs at least one entry in 'questions'")
+        return self
+
+
 # The `type` tag is REQUIRED in dict/YAML input: a missing or unknown tag raises one
 # crisp discriminator error instead of smart-union coercion across every variant. The
 # per-variant Literal defaults remain, so direct construction and model_dump() are
@@ -1386,6 +1562,7 @@ SuccessCriterion = Annotated[
     | ClassificationMatchCriterion
     | SkillTriggeredCriterion
     | LLMJudgeCriterion
-    | AgentJudgeCriterion,
+    | AgentJudgeCriterion
+    | SystemOneJudgeCriterion,
     Field(discriminator="type"),
 ]
