@@ -12,10 +12,9 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, with a harness backstop if the CLI starts call N+1 | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call runs from its first `thinking` or `message` event to its tool results |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call runs from its first `thinking` or `message` event to its tool results |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| token and USD budgets | stop mid-turn, checked per API call | checked when the turn ends | checked when the turn ends | stop mid-turn, checked per step | stop mid-turn, checked per step | checked when the turn ends |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
 
 ## Timing capture
@@ -551,9 +550,8 @@ reports it.
 
 Each harness finds the call boundary in its own stream (the table above):
 
-- **claude-code** applies the cap in the CLI. The CLI does not apply it on every
-  route, so the harness also counts main-thread `message_id`s and ends the turn when
-  the CLI starts call N+1, which a working CLI never makes.
+- **claude-code** applies the cap in the CLI, and the harness reads the CLI's
+  `error_max_turns` stop.
 - **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
   tools finish. An item starts as its tool runs, so waiting for the next call's
   first item would let one tool of call N+1 act. A call that ran tools therefore
@@ -567,10 +565,10 @@ Each harness finds the call boundary in its own stream (the table above):
   more `message` events, so the harness counts a call from its first such event to
   its tool results. That is the same count as the SDK's own internal `stepCount`.
 
-Every harness except a working claude-code CLI enforces the cap on the same loop
-boundary as the cooperative early stop, then kills or cancels the in-flight turn so
-the cap stops spend. A run cut this way finalizes cleanly as `max_turns_exhausted`.
-It is not a crash, and it is not retried.
+Every harness except claude-code enforces the cap on the same loop boundary as the
+cooperative early stop, then kills or cancels the in-flight turn so the cap stops
+spend. A run cut this way finalizes cleanly as `max_turns_exhausted`. It is not a
+crash, and it is not retried.
 
 One call can carry several parallel tool calls, so `max_turns` bounds model calls,
 not tool calls. A model that batches does more work per turn, on every harness

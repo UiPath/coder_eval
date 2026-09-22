@@ -52,30 +52,30 @@ vi.mock("../overview", async () => {
 const { aggregate, historyForTaskInner } = await import("../trends");
 const { loadRecentRuns } = await import("../overview");
 
-describe("aggregate — avgVisibleTurns", () => {
+describe("aggregate — avgTotalTurns", () => {
     test("averages SUCCESS rows only and excludes failures", () => {
         const { trends } = aggregate([
-            perRun("r3", [task({ status: "SUCCESS", visibleTurns: 6 })]),
-            perRun("r2", [task({ status: "SUCCESS", visibleTurns: 8 })]),
-            perRun("r1", [task({ status: "FAILED", visibleTurns: 100 })]),
+            perRun("r3", [task({ status: "SUCCESS", totalTurns: 6 })]),
+            perRun("r2", [task({ status: "SUCCESS", totalTurns: 8 })]),
+            perRun("r1", [task({ status: "FAILED", totalTurns: 100 })]),
         ]);
         expect(trends).toHaveLength(1);
-        expect(trends[0].avgVisibleTurns).toBe(7);
+        expect(trends[0].avgTotalTurns).toBe(7);
     });
 
-    test("returns null when no SUCCESS rows have visible turns", () => {
+    test("returns null when no SUCCESS rows have total_turns", () => {
         const { trends } = aggregate([
-            perRun("r1", [task({ status: "FAILED", visibleTurns: 100 })]),
+            perRun("r1", [task({ status: "FAILED", totalTurns: 100 })]),
         ]);
-        expect(trends[0].avgVisibleTurns).toBeNull();
+        expect(trends[0].avgTotalTurns).toBeNull();
     });
 
-    test("legacy rows with null visibleTurns contribute nothing", () => {
+    test("legacy rows with null totalTurns contribute nothing", () => {
         const { trends } = aggregate([
-            perRun("r1", [task({ status: "SUCCESS", visibleTurns: null })]),
-            perRun("r2", [task({ status: "SUCCESS", visibleTurns: 4 })]),
+            perRun("r1", [task({ status: "SUCCESS", totalTurns: null })]),
+            perRun("r2", [task({ status: "SUCCESS", totalTurns: 4 })]),
         ]);
-        expect(trends[0].avgVisibleTurns).toBe(4);
+        expect(trends[0].avgTotalTurns).toBe(4);
     });
 });
 
@@ -87,7 +87,7 @@ describe("aggregate — mature-skipped rows", () => {
                     status: "SUCCESS",
                     totalCostUsd: 1.0,
                     durationSeconds: 100,
-                    visibleTurns: 6,
+                    totalTurns: 6,
                 }),
             ]),
             // Skipped this run: carried-forward pass with 0 cost / 0 duration
@@ -98,7 +98,7 @@ describe("aggregate — mature-skipped rows", () => {
                     matureSkipped: true,
                     totalCostUsd: 0,
                     durationSeconds: 0,
-                    visibleTurns: null,
+                    totalTurns: null,
                 }),
             ]),
         ]);
@@ -110,7 +110,7 @@ describe("aggregate — mature-skipped rows", () => {
         // Averages reflect only the executed run, not the carried-forward zero.
         expect(trends[0].avgCostUsd).toBe(1.0);
         expect(trends[0].avgDurationSeconds).toBe(100);
-        expect(trends[0].avgVisibleTurns).toBe(6);
+        expect(trends[0].avgTotalTurns).toBe(6);
         // The skip is tallied and flagged per-run so the view can surface it.
         expect(trends[0].matureSkips).toBe(1);
         expect(

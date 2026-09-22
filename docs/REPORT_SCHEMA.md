@@ -336,7 +336,7 @@ crash, timeout, or budget breach under `execute` reports `ERROR` / `TIMEOUT` /
 
 `TOKEN_BUDGET_EXCEEDED` and `COST_BUDGET_EXCEEDED` are produced by the cumulative budget caps under
 `run_limits:` (`max_input_tokens` / `max_output_tokens` / `max_total_tokens`, and `max_usd`
-respectively), checked while each agent turn runs — see
+respectively), checked after each completed agent turn — see
 [Task Definition Guide → Run Limits](TASK_DEFINITION_GUIDE.md#run-limits).
 
 ---

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class BudgetExceededError(Exception):
-    """Raised when a RunLimits budget is exceeded.
+    """Raised when a RunLimits budget is exceeded between agent turns.
 
     Carries which budget tripped and the over-budget value so the
     orchestrator can record the status reason without re-computing.

@@ -215,7 +215,7 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
                 outcomes++;
                 taskIds.add(t.taskId);
                 if (isPass(t.status)) passes++;
-                const r = turnRatio(t.visibleTurns, t.expectedTurns);
+                const r = turnRatio(t.totalTurns, t.expectedTurns);
                 if (r != null) ratios.push(r);
             }
         }
@@ -369,10 +369,10 @@ export function turnOverage(runs: LoadedRun[]): TurnOverageRow[] {
     for (const run of runs) {
         for (const t of run.tasks) {
             if (!t.skill) continue;
-            const r = turnRatio(t.visibleTurns, t.expectedTurns);
+            const r = turnRatio(t.totalTurns, t.expectedTurns);
             if (r == null) continue;
             push(ratios, t.skill, r);
-            push(turns, t.skill, t.visibleTurns!);
+            push(turns, t.skill, t.totalTurns!);
             push(expected, t.skill, t.expectedTurns!);
         }
     }

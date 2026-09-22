@@ -223,8 +223,6 @@ class _ClaudeTurnState:
         # Set True by the in-loop cooperative-stop break (early-stop-on-criterion).
         # Distinct from timeout_hit: a clean, non-crash stop that must NOT raise.
         self.stopped_early_hit = False
-        self.max_turns_hit = False
-        self.main_turn_ids: set[str] = set()
         # Resolved by _build_claude_query, set on the state before any finalize
         # path. Stays None if we crash before setup (finalize reads it for cost
         # backfill).
@@ -412,8 +410,6 @@ class _ClaudeTurnState:
         if isinstance(message_id, str):
             self.seen_message_ids.add(message_id)
             self.last_message_had_id = True
-            if not isinstance(parent_tool_use_id, str):
-                self.main_turn_ids.add(message_id)
         else:
             self.last_message_had_id = False
 
@@ -639,7 +635,6 @@ class _ClaudeTurnState:
         max_turns_exhausted = not crashed and (
             self._agent._is_max_turns_result(self.sdk_result_summary)
             or (self.max_turns is not None and self.num_turns is not None and self.num_turns > self.max_turns)
-            or self.max_turns_hit
         )
         if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
             status = AgentEndStatus.MAX_TURNS_EXHAUSTED
@@ -1121,13 +1116,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         ruff's statement cap. ``query`` is still resolved as a module global at
         call time, so ``patch("...claude_code_agent.query", ...)`` mocks work.
 
-        Three break conditions, and the ORDER MATTERS:
+        Two break conditions, and the ORDER MATTERS:
 
         - The wall-clock guard runs at the TOP, so an over-deadline message is
           DISCARDED — no append, no events. Do NOT move it to a post-loop check.
-        - The max_turns backstop and the cooperative stop run AFTER
-          ``state.dispatch(message)``, so the message that trips them is recorded
-          and the next is never pulled.
+        - The cooperative stop runs AFTER ``state.dispatch(message)``, so a watcher
+          can flip its flag on THIS message and the next is never pulled.
         """
         async for message in query(**query_kwargs):
             if deadline is not None and time.monotonic() > deadline:
@@ -1135,15 +1129,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
                 break
             state.dispatch(message)
-            # The CLI stops after max_turns main-thread API calls; one more means it ignored the cap.
-            if state.max_turns is not None and len(state.main_turn_ids) > state.max_turns:
-                state.max_turns_hit = True
-                state.num_turns = len(state.main_turn_ids)
-                self._log.warning(
-                    "CLI began API call %d past max_turns=%d; ending the turn", state.num_turns, state.max_turns
-                )
-                self._kill_transport(self._active_transport)
-                break
             if should_stop is not None and should_stop():
                 state.stopped_early_hit = True
                 self._log.debug("Cooperative stop requested; ending message loop at this boundary")

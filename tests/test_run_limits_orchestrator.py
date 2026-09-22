@@ -25,7 +25,6 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.orchestration.live_budget import LiveBudget
 from coder_eval.orchestrator import Orchestrator
 
 
@@ -191,16 +190,6 @@ class TestCheckRunLimitsUnit:
         orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
         with pytest.raises(BudgetExceededError):
             orch._check_run_limits(iteration=2)
-
-    def test_live_breach_raises_when_the_recorded_turn_is_under_budget(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(output_tokens=900))
-        orch._live_budget = LiveBudget(RunLimits(max_output_tokens=1000), list)
-        orch._live_budget.breach = ("output_tokens", 1_100, 1_000)
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "output_tokens"
-        assert exc.value.actual == 1_100
 
 
 async def _run_orchestrator(

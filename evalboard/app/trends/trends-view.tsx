@@ -129,7 +129,11 @@ function sortTasks(
                 v = cmpNullable(a.avgCostUsd, b.avgCostUsd, dir);
                 break;
             case "avgTurns":
-                v = cmpNullable(a.avgVisibleTurns, b.avgVisibleTurns, dir);
+                v = cmpNullable(
+                    a.avgTotalTurns ?? a.avgActualCommands,
+                    b.avgTotalTurns ?? b.avgActualCommands,
+                    dir,
+                );
                 break;
         }
         if (v !== 0) return v;
@@ -341,10 +345,7 @@ function HistoryTable({
                                         : `font-medium ${turnsCellClasses(
                                               tintForRatio(
                                                   turnRatio(
-                                                      displayedTurns(
-                                                          e.actualCommands,
-                                                          e.hasFinalReply,
-                                                      ),
+                                                      e.totalTurns,
                                                       e.expectedTurns,
                                                   ),
                                               ),
@@ -503,7 +504,7 @@ function TaskRow({
                     {fmtUsd(t.avgCostUsd)}
                 </td>
                 <td className="num-cell">
-                    {fmtCount(t.avgVisibleTurns)}
+                    {fmtCount(t.avgTotalTurns ?? t.avgActualCommands)}
                 </td>
                 <td className="py-2 px-2 text-xs text-gray-400">
                     {expanded ? "▾" : "▸"}
