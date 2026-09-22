@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) | message-event cap (forwarded `message`-type SDK events, NOT tool calls or backend round-trips — the host exposes no round-trip boundary) |
+| `run_limits.max_turns` | native SDK cap (agent-loop turns), with a harness backstop if the CLI starts one more API call | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) | message-event cap (forwarded `message`-type SDK events, NOT tool calls or backend round-trips — the host exposes no round-trip boundary) |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -559,7 +559,9 @@ the cap actually stops spend. A run cut this way finalizes cleanly as
 `max_turns_exhausted` — it is not a crash, and it is not retried.
 
 **claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
-left alone rather than reimplemented in a different unit. Its unit is the SDK's own
+left alone rather than reimplemented in a different unit. The CLI does not apply it on
+every route, so the harness also counts main-thread API calls and ends the turn when
+the CLI starts call N+1, which a working CLI never makes. Its unit is the SDK's own
 agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so the
 same number bounds very different amounts of work: under a prompt that encourages
 batching, a cap of N here permits many more than N tool calls, where it buys exactly
