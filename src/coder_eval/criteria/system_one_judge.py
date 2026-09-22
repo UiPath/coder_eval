@@ -1,5 +1,7 @@
 """System-One-as-a-judge success criterion checker."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -41,9 +43,9 @@ class SystemOneJudgeChecker(BaseCriterion[SystemOneJudgeCriterion]):
     async def _check_impl_async(
         self,
         criterion: SystemOneJudgeCriterion,
-        sandbox: "Sandbox",
+        sandbox: Sandbox,
         *,
-        turn_records: "list[TurnRecord] | None" = None,
+        turn_records: list[TurnRecord] | None = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
         ctx = context or CheckContext()
