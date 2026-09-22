@@ -19,8 +19,8 @@ class RunLimits(BaseModel):
     """Run-time caps that abort a task when exceeded.
 
     Unifies structural caps (max_turns, task_timeout, turn_timeout) and
-    budget caps (tokens, USD). Budget caps are checked after each completed
-    agent turn and are cumulative across all turns of a single task; they
+    budget caps (tokens, USD). Budget caps are checked as each agent turn
+    streams usage and are cumulative across all turns of a single task; they
     apply to the subject agent only — judge and simulator token spend are
     not counted.
 

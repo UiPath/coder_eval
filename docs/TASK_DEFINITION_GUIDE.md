@@ -278,9 +278,12 @@ model.
 
 **Budget-cap semantics:**
 
-- **Checked after each completed agent turn**, and **cumulative** across all of the task's turns.
-  There is no mid-turn enforcement, so a single runaway turn can overshoot the cap before the
-  between-turns check sees it. Size caps with headroom for one turn.
+- **Checked while the turn runs**, and **cumulative** across all of the task's turns. On harnesses
+  that stream per-call usage (claude-code, opencode, pi) a breach stops the turn at the next call.
+  Codex, Antigravity and Delegate report usage once per turn, so there a runaway turn can overshoot
+  the cap before the check sees it. Size caps with headroom for one turn on those harnesses. A cost
+  that the harness does not report mid-turn is priced from the rate card; an unpriced model is
+  checked only when the turn ends.
 - **Subject agent only.** Judge (`llm_judge` / `agent_judge`) and user-simulator token spend are
   **not** counted against these caps.
 - A breach aborts the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED` (any of the three token caps) or

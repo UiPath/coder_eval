@@ -67,6 +67,7 @@ from .models import (
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.live_budget import LiveBudget, budget_breach
 from .orchestration.run_limits import validate_run_limits
 from .path_utils import (
     TASK_JSON_FILENAME,
@@ -483,6 +484,7 @@ class Orchestrator:
         # Created in _setup only when armed; None otherwise, so the default path
         # is entirely unaffected.
         self._early_stop_watcher: EarlyStopWatcher | None = None
+        self._live_budget = LiveBudget.for_limits(task.run_limits, self._completed_usages)
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -1177,73 +1179,40 @@ class Orchestrator:
 
         write_task_html(self.result, self.html_report_path)
 
+    def _completed_usages(self) -> list[TokenUsage]:
+        assert self.result is not None
+        return [t.token_usage for t in self.result.iterations if t.token_usage is not None]
+
     def _check_run_limits(self, *, iteration: int) -> None:
         """Raise BudgetExceededError if any RunLimits budget is exceeded.
 
-        Called after each completed turn. Aggregates across self.result.iterations.
-        No-op when self.task.run_limits is None.
+        Called after each completed turn. Aggregates across self.result.iterations, and
+        also raises the breach the live budget stopped a turn on. No-op when
+        self.task.run_limits is None.
         """
-        assert self.result is not None
         limits = self.task.run_limits
         if limits is None:
             return
 
-        usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
-        if not usages:
-            return
+        usages = self._completed_usages()
+        breach = budget_breach(usages, limits)
+        if breach is None and self._live_budget is not None:
+            breach = self._live_budget.breach
+        if breach is not None:
+            name, actual, limit = breach
+            raise BudgetExceededError(name, actual=actual, limit=limit, task_id=self.task.task_id, iteration=iteration)
 
-        input_tokens = sum(u.uncached_input_tokens for u in usages)
-        if limits.count_cache_creation:
-            input_tokens += sum(u.cache_creation_input_tokens for u in usages)
-        if limits.count_cached_input:
-            input_tokens += sum(u.cache_read_input_tokens for u in usages)
-        output_tokens = sum(u.output_tokens for u in usages)
-        total_tokens = input_tokens + output_tokens
-
-        if limits.max_input_tokens is not None and input_tokens > limits.max_input_tokens:
-            raise BudgetExceededError(
-                "input_tokens",
-                actual=input_tokens,
-                limit=limits.max_input_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
+        if (
+            limits.max_usd is not None
+            and usages
+            and all(u.total_cost_usd is None for u in usages)
+            and not self._cost_budget_skipped_logged
+        ):
+            logger.warning(
+                "[%s] max_usd budget configured but no turn reported cost; skipping cost check",
+                self.task.task_id,
             )
-        if limits.max_output_tokens is not None and output_tokens > limits.max_output_tokens:
-            raise BudgetExceededError(
-                "output_tokens",
-                actual=output_tokens,
-                limit=limits.max_output_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-        if limits.max_total_tokens is not None and total_tokens > limits.max_total_tokens:
-            raise BudgetExceededError(
-                "total_tokens",
-                actual=total_tokens,
-                limit=limits.max_total_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-
-        if limits.max_usd is not None:
-            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
-            if not costs:
-                if not self._cost_budget_skipped_logged:
-                    logger.warning(
-                        "[%s] max_usd budget configured but no turn reported cost; skipping cost check",
-                        self.task.task_id,
-                    )
-                    self._cost_budget_skipped_logged = True
-                return
-            total_cost = sum(costs)
-            if total_cost > limits.max_usd:
-                raise BudgetExceededError(
-                    "usd",
-                    actual=total_cost,
-                    limit=limits.max_usd,
-                    task_id=self.task.task_id,
-                    iteration=iteration,
-                )
+            self._cost_budget_skipped_logged = True
 
     def _check_expected_turns(self, *, iteration: int) -> None:
         """Emit a one-shot warning if visible turns exceed expected_turns.
@@ -1939,10 +1908,16 @@ class Orchestrator:
         # TaskScopedCallback. The same instance persists across retry attempts, so
         # its counters and wall-clock origin accumulate.
         watcher = self._early_stop_watcher
-        if watcher is not None:
-            agent_callback = (
-                CompositeStreamCallback([watcher, agent_callback]) if agent_callback is not None else watcher
-            )
+        live_budget = self._live_budget if self._live_budget is not None and agent.supports_cooperative_stop else None
+        monitors = [m for m in (watcher, live_budget) if m is not None]
+        if monitors:
+            callbacks: list[StreamCallback] = [*monitors]
+            if agent_callback is not None:
+                callbacks.append(agent_callback)
+            agent_callback = CompositeStreamCallback(callbacks)
+
+        def _should_stop() -> bool:
+            return any(m.should_stop() for m in monitors)
 
         def _drain_pending_turn(*, attempt: int) -> None:
             """Read agent.pending_turn and, if set, append it to result.iterations."""
@@ -1987,7 +1962,7 @@ class Orchestrator:
                 stream_callback=agent_callback,
                 timeout=turn_timeout,
                 max_turns=max_turns,
-                should_stop=watcher.should_stop if watcher is not None else None,
+                should_stop=_should_stop if monitors else None,
             )
             if turn_timeout is None:
                 return await coro
