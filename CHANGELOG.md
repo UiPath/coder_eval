@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v0.12.5 (2026-09-22)
+
+### Bug Fixes
+
+- **agents**: Address PR #191 code review findings on the Delegate agent
+  ([#191](https://github.com/UiPath/coder_eval/pull/191),
+  [`b5d8ba8`](https://github.com/UiPath/coder_eval/commit/b5d8ba8b9cecbb7847628d7d2ef88612a10aed73))
+
+- **agents**: Delegate token usage was silently zero on every live turn
+  ([#191](https://github.com/UiPath/coder_eval/pull/191),
+  [`b5d8ba8`](https://github.com/UiPath/coder_eval/commit/b5d8ba8b9cecbb7847628d7d2ef88612a10aed73))
+
+- **criteria**: Close scoring-integrity and credential-disclosure gaps in system_one_judge
+  ([#192](https://github.com/UiPath/coder_eval/pull/192),
+  [`f3db499`](https://github.com/UiPath/coder_eval/commit/f3db4997e042d969494e6eaaf7bcb7da1c039b26))
+
+### Code Style
+
+- **criteria**: Use deferred annotations in system_one_judge so the TYPE_CHECKING import reads as
+  used ([#192](https://github.com/UiPath/coder_eval/pull/192),
+  [`f3db499`](https://github.com/UiPath/coder_eval/commit/f3db4997e042d969494e6eaaf7bcb7da1c039b26))
+
+### Features
+
+- **agents**: Port the Delegate agent as a built-in
+  ([#191](https://github.com/UiPath/coder_eval/pull/191),
+  [`b5d8ba8`](https://github.com/UiPath/coder_eval/commit/b5d8ba8b9cecbb7847628d7d2ef88612a10aed73))
+
+- **agents**: Port the Delegate agent from coder_eval_uipath as a built-in
+  ([#191](https://github.com/UiPath/coder_eval/pull/191),
+  [`b5d8ba8`](https://github.com/UiPath/coder_eval/commit/b5d8ba8b9cecbb7847628d7d2ef88612a10aed73))
+
+- **criteria**: Add system_one_judge, a typed-rubric grader on a System One model
+  ([#192](https://github.com/UiPath/coder_eval/pull/192),
+  [`f3db499`](https://github.com/UiPath/coder_eval/commit/f3db4997e042d969494e6eaaf7bcb7da1c039b26))
+
+
 ## v0.12.4 (2026-09-18)
 
 ### Bug Fixes
