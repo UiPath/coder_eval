@@ -16,6 +16,7 @@ from coder_eval.models.criteria import (
     ReferenceComparisonCriterion,
     RunCommandCriterion,
     SuccessCriterion,
+    SystemOneJudgeCriterion,
 )
 from coder_eval.models.enums import AgentKind, ApiBackend
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
@@ -708,7 +709,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             # otherwise turn this load-time guard into a no-op pyright cannot see.
             if isinstance(c, ReferenceComparisonCriterion):
                 offenders.append(f"{c.type} (needs a reference to compare against)")
-            elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and any(
+            elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion | SystemOneJudgeCriterion) and any(
                 path_uses_token(f, REFERENCE_DIR_TOKEN) for f in c.files
             ):
                 offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")

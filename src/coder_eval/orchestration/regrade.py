@@ -208,6 +208,7 @@ def embedded_commands(
         LLMJudgeCriterion,
         RepoSource,
         RunCommandCriterion,
+        SystemOneJudgeCriterion,
         UiPathEvalCriterion,
     )
 
@@ -223,6 +224,12 @@ def embedded_commands(
             # No shell, but it spends the grader's budget and ships the graded
             # artifacts to a provider the recorded config chose.
             commands.append(f"<llm_judge: sends artifacts to {c.model} on your credentials>")
+        elif isinstance(c, SystemOneJudgeCriterion):
+            # BOTH halves are recorded, free-form strings: the record picks the
+            # URL *and* which host env var is read into the Bearer header, so an
+            # undisclosed regrade would exfiltrate a secret to an attacker's host.
+            bearer = f"${c.api_key_env} as a bearer token"
+            commands.append(f"<system_one_judge: sends artifacts to {c.base_url} with {bearer} on your credentials>")
         elif isinstance(c, UiPathEvalCriterion):
             # Every argument is shlex-quoted, so this is disclosure rather than
             # injection — but still a subprocess the record chose to start.

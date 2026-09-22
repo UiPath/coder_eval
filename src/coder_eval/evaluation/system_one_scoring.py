@@ -17,8 +17,9 @@ Rationale: .claude/notes/contracts.md § System One rubric scoring
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 from coder_eval.models import (
     ChoiceQuestion,
@@ -50,26 +51,43 @@ def build_questions_payload(questions: Mapping[str, SystemOneQuestion]) -> dict[
     return payload
 
 
+def _is_number(value: Any) -> TypeGuard[int | float]:
+    """A usable numeric wire value: not a bool, and FINITE.
+
+    ``json.loads`` accepts the ``NaN`` / ``Infinity`` tokens, so a non-finite
+    float reaches us through an ordinary 200 response. It has to be rejected
+    here rather than at the clamp: NaN is unordered, so ``min(1.0, nan)`` is
+    ``1.0`` and a malformed answer would grade as full credit.
+    """
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _expected_value(probabilities: Mapping[str, Any], values: Mapping[str, float]) -> float | None:
     """Probability-weighted mean of ``values`` over ``probabilities``.
 
-    Returns ``None`` when the distribution is unusable (absent, non-numeric, or
-    summing to zero) so the caller can fall back to the point answer instead of
-    silently grading a broken payload as 0.0.
+    Returns ``None`` when the distribution is unusable (absent, non-numeric,
+    non-finite, or summing to zero) so the caller can fall back to the point
+    answer instead of silently grading a broken payload.
     """
     total = 0.0
     weighted = 0.0
     for key, raw in probabilities.items():
-        if not isinstance(raw, int | float) or isinstance(raw, bool):
+        if not _is_number(raw):
             return None
         total += float(raw)
         weighted += float(raw) * values.get(key, 0.0)
-    if total <= 0.0:
+    if total <= 0.0 or not math.isfinite(total) or not math.isfinite(weighted):
         return None
     return weighted / total
 
 
 def _clamp(value: float) -> float:
+    """Clamp into [0.0, 1.0], mapping a non-finite value to NO credit.
+
+    Rationale: .claude/notes/contracts.md § System One rubric scoring
+    """
+    if not math.isfinite(value):
+        return 0.0
     return max(0.0, min(1.0, value))
 
 
@@ -79,11 +97,13 @@ class _QuestionError(Exception):
 
 def _resolve_noul(question: NoulQuestion, answer: Mapping[str, Any], mode: ScoringMode) -> tuple[float, str]:
     raw = answer.get("noul")
-    if not isinstance(raw, int | float) or isinstance(raw, bool):
-        raise _QuestionError(f"expected a numeric 'noul', got {raw!r}")
+    if not _is_number(raw):
+        raise _QuestionError(f"expected a finite numeric 'noul', got {raw!r}")
     probability = _clamp(float(raw))
     agreement = probability if question.expected else 1.0 - probability
-    value = float(agreement >= 0.5) if mode == "argmax" else agreement
+    # Strictly greater: at P(yes)=0.5 agreement is 0.5 whichever way `expected`
+    # points, so `>=` would pass a maximally uncertain answer in both directions.
+    value = float(agreement > 0.5) if mode == "argmax" else agreement
     detail = f"P(yes)={probability:.2f}, expected={str(question.expected).lower()}"
     return value, detail
 
@@ -102,15 +122,15 @@ def _resolve_choice(question: ChoiceQuestion, answer: Mapping[str, Any], mode: S
     if value is None:
         value = values.get(chosen, 0.0)
     detail = f"choice={chosen!r}"
-    if isinstance(confidence, int | float) and not isinstance(confidence, bool):
+    if _is_number(confidence):
         detail += f" (confidence {float(confidence):.2f})"
     return _clamp(value), detail
 
 
 def _resolve_score(question: ScoreQuestion, answer: Mapping[str, Any], mode: ScoringMode) -> tuple[float, str]:
     raw = answer.get("score")
-    if not isinstance(raw, int | float) or isinstance(raw, bool):
-        raise _QuestionError(f"expected a numeric 'score', got {raw!r}")
+    if not _is_number(raw):
+        raise _QuestionError(f"expected a finite numeric 'score', got {raw!r}")
     levels = question.level_values()
     last = len(levels) - 1
     position = max(0.0, min(float(last), float(raw)))
@@ -125,7 +145,7 @@ def _resolve_score(question: ScoreQuestion, answer: Mapping[str, Any], mode: Sco
         value = levels[round(position)]
     detail = f"score={position:.2f}/{last}"
     confidence = answer.get("confidence")
-    if isinstance(confidence, int | float) and not isinstance(confidence, bool):
+    if _is_number(confidence):
         detail += f" (confidence {float(confidence):.2f})"
     return _clamp(value), detail
 
@@ -172,7 +192,8 @@ def reduce_answers(
         weighted_total += value * question.weight
         weight_total += question.weight
 
-    score = weighted_total / weight_total if weight_total > 0.0 else 0.0
+    usable_weights = weight_total > 0.0 and math.isfinite(weight_total) and math.isfinite(weighted_total)
+    score = weighted_total / weight_total if usable_weights else 0.0
     answered = len(questions) - unanswered
     rationale = f"Weighted mean of {answered}/{len(questions)} rubric answers ({mode} scoring)."
     return JudgeVerdict(score=_clamp(score), rationale=rationale, findings=findings)

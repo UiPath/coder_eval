@@ -7,6 +7,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.evaluation.judge_context import (
     JudgeContext,
     JudgeContextBuilder,
@@ -90,19 +91,33 @@ class SystemOneJudgeChecker(BaseCriterion[SystemOneJudgeCriterion]):
             timeout_seconds=criterion.timeout_seconds,
         )
 
+        # A 200 with no usable `answers` (an error envelope, a schema change, a
+        # proxy page) is an infrastructure fault, not a bad agent: scoring it 0.0
+        # would read as a graded failure the agent earned.
         answers = response.get("answers")
-        verdict = reduce_answers(
-            criterion.questions, answers if isinstance(answers, dict) else {}, mode=criterion.scoring
+        if not isinstance(answers, dict):
+            raise JudgeInfrastructureError(
+                f"system_one_judge: response has no usable 'answers' map (got {type(answers).__name__})"
+            )
+        verdict = reduce_answers(criterion.questions, answers, mode=criterion.scoring)
+
+        # The requested model may be a floating alias; the response names the
+        # version actually served, so record that when it is present.
+        served_model = response.get("model")
+        judge_usage = token_usage_from_anthropic_dict(
+            response, model=served_model if isinstance(served_model, str) and served_model else criterion.model
         )
-        judge_usage = token_usage_from_anthropic_dict(response, model=criterion.model)
 
         transcript = None
         if criterion.capture_transcript:
             transcript = build_judge_transcript(
-                raw_verdict=json.dumps(answers, indent=2, default=str),
+                # The WHOLE response, not just `answers`: the default model is a
+                # floating alias, and the response's own `model` field is the only
+                # record of which version actually produced this grade.
+                raw_verdict=json.dumps(response, indent=2, default=str),
                 max_chars=criterion.max_transcript_chars,
                 judge_system_prompt=_rubric_digest(criterion),
-                judge_prompt=json.dumps(state, indent=2, default=str),
+                judge_prompt=json.dumps(_scrub_state(state, scrub_key), indent=2, default=str),
                 token_usage=judge_usage,
                 scrub_key=scrub_key,
             )
@@ -117,6 +132,25 @@ class SystemOneJudgeChecker(BaseCriterion[SystemOneJudgeCriterion]):
             transcript=transcript,
             token_usage=judge_usage,
         )
+
+
+def _scrub_state(value: Any, scrub_key: list[str] | None) -> Any:
+    """Scrub the state's strings BEFORE it is serialized.
+
+    HAZARD: the transcript persists ``json.dumps(state)``, which escapes newlines
+    and tabs. ``scrub_reference`` matches raw file text, so scrubbing the RENDERED
+    JSON silently misses every multi-line reference — the leak this guards shipped
+    exactly that way.
+
+    Rationale: .claude/notes/contracts.md § Scrub before truncate
+    """
+    if isinstance(value, str):
+        return scrub_reference(value, scrub_key)
+    if isinstance(value, dict):
+        return {key: _scrub_state(item, scrub_key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_state(item, scrub_key) for item in value]
+    return value
 
 
 def _rubric_digest(criterion: SystemOneJudgeCriterion) -> str:

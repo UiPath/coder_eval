@@ -169,6 +169,48 @@ def test_payload_carries_only_the_wire_fields():
     }
 
 
+# --- non-finite wire values ---------------------------------------------------
+#
+# json.loads accepts the NaN / Infinity tokens, so these arrive through an
+# ordinary 200. NaN is unordered, so a naive min/max clamp maps it to FULL
+# credit — the worst possible direction for a grader to fail in.
+
+
+@pytest.mark.parametrize("hostile", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_noul_scores_zero_not_full_credit(hostile: float):
+    questions = {"correct": NoulQuestion(instructions="q")}
+    verdict = reduce_answers(questions, {"correct": {"noul": hostile}}, mode="expected")
+    assert verdict.score == 0.0
+    assert "malformed answer" in verdict.findings[0]
+
+
+@pytest.mark.parametrize("hostile", [float("nan"), float("inf")])
+def test_non_finite_score_answer_scores_zero(hostile: float):
+    questions = {"depth": ScoreQuestion(instructions="q", criteria=["none", "some", "full"])}
+    assert reduce_answers(questions, {"depth": {"score": hostile}}, mode="expected").score == 0.0
+
+
+def test_non_finite_probability_falls_back_instead_of_crediting():
+    """A NaN in the distribution must not become a weighted mean of NaN."""
+    questions = {"quality": ChoiceQuestion(instructions="q", criteria=["good", "bad"], expected="good")}
+    answer = {"choice": "bad", "probabilities": {"good": float("nan"), "bad": 1.0}}
+    assert reduce_answers(questions, {"quality": answer}, mode="expected").score == 0.0
+
+
+def test_question_weight_rejects_non_finite_and_absurd_values():
+    for bad in (float("inf"), float("nan"), 1e12):
+        with pytest.raises(ValueError):
+            NoulQuestion(instructions="q", weight=bad)
+
+
+def test_argmax_noul_does_not_pass_a_coin_flip_in_both_directions():
+    """At P(yes)=0.5 agreement is 0.5 whichever way `expected` points."""
+    yes = {"a": NoulQuestion(instructions="q")}
+    no = {"a": NoulQuestion(instructions="q", expected=False)}
+    assert reduce_answers(yes, {"a": {"noul": 0.5}}, mode="argmax").score == 0.0
+    assert reduce_answers(no, {"a": {"noul": 0.5}}, mode="argmax").score == 0.0
+
+
 # --- rubric validation --------------------------------------------------------
 
 
@@ -184,6 +226,14 @@ def test_choice_accepts_a_bare_list_of_options():
 def test_bare_list_options_keep_their_declared_order_on_the_wire():
     question = ChoiceQuestion.model_validate({"instructions": "q", "criteria": ["z", "m", "a"], "expected": "a"})
     assert list(build_questions_payload({"q": question})["q"]["criteria"]) == ["z", "m", "a"]
+
+
+def test_bare_list_options_reject_non_string_entries():
+    """YAML's bare `yes`/`no` parse as bools; str() would make them 'True'/'False'."""
+    with pytest.raises(ValueError, match="must be strings"):
+        ChoiceQuestion.model_validate({"instructions": "q", "criteria": ["yes", True], "expected": "yes"})
+    with pytest.raises(ValueError, match="must be strings"):
+        ChoiceQuestion.model_validate({"instructions": "q", "criteria": ["a", None], "expected": "a"})
 
 
 def test_bare_list_options_reject_duplicates():
@@ -325,6 +375,59 @@ async def test_transcript_captures_the_rubric_and_the_answers(sandbox: Sandbox):
     assert result.transcript is not None
     assert '"noul": 0.5' in result.transcript.raw_verdict
     assert '"type": "noul"' in result.transcript.judge_system_prompt
+
+
+async def test_missing_answers_map_escalates_rather_than_scoring_zero(sandbox: Sandbox):
+    """A 200 with no usable `answers` is infrastructure, not a bad agent."""
+    init_criteria()
+    checker = SuccessChecker(sandbox, init_registry=False)
+    for broken in ({"model": "jev-latest", "usage": {}}, {"answers": "nope", "usage": {}}):
+        with (
+            patch(
+                "coder_eval.criteria.system_one_judge.invoke_system_one_async",
+                new=AsyncMock(return_value=broken),
+            ),
+            pytest.raises(JudgeInfrastructureError, match="no usable 'answers'"),
+        ):
+            await checker.check_all_async([_noul_criterion()])
+
+
+async def test_served_model_is_recorded_over_the_requested_alias(sandbox: Sandbox):
+    """`jev-latest` floats, so the grade must record the version actually served."""
+    response = _response({"correct": {"noul": 1.0}})
+    response["model"] = "jev-1.13.0"
+    result, _ = await _run(_noul_criterion(), sandbox, response)
+    assert result.transcript is not None
+    assert '"jev-1.13.0"' in result.transcript.raw_verdict
+
+
+async def test_reference_is_scrubbed_from_the_transcript_and_findings(sandbox: Sandbox, tmp_path: Path):
+    """Leak canary: the reference must not survive into anything we persist.
+
+    The state is persisted as JSON, so the sentinel is re-encoded on the way
+    out — a scrub that only matched the raw file text would miss it.
+    """
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    sentinel = 'SUPER_SECRET_REFERENCE\n\tdef solve():\n\t    return "42"\n'
+    (reference_dir / "solution.py").write_text(sentinel, encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hi')", encoding="utf-8")
+
+    init_criteria()
+    checker = SuccessChecker(sandbox, init_registry=False)
+    criterion = _noul_criterion(files=["main.py"], include_reference=True)
+    with patch(
+        "coder_eval.criteria.system_one_judge.invoke_system_one_async",
+        new=AsyncMock(return_value=_response({"correct": {"noul": 1.0}})),
+    ):
+        results = await checker.check_all_async([criterion], reference_dir=reference_dir)
+
+    result = results[0]
+    assert result.transcript is not None
+    persisted = "\n".join(
+        [result.details or "", *result.findings, result.transcript.judge_prompt, result.transcript.raw_verdict]
+    )
+    assert "SUPER_SECRET_REFERENCE" not in persisted
 
 
 async def test_transcript_is_dropped_when_not_requested(sandbox: Sandbox):

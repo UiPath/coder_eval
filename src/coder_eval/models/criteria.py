@@ -1486,9 +1486,11 @@ class SystemOneJudgeCriterion(BaseSuccessCriterion):
         default=100_000,
         gt=0,
         description=(
-            "Aggregate cap on the rendered state, applied per section after the per-file caps. "
-            "The API rejects a request over its own context limit outright, so the default is "
-            "deliberately well inside it; raise it only alongside a model that accepts more."
+            "Per-section cap on the rendered state, applied to each file, the reference, the "
+            "agent output, the tool-call summary and each dialog message independently, after "
+            "the per-file caps. It bounds any ONE section, not their sum, so a rubric over many "
+            "large files can still exceed the model's context; the API rejects an oversized "
+            "request outright rather than truncating it."
         ),
     )
     model: str = Field(

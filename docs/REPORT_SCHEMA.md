@@ -184,7 +184,7 @@ fields so subclass keys round-trip.
   `transcript_path` (a sibling `judge-N.yaml`, or `post-failure-judge-N.yaml` for
   diagnostic records). The full `transcript` is **stripped
   from `task.json`** — read it from the referenced file. Emitted by `llm_judge`,
-  `agent_judge`.
+  `agent_judge`, `system_one_judge`.
 
 ### Post-failure criterion evidence
 

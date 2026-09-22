@@ -433,3 +433,27 @@ credential comes from the env var *named* by `api_key_env`, so only the name is 
 the criterion or persisted into a run record. A transport failure raises
 `JudgeInfrastructureError` and escalates the row, rather than following `llm_judge`'s
 unconfigured-transport arm into a scored 0.0 — an ungraded row must not read as a failed one.
+
+A 200 response whose body carries no usable `answers` map is the same class of fault. Reducing
+it would score every question "no answer returned" and finalize the row as a graded 0.0, which
+reads as a failure the agent earned; it escalates instead.
+
+### Non-finite values fail CLOSED
+
+`json.loads` accepts the `NaN` and `Infinity` tokens, so a non-finite float arrives through an
+ordinary 200 — and `base_url` may point at any gateway. NaN is unordered, so the obvious clamp
+`max(0.0, min(1.0, x))` returns **1.0** for it: the naive reading of a malformed answer is FULL
+credit. Every wire value is therefore checked with `math.isfinite` before it is used (`_is_number`),
+`_clamp` maps a non-finite input to 0.0, and a question's `weight` is bounded and rejects inf/NaN
+so the weighted mean cannot become `inf/inf`. The rule is that an unusable answer never earns
+credit; it scores 0.0 and says so in `findings`.
+
+`argmax` uses a strict `> 0.5` for `noul`. At exactly 0.5 the agreement is 0.5 whichever way
+`expected` points, so `>=` passed a maximally uncertain answer in *both* directions.
+
+### The reference scrub runs before serialization
+
+`system_one_judge` persists its state as `json.dumps(state)`, which escapes newlines and tabs.
+`scrub_reference` matches raw file text, so scrubbing the *rendered* JSON silently misses every
+multi-line reference. The state's strings are scrubbed first, then serialized — a leak shipped
+exactly this way, so the leak-canary test uses a multi-line, quoted reference on purpose.

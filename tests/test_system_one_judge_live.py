@@ -45,7 +45,6 @@ _CODE = (
 )
 
 
-@_live
 async def test_every_primitive_round_trips_against_the_real_api():
     questions = {
         "has_retry": NoulQuestion(instructions="Does the code retry on failure?"),

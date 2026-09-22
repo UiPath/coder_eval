@@ -83,6 +83,11 @@ async def invoke_system_one_async(
                 await asyncio.sleep(compute_backoff(_SYSTEM_ONE_RETRY, attempt - 1))
             try:
                 response = await client.post(url, headers=headers, json=body, timeout=timeout_seconds)
+            except httpx2.InvalidURL as e:
+                # NOT an HTTPError subclass, so it would otherwise escape this
+                # loop and be downgraded to a scored 0.0 by the checker wrapper.
+                # A bad base_url is also not transient, so do not retry it.
+                raise JudgeInfrastructureError(f"System One base_url is not a usable URL: {e}") from e
             except httpx2.HTTPError as e:
                 last_failure = f"System One transport error: {e}"
                 last_exc = e

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SYSTEM_ONE_MAX_CHOICE_OPTIONS = 255
 SYSTEM_ONE_MIN_SCORE_LEVELS = 2
 SYSTEM_ONE_MAX_SCORE_LEVELS = 10
+SYSTEM_ONE_MAX_QUESTION_WEIGHT = 1_000_000.0
 
 
 class BaseSystemOneQuestion(BaseModel):
@@ -43,9 +44,13 @@ class BaseSystemOneQuestion(BaseModel):
     weight: float = Field(
         default=1.0,
         gt=0.0,
+        le=SYSTEM_ONE_MAX_QUESTION_WEIGHT,
+        allow_inf_nan=False,
         description=(
             "Relative weight of this question in the criterion's weighted-mean score. "
-            "Weights need not sum to 1.0 — they are normalized across the rubric."
+            "Weights need not sum to 1.0 — they are normalized across the rubric. "
+            "Bounded because an infinite or overflowing weight makes the weighted mean "
+            "NaN, which would grade as full credit."
         ),
     )
 
@@ -112,7 +117,12 @@ class ChoiceQuestion(BaseSystemOneQuestion):
         options = data.get("criteria")
         if not isinstance(options, list):
             return data
-        keys = [str(option) for option in options]
+        # str() on anything would turn a stray `- ` into an option named 'None',
+        # and YAML's bare `yes`/`no` into 'True'/'False'. Make that a load error.
+        bad = [option for option in options if not isinstance(option, str)]
+        if bad:
+            raise ValueError(f"choice options must be strings; got {bad!r} (quote them if they are YAML keywords)")
+        keys = list(options)
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         if duplicates:
             raise ValueError(f"choice question lists duplicate options: {', '.join(duplicates)}")
