@@ -11,9 +11,9 @@ Prerequisites are documented in ``docs/agents/DELEGATE.md`` and enforced with a
 clear ``AgentConfigError`` at ``start()`` (Node.js, ``npm install
 @uipath/delegate-sdk``, UiPath auth). Deliberate scope reductions versus the
 UiPath-internal sibling agent's more hardened adapter (no multi-generation
-transcript splitting, no WAF/SSE/session-conflict/stall-resend recovery,
-best-effort token-bucket field names marked ``# UNVERIFIED``) and every
-``# UNVERIFIED`` spot's rationale live in one place, not scattered:
+transcript splitting, no WAF/SSE/session-conflict/stall-resend recovery) and
+every remaining ``# UNVERIFIED`` spot's rationale live in one place, not
+scattered:
 
 Rationale: .claude/notes/agents.md § Delegate agent
 """
@@ -206,39 +206,46 @@ def _resolve_bundled_skills_path(plugins: list[dict[str, Any]] | None) -> str | 
 
 
 def _parse_usage(raw: Any) -> TokenUsage | None:
-    """Best-effort parse of an event/result's ``usage`` payload into ``TokenUsage``.
+    """Parse the SDK's per-turn usage payload (from ``getLastTurnUsage()``) into ``TokenUsage``.
 
-    UNVERIFIED: the SDK confirms an ``usage`` field exists on at least some
-    events, but not its internal bucket key names. Tries several plausible
-    spellings (snake_case, as the internal sibling agent's protocol used; and
-    camelCase, in case this layer differs) and falls back to 0 for anything it
-    cannot read, mirroring the project's "warn on drift, never raise" contract.
+    CONFIRMED (reading the installed ``@uipath/delegate-sdk@0.1.12``'s bundled
+    ``dist/index.mjs``): no event this host forwards ever carries a ``usage``
+    field -- the SDK's per-turn token accounting lives only in its internal
+    store, reachable through ``DelegateAgent.getLastTurnUsage()``, which
+    ``delegate_host.mjs`` calls after ``sendMessage()`` resolves and attaches
+    to the ``send_ok`` message as ``usage``. That getter's shape, from the
+    SDK's own ``setUsage`` store action: ``{promptTokens, completionTokens,
+    promptTokensCached, cacheCreationTokens, turnTokenUnits,
+    contextBreakdown}``. ``promptTokens`` is the TOTAL input token count
+    (cached + uncached, OpenAI-style); ``promptTokensCached`` is the
+    cache-READ subset of it, so ``uncached = promptTokens - promptTokensCached``.
+    Falls back to 0 for anything absent (e.g. before the backend's first
+    internal usage report), mirroring the project's "warn on drift, never
+    raise" contract -- a future SDK release renaming one of these fields
+    degrades to zero tokens for that bucket, not a crash.
     """
     if not isinstance(raw, dict):
         return None
 
-    def _int(*keys: str) -> int:
-        for key in keys:
-            value = raw.get(key)
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, int) and value >= 0:
-                return value
-        return 0
+    def _int(key: str) -> int:
+        value = raw.get(key)
+        if isinstance(value, bool):
+            return 0
+        return value if isinstance(value, int) and value >= 0 else 0
 
-    input_tokens = _int("input_tokens", "inputTokens", "uncached_input_tokens")
-    output_tokens = _int("output_tokens", "outputTokens")
-    cache_creation = _int("cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write", "cacheWrite")
-    cache_read = _int("cache_read_input_tokens", "cacheReadInputTokens", "cache_read", "cacheRead")
-    if input_tokens == 0 and output_tokens == 0 and cache_creation == 0 and cache_read == 0:
+    prompt_total = _int("promptTokens")
+    prompt_cached = _int("promptTokensCached")
+    output_tokens = _int("completionTokens")
+    cache_creation = _int("cacheCreationTokens")
+    if prompt_total == 0 and output_tokens == 0 and prompt_cached == 0 and cache_creation == 0:
         if raw:
             logger.warning("delegate: usage payload matched none of the known bucket spellings: %r", sorted(raw))
         return None
     return TokenUsage(
-        uncached_input_tokens=input_tokens,
+        uncached_input_tokens=max(prompt_total - prompt_cached, 0),
         output_tokens=output_tokens,
         cache_creation_input_tokens=cache_creation,
-        cache_read_input_tokens=cache_read,
+        cache_read_input_tokens=prompt_cached,
     )
 
 
@@ -795,22 +802,21 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         emit(ToolEndEvent(task_id=self.task_id, turn_id=state.turn_id, tool=telemetry, status=status))
 
     def _handle_send_ok(self, msg: dict[str, Any], state: _TurnState) -> None:
+        # CONFIRMED (reading the installed SDK's bundled source):
+        # sendMessage()'s resolved value is always a plain string, never an
+        # object -- `usage`/`sessionId` are NOT nested under it. delegate_host.mjs
+        # instead reads them off `getLastTurnUsage()`/`getSessionId()` after
+        # sendMessage() resolves and attaches them to this message's own
+        # top level (see delegate_host.mjs's wire-protocol header comment).
         result = msg.get("result")
         if isinstance(result, str):
             state.final_response = result
-        elif isinstance(result, dict):
-            response = result.get("response") or result.get("content")
-            if isinstance(response, str):
-                state.final_response = response
-            session_id = result.get("sessionId")
-            if isinstance(session_id, str) and session_id:
-                self._session_id = session_id
-            usage = _parse_usage(result.get("usage"))
-            if usage is not None:
-                state.usage = usage
-            model = result.get("model")
-            if isinstance(model, str) and model:
-                state.model_used = model
+        session_id = msg.get("sessionId")
+        if isinstance(session_id, str) and session_id:
+            self._session_id = session_id
+        usage = _parse_usage(msg.get("usage"))
+        if usage is not None:
+            state.usage = usage
 
     def _close_open_tools(self, state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         for tool_id, telemetry in list(state.open_tools.items()):

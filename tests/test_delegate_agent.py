@@ -251,7 +251,7 @@ class TestCommunicate:
             _line({"type": "message", "content": "here is my answer"}),
             _line({"type": "tool_call", "toolName": "Bash", "toolId": "tool-1", "input": {"command": "ls"}}),
             _line({"type": "tool_result", "toolId": "tool-1", "output": "file.txt"}),
-            _line({"type": "send_ok", "result": {"response": "here is my answer", "sessionId": "sess-1"}}),
+            _line({"type": "send_ok", "result": "here is my answer", "sessionId": "sess-1"}),
         ]
         agent, proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("do something")
@@ -422,45 +422,57 @@ class TestCommunicate:
         assert record.crashed is False
 
     @pytest.mark.parametrize(
-        ("usage_payload", "expected_input", "expected_output"),
+        ("usage_payload", "expected_uncached_input", "expected_output", "expected_cache_read", "expected_cache_write"),
         [
-            ({"input_tokens": 10, "output_tokens": 5}, 10, 5),
-            ({"inputTokens": 10, "outputTokens": 5}, 10, 5),
-            ({"uncached_input_tokens": 10, "output_tokens": 5}, 10, 5),
+            ({"promptTokens": 10, "completionTokens": 5}, 10, 5, 0, 0),
+            ({"promptTokens": 10, "completionTokens": 5, "promptTokensCached": 4}, 6, 5, 4, 0),
+            (
+                {"promptTokens": 10, "completionTokens": 5, "promptTokensCached": 4, "cacheCreationTokens": 3},
+                6,
+                5,
+                4,
+                3,
+            ),
         ],
     )
     async def test_usage_bucket_spellings_populate_token_usage(
-        self, patch_exec, tmp_path, usage_payload, expected_input, expected_output
+        self,
+        patch_exec,
+        tmp_path,
+        usage_payload,
+        expected_uncached_input,
+        expected_output,
+        expected_cache_read,
+        expected_cache_write,
     ):
-        events = [_line({"type": "send_ok", "result": {"response": "done", "usage": usage_payload}})]
+        events = [_line({"type": "send_ok", "result": "done", "usage": usage_payload})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
         assert record.token_usage is not None
-        assert record.token_usage.uncached_input_tokens == expected_input
+        assert record.token_usage.uncached_input_tokens == expected_uncached_input
         assert record.token_usage.output_tokens == expected_output
+        assert record.token_usage.cache_read_input_tokens == expected_cache_read
+        assert record.token_usage.cache_creation_input_tokens == expected_cache_write
 
     async def test_usage_all_zero_is_none_and_warns(self, patch_exec, tmp_path, caplog):
-        events = [_line({"type": "send_ok", "result": {"response": "done", "usage": {"weird_bucket": 3}}})]
+        events = [_line({"type": "send_ok", "result": "done", "usage": {"weird_bucket": 3}})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         with caplog.at_level("WARNING"):
             record = await agent.communicate("hi")
         assert record.token_usage is None
         assert any("usage payload matched none" in r.message for r in caplog.records)
 
-    async def test_model_and_cost_wired_into_record(self, patch_exec, tmp_path):
+    async def test_cost_wired_into_record_for_configured_model(self, patch_exec, tmp_path):
         events = [
             _line(
                 {
                     "type": "send_ok",
-                    "result": {
-                        "response": "done",
-                        "model": "virtuoso-1-5",
-                        "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
-                    },
+                    "result": "done",
+                    "usage": {"promptTokens": 1_000_000, "completionTokens": 1_000_000},
                 }
             )
         ]
-        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        agent, _ = await _started_agent(patch_exec, events, tmp_path, model="virtuoso-1-5")
         record = await agent.communicate("hi")
         assert record.model_used == "virtuoso-1-5"
         assert record.token_usage is not None

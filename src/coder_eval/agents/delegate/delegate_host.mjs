@@ -21,7 +21,13 @@
 // stdout (host -> coder_eval):
 //   {"type": "init_ok"}
 //   {"type": "init_error", "message": str}
-//   {"type": "send_ok", "result": <sendMessage()'s resolved value, or null>}
+//   {"type": "send_ok", "result": <sendMessage()'s resolved string, or null>,
+//     "usage": <agent.getLastTurnUsage()'s result, or null>,
+//     "sessionId": <agent.getSessionId()'s result, or null>}
+//     -- usage/sessionId are read from these two getters AFTER sendMessage()
+//     resolves, not from the resolved value itself (a plain string) or from
+//     any forwarded event: CONFIRMED (reading the installed SDK's bundled
+//     source) that no event this host forwards ever carries a `usage` field.
 //   {"type": "send_error", "message": str}
 //   {"type": "destroy_error", "message": str}
 //   {"type": "protocol_error", "message": str} -- malformed/unknown stdin command; host keeps running
@@ -88,7 +94,18 @@ async function handleSend(msg) {
     return;
   }
   const result = await agent.sendMessage(msg.prompt, msg.sessionId || undefined);
-  writeLine({ type: "send_ok", result: result ?? null });
+  // CONFIRMED (reading @uipath/delegate-sdk@0.1.12's bundled dist/index.mjs):
+  // sendMessage() resolves to a plain string (the final response text) --
+  // never an object -- and no event this host forwards via agent.onEvent()
+  // ever carries a `usage` field. The SDK's own per-turn token accounting is
+  // internal state, reachable only through these two getters, called here
+  // once the turn (and the backend's own internal "usage" store update) has
+  // settled. Guarded with typeof, not called unconditionally: an older/newer
+  // SDK build that drops either method must degrade to "no usage this turn",
+  // never crash the host.
+  const usage = typeof agent.getLastTurnUsage === "function" ? agent.getLastTurnUsage() : null;
+  const sessionId = typeof agent.getSessionId === "function" ? agent.getSessionId() : null;
+  writeLine({ type: "send_ok", result: result ?? null, usage: usage ?? null, sessionId: sessionId ?? null });
 }
 
 async function handleDestroy() {

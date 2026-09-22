@@ -809,6 +809,26 @@ own env-var-driven bootstrapping, not the `DelegateAgent` class itself, which we
 against a real backend). `tests/test_delegate_agent.py::TestStart::test_org_and_tenant_slug_forwarded_into_auth`
 pins it. Passing `DELEGATE_BACKEND_URL` directly instead of `DELEGATE_ENV` skips this whole path.
 
+**Token usage comes from two getters called after `sendMessage()` resolves, not from any event or the
+resolved value itself — confirmed by reading the installed SDK's bundle, not by guessing.** A first
+pass guessed at a flat `usage` dict carried on the resolved `sendMessage()` value or on a forwarded
+event, tried several plausible snake_case/camelCase bucket-name spellings, and silently returned zero
+tokens every turn against a real backend (`tests/test_delegate_agent_live.py::test_delegate_live_token_usage_populated`
+failed live: `record.crashed is False`, real text/tool output, `token_usage=None`). Reading
+`node_modules/@uipath/delegate-sdk/dist/index.mjs` directly settled it: `sendMessage()` always resolves
+to a plain string (never an object), and no event this host forwards via `agent.onEvent()` ever carries
+a `usage` field — the SDK's own internal event vocabulary has no `"usage"` member (that name IS used
+internally, but only inside the SDK's own Zustand store reducer that updates its "Token usage" UI
+panel, never re-emitted through the public `onEvent` bus). The only way to reach it is
+`DelegateAgent.getLastTurnUsage(sessionId?)` (defaults to the just-used session), so
+`delegate_host.mjs`'s `handleSend` calls it — and `getSessionId()` — right after `sendMessage()`
+resolves, and attaches both to the `send_ok` message itself. That getter's shape, read straight off the
+SDK's own `setUsage` store action, is `{promptTokens, completionTokens, promptTokensCached,
+cacheCreationTokens, turnTokenUnits, contextBreakdown}` — `promptTokens` is the TOTAL input token count
+(OpenAI-style, cached + uncached), `promptTokensCached` the cache-READ subset of it, so
+`_parse_usage` computes `uncached_input_tokens = promptTokens - promptTokensCached`. This is now
+CONFIRMED, not a guess, so `_parse_usage`'s docstring no longer marks it `# UNVERIFIED`.
+
 ### Delegate agent pricing
 
 Delegate-served models are keyed under the SDK's own hyphenated ids (e.g. `gpt-5-6-terra`) in
