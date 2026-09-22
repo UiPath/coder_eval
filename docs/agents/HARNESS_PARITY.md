@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -551,7 +551,9 @@ reports it.
 Each harness finds the call boundary in its own stream (the table above):
 
 - **claude-code** applies the cap in the CLI, and the harness reads the CLI's
-  `error_max_turns` stop.
+  `error_max_turns` stop. The CLI does not apply it on every route, so the harness
+  also counts distinct main-thread `message_id`s and ends the turn itself when call
+  N+1 begins.
 - **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
   tools finish. An item starts as its tool runs, so waiting for the next call's
   first item would let one tool of call N+1 act. A call that ran tools therefore
@@ -566,7 +568,7 @@ Each harness finds the call boundary in its own stream (the table above):
   and the cap fires before call N+1 can run anything. A reply that announces
   several tools before their results counts once.
 
-Every harness except claude-code enforces the cap on the same loop boundary as the
+Every harness enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops
 spend. A run cut this way finalizes cleanly as `max_turns_exhausted`. It is not a
 crash, and it is not retried.

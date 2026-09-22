@@ -1718,6 +1718,77 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
         assert turn_record.result_summary.subtype == "error_max_turns"
 
 
+def _api_call(n, parent_tool_use_id=None):
+    """One API call as the SDK streams it: one message per content block, one shared id."""
+    from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ThinkingBlock, ToolUseBlock
+
+    mid = f"{'sub' if parent_tool_use_id else 'msg'}-{n}"
+    return [
+        AssistantMessage([ThinkingBlock("planning")], message_id=mid, parent_tool_use_id=parent_tool_use_id),
+        AssistantMessage(
+            [ToolUseBlock(f"{mid}-tool", "Bash", {"command": "echo hi"})],
+            message_id=mid,
+            parent_tool_use_id=parent_tool_use_id,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_max_turns_backstop_ends_a_turn_the_cli_did_not_cap():
+    """A CLI that ignores --max-turns is cut when it begins API call max_turns + 1."""
+    from tests._fixtures.golden_streams.claude_fixtures import ResultMessage
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    pulled = 0
+
+    async def mock_query(prompt, options, transport=None):
+        nonlocal pulled
+        for n in range(200):
+            for message in _api_call(n):
+                pulled += 1
+                yield message
+        yield ResultMessage(num_turns=200)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn_record = await agent.communicate("loop forever", max_turns=3)
+
+    assert pulled == 3 * 2 + 1
+    assert turn_record.crashed is False
+    assert turn_record.max_turns_exhausted is True
+    assert turn_record.num_turns == 4
+    assert len(turn_record.commands) == 3
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_max_turns_backstop_ignores_emissions_and_subagent_calls():
+    """Per-block emissions share one API call, and sub-agent calls have their own cap."""
+    from tests._fixtures.golden_streams.claude_fixtures import ResultMessage
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+    async def mock_query(prompt, options, transport=None):
+        for message in _api_call(0):
+            yield message
+        for n in range(5):
+            for message in _api_call(n, parent_tool_use_id="msg-0-tool"):
+                yield message
+        for message in _api_call(1):
+            yield message
+        yield ResultMessage(num_turns=2)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn_record = await agent.communicate("delegate", max_turns=2)
+
+    assert turn_record.max_turns_exhausted is False
+    assert turn_record.num_turns == 2
+    assert turn_record.result_summary is not None
+    assert turn_record.result_summary.subtype == "success"
+
+
 def test_setting_sources_default_is_project():
     """When config.setting_sources is None, it defaults to ['project'] at runtime."""
     config = parse_agent_config(
