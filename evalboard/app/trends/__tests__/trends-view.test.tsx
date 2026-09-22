@@ -30,7 +30,7 @@ function trend(overrides: Partial<TaskTrend>): TaskTrend {
         avgDurationSeconds: null,
         avgCostUsd: null,
         avgActualCommands: null,
-        avgTotalTurns: null,
+        avgVisibleTurns: null,
         recentStatuses: [],
         dominantFailureTags: [],
         ...overrides,

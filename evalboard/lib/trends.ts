@@ -35,7 +35,7 @@ export interface TaskTrend {
     avgDurationSeconds: number | null; // SUCCESS runs only
     avgCostUsd: number | null; // SUCCESS runs only
     avgActualCommands: number | null; // SUCCESS runs only
-    avgTotalTurns: number | null; // SUCCESS runs only
+    avgVisibleTurns: number | null; // SUCCESS runs only
     // Status sequence newest-first, one entry per run the task APPEARS in —
     // a subset of TrendsData.runIds. The view aligns these to the full run
     // axis and renders an explicit gap slot for runs without an entry.
@@ -114,7 +114,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
         durations: number[]; // success only
         costs: number[]; // success only
         tools: number[]; // success only — actualCommands per run
-        totalTurns: number[]; // success only
+        visibleTurns: number[]; // success only
         successCount: number;
         totalCount: number;
         matureSkips: number;
@@ -147,7 +147,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
                     durations: [],
                     costs: [],
                     tools: [],
-                    totalTurns: [],
+                    visibleTurns: [],
                     successCount: 0,
                     totalCount: 0,
                     matureSkips: 0,
@@ -178,7 +178,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
                     if (t.durationSeconds != null) b.durations.push(t.durationSeconds);
                     if (t.totalCostUsd != null) b.costs.push(t.totalCostUsd);
                     if (t.actualCommands != null) b.tools.push(t.actualCommands);
-                    if (t.totalTurns != null) b.totalTurns.push(t.totalTurns);
+                    if (t.visibleTurns != null) b.visibleTurns.push(t.visibleTurns);
                 }
             }
             const failTags = reviewTagsByTask[t.taskId];
@@ -202,7 +202,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
             avgDurationSeconds: avg(b.durations),
             avgCostUsd: avg(b.costs),
             avgActualCommands: avg(b.tools),
-            avgTotalTurns: avg(b.totalTurns),
+            avgVisibleTurns: avg(b.visibleTurns),
             recentStatuses: b.statuses,
             matureSkips: b.matureSkips,
             dominantFailureTags: [...b.tagCounts.entries()]
