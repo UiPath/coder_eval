@@ -270,6 +270,10 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
+        # Backend round-trips begun. The SDK opens each with a thinking or message
+        # event (empty for a tool-only reply) and closes it with its tool results.
+        self.api_calls = 0
+        self.in_api_call = False
 
         self.model_used: str | None = model
         self.usage: TokenUsage | None = None
@@ -659,7 +663,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
                 self._handle_event(msg, state, emit)
 
-                if max_turns is not None and state.message_events >= max_turns:
+                if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
                     await self._abandon_host_after_loop_exit()
                     break
@@ -714,6 +718,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             state.usage = usage
 
         if event_type in _TEXT_EVENT_TYPES:
+            if not state.in_api_call:
+                state.in_api_call = True
+                state.api_calls += 1
             text = msg.get("content")
             if isinstance(text, str) and text:
                 state.text_parts.append(text)
@@ -730,6 +737,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         elif event_type == "tool_call":
             self._handle_tool_call(msg, state, emit)
         elif event_type == "tool_result":
+            state.in_api_call = False
             self._handle_tool_result(msg, state, emit)
         elif event_type == "error":
             message = msg.get("message") or msg.get("content") or "unknown error"
@@ -896,7 +904,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 model_used=state.model_used,
                 assistant_turn_count=max(state.message_events, 1) if not crashed else state.message_events,
                 messages=messages,
-                num_turns=None if crashed else max(state.message_events, 1),
+                num_turns=None if crashed else max(state.api_calls, 1),
                 max_turns_exhausted=state.max_turns_exhausted,
                 result_summary=ResultSummary(
                     is_error=crashed,

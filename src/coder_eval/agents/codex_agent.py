@@ -87,6 +87,9 @@ _CUSTOM_PROVIDER_ID = "custom"
 # the actual files regardless.
 _FILE_CHANGE_FAILURE_STATUSES = frozenset({"failed", "declined"})
 
+# Items that open no model API call: the prompt, hook injections, and compaction.
+_NON_MODEL_ITEM_TYPES = frozenset({"userMessage", "hookPrompt", "contextCompaction"})
+
 # Thread-item types carrying transcript CONTENT or session metadata rather than a
 # tool call. Everything ELSE streamed as item/started+item/completed is treated as
 # a tool call, so a new Codex tool kind is captured automatically instead of being
@@ -365,6 +368,9 @@ class _CodexTurnState:
         # Text-less reasoning blocks, resolved at flush once reasoning tokens known.
         self.reasoning_placeholders: list[ContentBlock] = []
         self.gen_index = 0
+        # Main-thread API calls begun; one spans its first item to its tokenUsage event.
+        self.api_calls = 0
+        self.in_api_call = False
 
         # Finalize inputs, COMMITTED by communicate after a clean pump return.
         # Defaults are the crash values (no terminal usage; format from messages).
@@ -505,15 +511,12 @@ class _CodexTurnState:
         return self.stopped_early_hit or self.max_turns_hit
 
     def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
+        """True once the model begins API call ``max_turns + 1``, the unit Claude Code's ``--max-turns`` caps.
 
-        Delegates to ``EventCollector.visible_turn_count`` rather than
-        ``self.commands``, which SKIPS items whose telemetry the SDK does not
-        resolve; the collector counts every emitted tool end, which is what lands
-        in ``TurnRecord.commands``. Codex delivers one SDK turn per
-        ``communicate()``, so a native counter would cap at 1.
+        The calls before it ran whole, tools included: Codex closes a call with its
+        tokenUsage event only after that call's tools finish.
         """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.max_turns is not None and self.api_calls > self.max_turns
 
     def dispatch(self, notification: Any) -> bool:
         """Route a notification to its handler. Returns True on ``turn/completed``
@@ -550,6 +553,9 @@ class _CodexTurnState:
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
+        if not self.in_api_call and root_type not in _NON_MODEL_ITEM_TYPES:
+            self.in_api_call = True
+            self.api_calls += 1
         # Any item that isn't transcript content is a tool call (generic capture).
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
@@ -669,6 +675,9 @@ class _CodexTurnState:
     def on_token_usage_updated(self, notification: Any) -> None:
         """One per generation → cut a message. Carries `total` (cumulative over the
         whole THREAD, i.e. every turn so far) and `last` (this generation's delta)."""
+        if not self.in_api_call:
+            self.api_calls += 1
+        self.in_api_call = False
         if notification.payload:
             self.latest_token_usage = getattr(notification.payload, "token_usage", None)
             self._flush_message(getattr(self.latest_token_usage, "last", None))
@@ -745,7 +754,7 @@ class _CodexTurnState:
                 model_used=model_used,
                 assistant_turn_count=1,
                 messages=self.messages,
-                num_turns=1,
+                num_turns=max(self.api_calls, 1),
                 crashed=crashed,
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
@@ -873,11 +882,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input: The message/prompt to send
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
-            max_turns: Hard cap on VISIBLE turns — tool calls, the unit
-                ``result_metrics.visible_turn_count`` counts — enforced in-stream on
-                the same pump boundary as the cooperative stop. Codex delivers one
-                SDK turn per ``communicate()``, so a native turn counter would cap
-                at 1; see docs/agents/HARNESS_PARITY.md.
+            max_turns: Hard cap on main-thread model API calls, Claude Code's
+                unit, enforced in-stream on the same pump boundary as the
+                cooperative stop; see docs/agents/HARNESS_PARITY.md.
             should_stop: Cooperative early-stop callback, polled after each
                 dispatched notification. When it returns True the pump breaks,
                 the in-flight turn is interrupted (best-effort) and the turn
@@ -1514,7 +1521,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # stop, so an armed early-stop wins a tie.
                 if state.max_turns_reached():
                     state.max_turns_hit = True
-                    self._log.debug("max_turns (%s visible turns) reached; ending notification pump", state.max_turns)
+                    self._log.debug("max_turns (%s API calls) reached; ending notification pump", state.max_turns)
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
         finally:

@@ -1355,44 +1355,68 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
     assert [p.kind for p in configs[0].policies] == ["allow_all"]
 
 
-# --- max_turns visible-turn cap -----------------------------------------------------
+# --- max_turns cap -------------------------------------------------------------------
 #
-# max_turns was accepted and never read on this backend, so a task capping turns ran
-# uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
-# turns (tool calls — result_metrics.visible_turn_count's unit), enforced on the same
-# step-loop boundary as the cooperative stop.
+# max_turns caps main-thread model API calls, Claude Code's unit. A call opens at its
+# first new MODEL step and closes with its usage, and the cap fires when call
+# max_turns + 1 opens, on the same step-loop boundary as the cooperative stop.
 
 
-def _tool_steps(count: int) -> list:
-    """`count` complete tool calls, each an ACTIVE step followed by its DONE step."""
+def _tool_steps(count: int, first_index: int = 1) -> list:
+    """`count` API calls that each run one tool: a new MODEL step carrying the call's usage, then its DONE step."""
     steps = []
     for i in range(count):
         call = _tc("run_command", f"t{i}", {"command_line": f"echo {i}"})
-        steps.append(_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[call]))
+        steps.append(
+            _step(
+                "TOOL_CALL",
+                "ACTIVE",
+                target="TARGET_ENVIRONMENT",
+                tool_calls=[call],
+                usage=_usage(10, 0, 5, 0),
+                step_index=first_index + i,
+            )
+        )
         done = _tc("run_command", f"t{i}", {"command_line": f"echo {i}", "exit_code": 0, "combined_output": str(i)})
-        steps.append(_step("TOOL_CALL", "DONE", target="TARGET_ENVIRONMENT", tool_calls=[done]))
+        steps.append(
+            _step("TOOL_CALL", "DONE", target="TARGET_ENVIRONMENT", tool_calls=[done], step_index=first_index + i)
+        )
     return steps
 
 
-async def test_max_turns_caps_visible_turns():
-    """The stream offers 5 tool calls; max_turns=2 keeps 2 and never pulls the rest."""
+def _resolved(record) -> list[str]:
+    return [c.tool_id for c in record.commands if c.result_status != "unknown"]
+
+
+async def test_max_turns_caps_api_calls():
+    """The stream offers 5 calls; max_turns=2 stops as the third opens and never pulls the rest."""
     agent = _agent_with_steps(_tool_steps(5))
 
     record = await agent.communicate("go", max_turns=2)
 
-    assert len(record.commands) == 2
+    assert _resolved(record) == ["t0", "t1"]
     assert record.max_turns_exhausted is True
+    assert record.num_turns == 3
 
 
-async def test_max_turns_keeps_the_deciding_step_whole():
-    """The tool call that reaches the cap is completed, not cut mid-flight."""
+async def test_max_turns_keeps_the_last_allowed_call_whole():
+    """The last allowed call keeps its tool result: the cap fires only once the next call opens."""
     agent = _agent_with_steps(_tool_steps(3))
 
     record = await agent.communicate("go", max_turns=1)
 
-    assert len(record.commands) == 1
     assert record.commands[0].result_status == "success"
     assert record.commands[0].result_summary == "0"
+
+
+async def test_a_final_reply_on_the_last_allowed_call_completes():
+    reply = _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 5, 0), step_index=2)
+    agent = _agent_with_steps([*_tool_steps(1), reply])
+
+    record = await agent.communicate("go", max_turns=2)
+
+    assert record.max_turns_exhausted is False
+    assert record.num_turns == 2
 
 
 async def test_under_the_cap_completes_normally():
@@ -1402,6 +1426,7 @@ async def test_under_the_cap_completes_normally():
 
     assert len(record.commands) == 2
     assert record.max_turns_exhausted is False
+    assert record.num_turns == 2
 
 
 async def test_no_max_turns_is_uncapped():
@@ -1417,11 +1442,16 @@ async def test_no_max_turns_is_uncapped():
 async def test_cooperative_stop_outranks_the_cap():
     """Both firing on the same step reports STOPPED_EARLY — the more specific reason."""
     agent = _agent_with_steps(_tool_steps(5))
+    polls: list[int] = []
 
-    record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+    def should_stop() -> bool:
+        polls.append(1)
+        return len(polls) >= 3  # the poll after call 2 opens, where max_turns=1 also fires
+
+    record = await agent.communicate("go", max_turns=1, should_stop=should_stop)
 
     assert record.max_turns_exhausted is False
-    assert len(record.commands) == 1
+    assert _resolved(record) == ["t0"]
 
 
 async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
@@ -1437,9 +1467,13 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
 
     bg = _tc("run_command", "bg1", {"command_line": "sleep 999"})
-    batch1 = [_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[bg])]
-    # The re-drain kicks off a SECOND background job, then closes the first and runs
-    # one more call — reaching the cap (2) with an orphan still ACTIVE. Both exit
+    batch1 = [
+        _step(
+            "TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[bg], usage=_usage(10, 0, 5, 0), step_index=1
+        )
+    ]
+    # The re-drain kicks off a SECOND background job in call 2, closes the first, and
+    # opens call 3, which reaches the cap (2) with an orphan still ACTIVE. Both exit
     # conditions are live at once, and the cap has to win: otherwise the loop keeps
     # polling out a background job on a run that is already over.
     batch2 = [
@@ -1448,6 +1482,8 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
             "ACTIVE",
             target="TARGET_ENVIRONMENT",
             tool_calls=[_tc("run_command", "bg2", {"command_line": "sleep 999"})],
+            usage=_usage(10, 0, 5, 0),
+            step_index=2,
         ),
         _step(
             "TOOL_CALL",
@@ -1456,21 +1492,21 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
             tool_calls=[
                 _tc("run_command", "bg1", {"command_line": "sleep 999", "exit_code": 0, "combined_output": "x"})
             ],
+            step_index=1,
         ),
-        *_tool_steps(1),
+        *_tool_steps(1, first_index=3),
     ]
-    batch3 = _tool_steps(2)  # must never be drained
+    batch3 = _tool_steps(2, first_index=4)  # must never be drained
     agent = _agent_with_steps([batch1, batch2, batch3])
     conv = agent._sdk_agent.conversation
 
     record = await agent.communicate("go", max_turns=2)
 
     assert record.max_turns_exhausted is True
-    # The cap counts RESOLVED calls. The still-open bg2 is force-closed and recorded
-    # as unresolved rather than dropped, so the trajectory shows what was interrupted.
-    resolved = [c for c in record.commands if c.result_status != "unknown"]
-    assert [c.tool_id for c in resolved] == ["bg1", "t0"]
-    assert [c.tool_id for c in record.commands if c.result_status == "unknown"] == ["bg2"]
+    # The still-open calls are force-closed and recorded as unresolved rather than
+    # dropped, so the trajectory shows what was interrupted.
+    assert _resolved(record) == ["bg1"]
+    assert [c.tool_id for c in record.commands if c.result_status == "unknown"] == ["bg2", "t0"]
     assert conv.receive_steps_call_count == 2  # initial drain + one poll re-drain, then stop
     assert conv.cancel_call_count == 1
 

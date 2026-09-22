@@ -32,7 +32,7 @@ class RunLimits(BaseModel):
     max_turns: int | None = Field(
         default=None,
         gt=0,
-        description="Max agent inner-loop turns per iteration. None = SDK default.",
+        description="Max main-thread model API calls per iteration, on every harness. None = SDK default.",
     )
     expected_turns: int | None = Field(
         default=None,

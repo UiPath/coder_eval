@@ -2027,18 +2027,16 @@ class TestLoginShellMockPathHome:
             agent._cleanup_login_shell_home()
 
 
-class TestMaxTurnsVisibleTurnCap:
-    """``max_turns`` was documented as "unused for Codex single-turn" and dropped.
+class TestMaxTurnsApiCallCap:
+    """``max_turns`` caps main-thread model API calls, Claude Code's unit.
 
-    Codex delivers one SDK turn per ``communicate()``, so a native turn counter would
-    cap at 1 and mean nothing; the cap therefore counts VISIBLE turns (completed tool
-    calls — the unit ``result_metrics.visible_turn_count`` sums) and is enforced on the
-    same pump boundary as the cooperative stop.
+    A call runs from its first item to its tokenUsage event, so the pump stops when
+    call ``max_turns + 1`` opens, after every earlier call's tools have finished.
     """
 
     @staticmethod
     def _cmd_notifications(count: int) -> list:
-        """`count` completed shell commands, then the terminal turn/completed."""
+        """`count` API calls that each think and run one shell command, then turn/completed."""
         notifications = []
         for i in range(count):
             root = SimpleNamespace(
@@ -2049,27 +2047,48 @@ class TestMaxTurnsVisibleTurnCap:
                 aggregated_output=f"step-{i}\n",
                 duration_ms=5,
             )
+            reasoning = _reasoning_item("plan", item_id=f"r{i}")
+            notifications.append(_item_notification("item/started", reasoning))
+            notifications.append(_item_notification("item/completed", reasoning))
             notifications.append(_item_notification("item/started", root))
             notifications.append(_item_notification("item/completed", root))
+            notifications.append(_token_usage(inp=10, out=5, cached=0))
         notifications.append(_turn_completed())
         return notifications
 
-    async def test_cap_stops_the_pump_at_the_limit(self):
+    async def test_cap_stops_when_the_next_call_opens(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
         record = await agent.communicate("go", max_turns=2)
 
         assert len(record.commands) == 2
         assert record.max_turns_exhausted is True
+        assert record.num_turns == 3
 
     async def test_cap_keeps_the_deciding_call_complete(self):
-        """Counting COMPLETED calls means the one that reaches the cap keeps its result."""
+        """The last allowed call keeps its tool result: the cap fires only once the next call opens."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
 
         record = await agent.communicate("go", max_turns=1)
 
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
+
+    async def test_a_final_reply_on_the_last_allowed_call_completes(self):
+        reply = SimpleNamespace(type="agentMessage", id="m1", text="done")
+        notifications = [
+            *self._cmd_notifications(1)[:-1],
+            _item_notification("item/started", reply),
+            _item_notification("item/completed", reply),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=2)
+
+        assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
 
     async def test_cap_interrupts_the_in_flight_turn(self):
         """Best-effort server-side interrupt, so the cap actually stops spend."""
@@ -2086,6 +2105,7 @@ class TestMaxTurnsVisibleTurnCap:
 
         assert len(record.commands) == 2
         assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
 
     async def test_no_cap_consumes_the_whole_stream(self):
         """None must preserve the pre-existing behavior exactly."""
@@ -2099,10 +2119,16 @@ class TestMaxTurnsVisibleTurnCap:
     async def test_cooperative_stop_outranks_the_cap(self):
         """Both firing on the same notification reports STOPPED_EARLY."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+        polls: list[int] = []
 
-        record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+        def should_stop() -> bool:
+            polls.append(1)
+            return len(polls) >= 6  # the poll after call 2 opens, where max_turns=1 also fires
+
+        record = await agent.communicate("go", max_turns=1, should_stop=should_stop)
 
         assert record.max_turns_exhausted is False
+        assert len(record.commands) == 1
 
     async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
         """A capped turn must not lose the child threads' spend.
@@ -2127,7 +2153,7 @@ class TestMaxTurnsVisibleTurnCap:
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
-        # The cap fires on the wait, before turn/completed is ever dispatched.
+        # The cap fires as the third call opens, before turn/completed is ever dispatched.
         notifications = [
             _item_notification("item/started", spawn),
             _item_notification("item/completed", spawn),

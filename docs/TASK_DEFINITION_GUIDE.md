@@ -239,7 +239,7 @@ valid and an empty block is legal — every field defaults to "no limit".
 ```yaml
 run_limits:
   # Structural caps
-  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
+  max_turns: 20                       # hard cap on model API calls per iteration
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
@@ -254,7 +254,7 @@ run_limits:
 
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
-| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
+| `max_turns` | *unset* | `> 0` | Hard cap on main-thread model API calls per iteration, Claude Code's turn, counted the same on every harness. The tools the last allowed call asks for still run; the turn ends when the next call begins. Unset uses the SDK default. See [HARNESS_PARITY.md](agents/HARNESS_PARITY.md). |
 | `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
