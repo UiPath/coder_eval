@@ -371,6 +371,7 @@ class _CodexTurnState:
         # Main-thread API calls begun; one spans its first item to its tokenUsage event.
         self.api_calls = 0
         self.in_api_call = False
+        self.call_ran_tools = False
 
         # Finalize inputs, COMMITTED by communicate after a clean pump return.
         # Defaults are the crash values (no terminal usage; format from messages).
@@ -513,10 +514,15 @@ class _CodexTurnState:
     def max_turns_reached(self) -> bool:
         """True once the model begins API call ``max_turns + 1``, the unit Claude Code's ``--max-turns`` caps.
 
-        The calls before it ran whole, tools included: Codex closes a call with its
-        tokenUsage event only after that call's tools finish.
+        Codex closes a call with its tokenUsage event only after that call's tools
+        finish, so the calls before the cap run whole.
         """
         return self.max_turns is not None and self.api_calls > self.max_turns
+
+    def _open_api_call(self) -> None:
+        self.api_calls += 1
+        self.in_api_call = True
+        self.call_ran_tools = False
 
     def dispatch(self, notification: Any) -> bool:
         """Route a notification to its handler. Returns True on ``turn/completed``
@@ -554,10 +560,10 @@ class _CodexTurnState:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
         if not self.in_api_call and root_type not in _NON_MODEL_ITEM_TYPES:
-            self.in_api_call = True
-            self.api_calls += 1
+            self._open_api_call()
         # Any item that isn't transcript content is a tool call (generic capture).
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
+            self.call_ran_tools = True
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
             self.seq_by_id[tool_id] = self.next_sequence
             # Recorded on the START telemetry too: close_open_tools publishes
@@ -678,6 +684,10 @@ class _CodexTurnState:
         if not self.in_api_call:
             self.api_calls += 1
         self.in_api_call = False
+        # Tool results always go back to the model, so the next call begins here,
+        # before Codex can run the next call's tools (an item starts as its tool runs).
+        if self.call_ran_tools:
+            self._open_api_call()
         if notification.payload:
             self.latest_token_usage = getattr(notification.payload, "token_usage", None)
             self._flush_message(getattr(self.latest_token_usage, "last", None))

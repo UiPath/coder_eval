@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, with a harness backstop if the CLI starts call N+1 | a call runs from its first item to its `thread/tokenUsage/updated` | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call runs from its first `thinking` or `message` event to its tool results |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, with a harness backstop if the CLI starts call N+1 | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call runs from its first `thinking` or `message` event to its tool results |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | token and USD budgets | stop mid-turn, checked per API call | checked when the turn ends | checked when the turn ends | stop mid-turn, checked per step | stop mid-turn, checked per step | checked when the turn ends |
@@ -555,7 +555,10 @@ Each harness finds the call boundary in its own stream (the table above):
   route, so the harness also counts main-thread `message_id`s and ends the turn when
   the CLI starts call N+1, which a working CLI never makes.
 - **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
-  tools finish, and the next call opens with a new `item/started`.
+  tools finish. An item starts as its tool runs, so waiting for the next call's
+  first item would let one tool of call N+1 act. A call that ran tools therefore
+  opens the next call at its `tokenUsage`, since the results always go back to the
+  model, and the cap fires before call N+1 can run anything.
 - **Antigravity** attaches `usage_metadata` to one step per call, and the next call
   opens with a MODEL step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
