@@ -29,10 +29,12 @@ import shutil
 import signal
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, NoReturn
+from urllib.parse import urlparse
 
 from coder_eval.agent import Agent
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
@@ -79,7 +81,7 @@ logger = logging.getLogger(__name__)
 _HOST_SCRIPT = Path(__file__).parent / "delegate" / "delegate_host.mjs"
 _SDK_ENTRY_REL_PATH = Path("node_modules") / "@uipath" / "delegate-sdk" / "dist" / "index.mjs"
 
-_UNSUPPORTED_FIELDS: tuple[str, ...] = (
+_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "allowed_tools",
     "disallowed_tools",
     "system_prompt",
@@ -101,6 +103,18 @@ _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 # `session_start` / `step` / `done` are recognized-but-informational; anything
 # else is logged and ignored rather than silently dropped.
 _TEXT_EVENT_TYPES = frozenset({"thinking", "message"})
+
+
+def _env(bare_name: str) -> str | None:
+    """Read a ``DELEGATE_``-namespaced auth var, falling back to the bare name.
+
+    coder_eval controls these names (it forwards the values into the SDK's
+    ``auth`` object; the SDK never reads process.env itself), so the bare
+    spellings (``AUTH_TOKEN``, ``TENANT_ID``, ...) collide with names other
+    tooling (npm, Vault, Terraform) commonly exports. The namespaced spelling
+    is checked first; the bare one stays for delegate-cli compatibility.
+    """
+    return os.environ.get(f"DELEGATE_{bare_name}") or os.environ.get(bare_name)
 
 
 def _candidate_install_roots() -> list[Path]:
@@ -217,6 +231,8 @@ def _parse_usage(raw: Any) -> TokenUsage | None:
     cache_creation = _int("cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write", "cacheWrite")
     cache_read = _int("cache_read_input_tokens", "cacheReadInputTokens", "cache_read", "cacheRead")
     if input_tokens == 0 and output_tokens == 0 and cache_creation == 0 and cache_read == 0:
+        if raw:
+            logger.warning("delegate: usage payload matched none of the known bucket spellings: %r", sorted(raw))
         return None
     return TokenUsage(
         uncached_input_tokens=input_tokens,
@@ -234,11 +250,9 @@ class _TurnState:
     per-round-trip segment machinery a richer transcript would need.
     """
 
-    def __init__(self, *, task_id: str, iteration: int, user_input: str, model: str | None) -> None:
-        self.task_id = task_id
+    def __init__(self, *, iteration: int, user_input: str, model: str | None) -> None:
         self.iteration = iteration
         self.user_input = user_input
-        self.model = model
         self.turn_id = f"delegate-{iteration}"
         self.started_at = time.monotonic()
         self.started_dt = datetime.now()
@@ -251,7 +265,6 @@ class _TurnState:
         self.message_events = 0
 
         self.model_used: str | None = model
-        self.session_id: str | None = None
         self.usage: TokenUsage | None = None
         self.final_response: str | None = None
         self.error_message: str | None = None
@@ -303,7 +316,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stdout_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self._stderr_lines: list[str] = []
+        self._stderr_lines: deque[str] = deque(maxlen=200)
+        self._pgid: int | None = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -321,7 +335,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             )
         self._sdk_entry = _resolve_sdk_entry()
 
-        ignored = [f for f in _UNSUPPORTED_FIELDS if getattr(self.config, f, None)]
+        ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
         if ignored:
             logger.warning(
                 "delegate: %s set but has no Delegate SDK equivalent — NOT enforced; do not rely on "
@@ -332,7 +346,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
-        self._session_id = self.config.session_id or None
+        self._session_id = self.config.session_id
         self._state = AgentState.WORKING
 
         await self._spawn_and_init()
@@ -349,7 +363,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
         await self._cancel_drain_tasks()
         self._stdout_queue = asyncio.Queue()
-        self._stderr_lines = []
+        self._stderr_lines.clear()
         self._process = await asyncio.create_subprocess_exec(
             "node",
             str(_HOST_SCRIPT),
@@ -360,7 +374,11 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             stderr=asyncio.subprocess.PIPE,
             env=env,
             limit=STDOUT_LINE_LIMIT_BYTES,
+            # Own session/process group, so a force-kill can killpg the SDK's
+            # bundled interop child too. POSIX-only knob; harmless False elsewhere.
+            start_new_session=os.name == "posix",
         )
+        self._pgid = self._process.pid if os.name == "posix" else None
         assert self._process.stdout is not None
         assert self._process.stderr is not None
         self._stdout_task = asyncio.create_task(self._drain_stdout(self._process.stdout))
@@ -401,12 +419,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         environment = os.environ.get("DELEGATE_ENV")
         if environment:
             options["environment"] = environment
-        auth_token = os.environ.get("AUTH_TOKEN")
+        auth_token = _env("AUTH_TOKEN")
         if auth_token:
             auth: dict[str, Any] = {
                 "accessToken": auth_token,
-                "tenantId": os.environ.get("TENANT_ID"),
-                "organizationId": os.environ.get("ORG_ID"),
+                "tenantId": _env("TENANT_ID"),
+                "organizationId": _env("ORG_ID"),
             }
             # CONFIRMED LIVE: when `environment` (rather than `backendUrl`) is set,
             # the SDK resolves the backend URL from THIS auth object's
@@ -414,13 +432,14 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             # process.env directly (that pairing is documented only in the SDK's
             # own error message, aimed at delegate-cli's env-var-driven wrapper —
             # the SDK class we drive here never reads those two vars itself).
-            org_slug = os.environ.get("ORG_SLUG")
-            tenant_slug = os.environ.get("TENANT_SLUG")
+            org_slug = _env("ORG_SLUG")
+            tenant_slug = _env("TENANT_SLUG")
             if org_slug:
                 auth["organizationName"] = org_slug
             if tenant_slug:
                 auth["tenantName"] = tenant_slug
             options["auth"] = auth
+        # list[LocalPluginConfig] is not list[dict[str, Any]] under list invariance.
         skills_path = _resolve_bundled_skills_path(self.config.plugins)  # type: ignore[arg-type]
         if skills_path:
             options["bundledSkillsPath"] = skills_path
@@ -446,6 +465,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(proc.pid, _SIGKILL)
         self._process = None
+        self._sweep_pgid()
 
     async def _force_kill_host(self) -> None:
         proc = self._process
@@ -454,6 +474,23 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 proc.kill()
             with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS)
+        self._sweep_pgid()
+
+    def _sweep_pgid(self) -> None:
+        """SIGKILL the host's process group (POSIX only), reaping any orphaned child.
+
+        The host itself is already killed by ``proc.kill()``/``os.kill`` above;
+        this additionally reaps the SDK's bundled interop process
+        (``UiPath.Aria.ComputerUse.Api``) if it outlived the host, mirroring
+        ``opencode_agent.py``'s ``_sweep_process_groups``.
+        """
+        if os.name == "posix" and self._pgid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(self._pgid, _SIGKILL)
+        self._pgid = None
+
+    def _stderr_tail(self) -> str:
+        return "\n".join(list(self._stderr_lines)[-20:]) or "(no stderr captured)"
 
     async def _cancel_drain_tasks(self) -> None:
         """Cancel and await the stdout/stderr drain tasks of the CURRENT host, if any.
@@ -464,10 +501,16 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         their pipe's EOF either way, but dropping a live task silently is the
         pattern this project's teardown paths avoid elsewhere).
         """
+        # Narrowed to cancellation alone (mirrors isolation/docker_runner.py's
+        # same cancel-then-await teardown) so a genuine KeyboardInterrupt /
+        # SystemExit -- or a CancelledError delivered to the CALLER during
+        # this same await -- still propagates instead of being swallowed.
+        # _drain_stdout/_drain_stderr already log and handle their own
+        # non-cancellation failures internally.
         for task in (self._stdout_task, self._stderr_task):
             if task is not None:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
         self._stdout_task = None
         self._stderr_task = None
@@ -487,11 +530,19 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             **super().get_environment_info(),
             "delegate_model": self.config.model,
         }
-        # None (not a hardcoded "alpha") when unset: _build_init_options forwards
-        # `environment` to the SDK only when the var is actually set, so recording
-        # a fallback here would assert a routing decision the SDK never made.
+        if self.config.effort:
+            info["delegate_effort"] = self.config.effort
+        if self.config.enable_computer_use:
+            info["delegate_enable_computer_use"] = True
+        # DELEGATE_BACKEND_URL wins over DELEGATE_ENV when both are set (see
+        # _build_init_options/docs/agents/DELEGATE.md), so recording delegate_env
+        # here too would assert a routing decision the SDK never made. Host only
+        # (never the full URL, which can carry embedded credentials).
+        backend_url = os.environ.get("DELEGATE_BACKEND_URL")
         environment = os.environ.get("DELEGATE_ENV")
-        if environment:
+        if backend_url:
+            info["delegate_backend_url_host"] = urlparse(backend_url).hostname
+        elif environment:
             info["delegate_env"] = environment
         if self._session_id:
             info["delegate_session_id"] = self._session_id
@@ -516,7 +567,14 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             # fresh rather than fail fast. Session-conflict-specific recovery
             # is deferred (see module docstring); this simpler policy covers
             # both "the previous turn stopped cleanly" and "it crashed".
-            await self._spawn_and_init()
+            try:
+                await self._spawn_and_init()
+            except AgentConfigError as exc:
+                # Node/the SDK install were already validated once in start();
+                # a failure respawning mid-run is a transient backend/auth
+                # hiccup, not a missing prerequisite -- make it retryable
+                # instead of ending the task outright.
+                raise AgentCrashError(str(exc)) from exc
 
         self._begin_turn()
         collector = EventCollector()
@@ -527,7 +585,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 safe_emit(stream_callback, event)
 
         state = _TurnState(
-            task_id=self.task_id,
             iteration=self._iteration,
             user_input=user_input,
             model=self.config.model,
@@ -546,7 +603,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             while True:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    await self._timeout_turn(state, collector, timeout or 0.0)
+                    await self._timeout_turn(state, collector, emit, timeout or 0.0)
 
                 try:
                     msg = await self._read_next_message(deadline)
@@ -557,7 +614,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     # this is never misreported as a generic AgentCrashError,
                     # which would leave a "send" in flight on a host the next
                     # communicate() would wrongly reuse.
-                    await self._timeout_turn(state, collector, timeout or 0.0)
+                    await self._timeout_turn(state, collector, emit, timeout or 0.0)
                 if msg is None:
                     # The stream is closed. Not always because the process
                     # already exited: _drain_stdout also signals this on a
@@ -565,24 +622,30 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     # where the host can still be alive -- force-kill before
                     # dropping the handle so the NEXT communicate() respawns
                     # cleanly instead of orphaning it.
-                    await self._force_kill_host()
-                    self._process = None
-                    self._crash_turn(state, collector, "Delegate host closed its output stream unexpectedly")
+                    await self._abandon_host_and_crash(
+                        state, collector, emit, "Delegate host closed its output stream unexpectedly"
+                    )
 
                 mtype = msg.get("type")
                 if mtype == "send_ok":
                     self._handle_send_ok(msg, state)
                     break
                 if mtype == "send_error":
-                    self._crash_turn(state, collector, f"Delegate send failed: {msg.get('message', 'unknown error')}")
+                    # Reuse of a live host after a recoverable `send_error` is
+                    # not attempted: force-kill so the next communicate() always
+                    # respawns onto a fresh queue rather than risk consuming a
+                    # stale onEvent callback the SDK fires after this rejection.
+                    await self._abandon_host_and_crash(
+                        state, collector, emit, f"Delegate send failed: {msg.get('message', 'unknown error')}"
+                    )
                 if mtype == "fatal":
                     # The host exits right after writing this line (every
                     # `fatal` site calls process.exit) -- force-kill is then a
                     # no-op, but stays here to match the EOF branch exactly
                     # rather than trust that invariant from this side too.
-                    await self._force_kill_host()
-                    self._process = None
-                    self._crash_turn(state, collector, f"Delegate host crashed: {msg.get('message', 'unknown error')}")
+                    await self._abandon_host_and_crash(
+                        state, collector, emit, f"Delegate host crashed: {msg.get('message', 'unknown error')}"
+                    )
                 if mtype in ("protocol_error", "destroy_error"):
                     logger.warning("delegate: host reported %s: %s", mtype, msg.get("message"))
                     continue
@@ -591,13 +654,11 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
                 if max_turns is not None and state.message_events >= max_turns:
                     state.max_turns_exhausted = True
-                    await self._force_kill_host()
-                    self._process = None  # host abandoned; next turn respawns
+                    await self._abandon_host_after_loop_exit()
                     break
                 if should_stop is not None and should_stop():
                     stopped_early = True
-                    await self._force_kill_host()
-                    self._process = None  # host abandoned; next turn respawns
+                    await self._abandon_host_after_loop_exit()
                     break
 
             if stopped_early:
@@ -624,7 +685,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             self._capture_partial_turn(collector)
             raise
         except Exception as e:
-            self._crash_turn(state, collector, f"Delegate turn failed: {e!s}", cause=e)
+            # The host may or may not still be alive (e.g. a BrokenPipeError
+            # from a dead stdin) -- force-kill so a retry always respawns
+            # rather than write into, or read stale events from, this host.
+            await self._force_kill_host()
+            self._process = None
+            self._crash_turn(state, collector, emit, f"Delegate turn failed: {e!s}", cause=e)
             raise  # unreachable — _crash_turn is NoReturn
 
     def _handle_event(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
@@ -632,7 +698,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         event_type = msg.get("type")
         session_id = msg.get("sessionId")
         if isinstance(session_id, str) and session_id:
-            state.session_id = session_id
             self._session_id = session_id
         model = msg.get("model")
         if isinstance(model, str) and model:
@@ -739,7 +804,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 state.final_response = response
             session_id = result.get("sessionId")
             if isinstance(session_id, str) and session_id:
-                state.session_id = session_id
                 self._session_id = session_id
             usage = _parse_usage(result.get("usage"))
             if usage is not None:
@@ -840,37 +904,56 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             )
         )
 
+    async def _abandon_host_after_loop_exit(self) -> None:
+        """Force-kill after ``max_turns``/cooperative-stop; next turn respawns."""
+        await self._force_kill_host()
+        self._process = None
+
+    async def _abandon_host_and_crash(
+        self,
+        state: _TurnState,
+        collector: EventCollector,
+        emit: Callable[[StreamEvent], None],
+        message: str,
+    ) -> NoReturn:
+        """Force-kill the current host, drop the handle, and crash the turn.
+
+        Shared by every mid-``communicate()`` failure kernel that must not let
+        the NEXT ``communicate()`` reuse this host: reuse risks writing a
+        ``send`` into a dead pipe, or consuming an ``onEvent`` callback the SDK
+        fires after this failure as the retry's own result.
+        """
+        await self._force_kill_host()
+        self._process = None
+        self._crash_turn(state, collector, emit, f"{message}. stderr tail:\n{self._stderr_tail()}")
+
     def _crash_turn(
-        self, state: _TurnState, collector: EventCollector, message: str, *, cause: BaseException | None = None
+        self,
+        state: _TurnState,
+        collector: EventCollector,
+        emit: Callable[[StreamEvent], None],
+        message: str,
+        *,
+        cause: BaseException | None = None,
     ) -> NoReturn:
         def finalize(status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
-            self._finalize_turn(
-                state,
-                status,
-                lambda e: collector.on_event(e),
-                crashed=crashed,
-                crash_reason=crash_reason,
-            )
+            self._finalize_turn(state, status, emit, crashed=crashed, crash_reason=crash_reason)
 
         try:
             self._finalize_and_raise_crash(finalize, message, cause=cause)
         finally:
             self._capture_partial_turn(collector)
 
-    async def _timeout_turn(self, state: _TurnState, collector: EventCollector, timeout: float) -> NoReturn:
+    async def _timeout_turn(
+        self, state: _TurnState, collector: EventCollector, emit: Callable[[StreamEvent], None], timeout: float
+    ) -> NoReturn:
         await self._force_kill_host()
         # Drop the handle so the NEXT communicate() respawns rather than reuse
         # a killed process (or, worse, a "send" still nominally in flight).
         self._process = None
 
         def finalize(status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
-            self._finalize_turn(
-                state,
-                status,
-                lambda e: collector.on_event(e),
-                crashed=crashed,
-                crash_reason=crash_reason,
-            )
+            self._finalize_turn(state, status, emit, crashed=crashed, crash_reason=crash_reason)
 
         try:
             self._finalize_and_raise_timeout(finalize, timeout)
@@ -898,7 +981,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 # (a buffer overrun or drain exception, not necessarily exit).
                 await self._force_kill_host()
                 self._process = None
-                tail = "\n".join(self._stderr_lines[-20:]) or "(no stderr captured)"
+                tail = self._stderr_tail()
                 raise AgentCrashError(f"Delegate host exited before responding. stderr tail:\n{tail}")
             if msg.get("type") in accepted_types:
                 return msg

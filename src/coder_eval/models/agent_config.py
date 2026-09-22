@@ -422,15 +422,15 @@ class DelegateAgentConfig(BaseAgentConfig):
             "tier a future SDK release adds."
         ),
     )
-    project_id: str = Field(
-        default="",
+    project_id: str | None = Field(
+        default=None,
         description=(
-            "Client-side wiki-routing key (never sent to the backend). Empty means session-scoped "
+            "Client-side wiki-routing key (never sent to the backend). None means session-scoped "
             "wiki state under a server-assigned session id instead of a stable project directory."
         ),
     )
-    session_id: str = Field(
-        default="",
+    session_id: str | None = Field(
+        default=None,
         description=(
             "Pins the Delegate SDK session id used when a turn omits one, for deterministic "
             "wiki-path routing. Unlike project_id this IS a backend entity: a pinned id skips "

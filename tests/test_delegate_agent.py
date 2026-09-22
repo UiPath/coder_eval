@@ -84,7 +84,11 @@ class _FakeProcess:
 
 @pytest.fixture
 def patch_exec(monkeypatch: pytest.MonkeyPatch):
-    """Patch ``create_subprocess_exec`` to return a fake process fed ``stdout_lines``."""
+    """Patch ``create_subprocess_exec`` to return a fake process fed ``stdout_lines``.
+
+    Also stubs ``os.killpg`` so the agent's process-group sweep can never signal
+    a real group whose id happens to collide with the fake pid.
+    """
 
     def _install(
         stdout_lines: list[bytes], stderr_lines: list[bytes] | None = None, *, hang_after: bool = False
@@ -97,6 +101,9 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/node")
         monkeypatch.setattr(agent_module, "_resolve_sdk_entry", lambda: agent_module._HOST_SCRIPT)
+        # raising=False: os.killpg does not exist on Windows, where the sweep is a
+        # no-op -- the stub must still install so the fixture works on every platform.
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: None, raising=False)
         return proc
 
     return _install
@@ -146,6 +153,9 @@ class TestResolveSdkEntry:
         monkeypatch.delenv("DELEGATE_SDK_NODE_MODULES", raising=False)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))
+        # A real npm install under the developer's actual home directory must
+        # not make this test flaky -- pin every search root to tmp_path.
+        monkeypatch.setattr(agent_module, "_candidate_install_roots", lambda: [tmp_path])
         with pytest.raises(AgentConfigError, match="Searched the cwd"):
             _resolve_sdk_entry()
 
@@ -411,6 +421,82 @@ class TestCommunicate:
         assert end.status == AgentEndStatus.COMPLETED
         assert record.crashed is False
 
+    @pytest.mark.parametrize(
+        ("usage_payload", "expected_input", "expected_output"),
+        [
+            ({"input_tokens": 10, "output_tokens": 5}, 10, 5),
+            ({"inputTokens": 10, "outputTokens": 5}, 10, 5),
+            ({"uncached_input_tokens": 10, "output_tokens": 5}, 10, 5),
+        ],
+    )
+    async def test_usage_bucket_spellings_populate_token_usage(
+        self, patch_exec, tmp_path, usage_payload, expected_input, expected_output
+    ):
+        events = [_line({"type": "send_ok", "result": {"response": "done", "usage": usage_payload}})]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == expected_input
+        assert record.token_usage.output_tokens == expected_output
+
+    async def test_usage_all_zero_is_none_and_warns(self, patch_exec, tmp_path, caplog):
+        events = [_line({"type": "send_ok", "result": {"response": "done", "usage": {"weird_bucket": 3}}})]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level("WARNING"):
+            record = await agent.communicate("hi")
+        assert record.token_usage is None
+        assert any("usage payload matched none" in r.message for r in caplog.records)
+
+    async def test_model_and_cost_wired_into_record(self, patch_exec, tmp_path):
+        events = [
+            _line(
+                {
+                    "type": "send_ok",
+                    "result": {
+                        "response": "done",
+                        "model": "virtuoso-1-5",
+                        "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+                    },
+                }
+            )
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        assert record.model_used == "virtuoso-1-5"
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == pytest.approx(0.95 + 4.0)
+
+    async def test_send_error_delivers_end_events_to_stream_callback(self, patch_exec, tmp_path):
+        events = [_line({"type": "send_error", "message": "network blip"})]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        seen: list[Any] = []
+
+        class _Recorder:
+            def on_event(self, event: Any) -> None:
+                seen.append(event)
+
+        with pytest.raises(AgentCrashError):
+            await agent.communicate("hi", stream_callback=_Recorder())
+        assert sum(isinstance(e, AgentStartEvent) for e in seen) == 1
+        assert sum(isinstance(e, AgentEndEvent) for e in seen) == 1
+        end = next(e for e in seen if isinstance(e, AgentEndEvent))
+        assert end.crashed is True
+
+    async def test_timeout_delivers_end_events_to_stream_callback(self, patch_exec, tmp_path):
+        patch_exec([_line({"type": "init_ok"})], hang_after=True)
+        agent = DelegateAgent(_config(), task_id="t1")
+        await agent.start(str(tmp_path))
+        seen: list[Any] = []
+
+        class _Recorder:
+            def on_event(self, event: Any) -> None:
+                seen.append(event)
+
+        with pytest.raises(TurnTimeoutError):
+            await agent.communicate("hi", timeout=0.05, stream_callback=_Recorder())
+        assert sum(isinstance(e, AgentStartEvent) for e in seen) == 1
+        assert sum(isinstance(e, AgentEndEvent) for e in seen) == 1
+
 
 class TestStop:
     async def test_stop_sends_destroy_and_marks_finished(self, patch_exec, tmp_path):
@@ -437,6 +523,28 @@ class TestKill:
         agent = DelegateAgent(_config())
         agent.kill_sync()  # must not raise
 
+    @pytest.mark.skipif(os.name != "posix", reason="process-group teardown is POSIX-only by design")
+    def test_kill_sync_sweeps_process_group(self, monkeypatch):
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+        killpg_calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
+        agent = DelegateAgent(_config())
+        proc = _FakeProcess([])
+        agent._process = proc  # type: ignore[assignment]
+        agent._pgid = proc.pid
+        agent.kill_sync()
+        assert killpg_calls == [(proc.pid, agent_module._SIGKILL)]
+        assert agent._pgid is None
+
+    async def test_force_kill_host_sweeps_process_group(self, patch_exec, tmp_path, monkeypatch):
+        agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        killpg_calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
+        await agent._force_kill_host()
+        assert proc._killed
+        if os.name == "posix":
+            assert killpg_calls == [(proc.pid, agent_module._SIGKILL)]
+
 
 class TestRegistration:
     def test_registered_as_delegate(self):
@@ -449,3 +557,12 @@ class TestRegistration:
         cfg = _config()
         agent = create_agent(AgentKind.DELEGATE, cfg)
         assert isinstance(agent, DelegateAgent)
+
+
+def test_host_script_ships_with_the_package():
+    """Every test above patches the fixture to return ``_HOST_SCRIPT`` without
+    ever checking the file exists on disk -- a build-config change that dropped
+    it from the wheel would surface only as a runtime MODULE_NOT_FOUND inside a
+    live run, never here.
+    """
+    assert agent_module._HOST_SCRIPT.is_file()

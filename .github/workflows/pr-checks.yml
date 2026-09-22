@@ -1144,8 +1144,9 @@ jobs:
     # wrapping the public @uipath/delegate-sdk against a real UiPath backend. Runs on
     # every PR/push like the other live-test jobs (codex-live-tests, byoa-live-tests)
     # now that the DELEGATE_ROPC_* secrets are provisioned; the presence-check gate
-    # below stays as a safety net so an accidental secret removal skips cleanly
-    # instead of failing a required check. Auth is minted fresh each run via the
+    # below skips cleanly ONLY on a fork PR (no secrets available there) and fails
+    # loudly on a same-repo run with a missing secret, matching the other live jobs.
+    # Auth is minted fresh each run via the
     # OAuth2 Resource Owner Password Credentials (ROPC) grant — the same
     # `grant_type=password` flow documented in coder_eval_uipath/eval_runner/CI_DESIGN.md
     # and implemented in coder_eval_uipath/eval_runner/scripts/ci/refresh-auth.sh —
@@ -1176,15 +1177,30 @@ jobs:
           DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
           DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
           DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          # A fork PR (this job's own `if:` skips the whole job for those) is the
+          # only case a missing secret is expected -- everywhere else, silently
+          # reporting success having run nothing is exactly the failure a required
+          # check exists to catch, so a same-repo run with a rotated/dropped secret
+          # fails loudly instead.
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          if [ -z "$DELEGATE_ROPC_CLIENT_ID" ] || [ -z "$DELEGATE_ROPC_CLIENT_SECRET" ] || \
-             [ -z "$DELEGATE_ROPC_USERNAME" ] || [ -z "$DELEGATE_ROPC_PASSWORD" ] || \
-             [ -z "$DELEGATE_ORG_ID" ] || [ -z "$DELEGATE_TENANT_ID" ] || \
-             [ -z "$DELEGATE_ORG_SLUG" ] || [ -z "$DELEGATE_TENANT_SLUG" ]; then
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "Delegate ROPC secrets not configured — skipping the live run."
-          else
+          missing=""
+          for name in DELEGATE_ROPC_CLIENT_ID DELEGATE_ROPC_CLIENT_SECRET DELEGATE_ROPC_USERNAME \
+                      DELEGATE_ROPC_PASSWORD DELEGATE_ORG_ID DELEGATE_TENANT_ID \
+                      DELEGATE_ORG_SLUG DELEGATE_TENANT_SLUG; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -z "$missing" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$IS_FORK_PR" = "true" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Delegate ROPC secrets not available on a fork PR — skipping the live run."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Delegate ROPC secrets missing on a same-repo run:$missing"
+            exit 1
           fi
 
       - name: Set up Python 3.13
@@ -1252,16 +1268,29 @@ jobs:
           # alpha scope list so this mint is provably not narrower than the one
           # already validated there.
           SCOPES="openid profile email offline_access ConversationalAgents AutopilotForEveryone Orchestrator OrchestratorApiUserAccess StudioWebBackend"
-          response=$(curl -sS -L --connect-timeout 15 --max-time 60 -X POST "${UIPATH_URL}/identity_/connect/token" \
+          # The POST body is built here and piped to curl on stdin (--data-binary
+          # @-), never passed as a --data-urlencode argv value: argv (unlike
+          # stdin) is world-readable via /proc/<pid>/cmdline to any other process
+          # on this self-hosted runner for the life of the request, and
+          # CLIENT_SECRET/CE_PASSWORD are durable credentials, not the ~1h token.
+          body=$(jq -rn \
+              --arg client_id "$CLIENT_ID" \
+              --arg client_secret "$CLIENT_SECRET" \
+              --arg username "$CE_USERNAME" \
+              --arg password "$CE_PASSWORD" \
+              --arg acr_values "tenant:${ORG_ID}" \
+              --arg scope "$SCOPES" \
+              '"grant_type=password" +
+               "&client_id=" + ($client_id|@uri) +
+               "&client_secret=" + ($client_secret|@uri) +
+               "&username=" + ($username|@uri) +
+               "&password=" + ($password|@uri) +
+               "&acr_values=" + ($acr_values|@uri) +
+               "&scope=" + ($scope|@uri)')
+          response=$(printf '%s' "$body" | curl -sS -L --connect-timeout 15 --max-time 60 -X POST "${UIPATH_URL}/identity_/connect/token" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               -H "x-uipath-internal-accountid: ${ORG_ID}" \
-              --data-urlencode "grant_type=password" \
-              --data-urlencode "client_id=${CLIENT_ID}" \
-              --data-urlencode "client_secret=${CLIENT_SECRET}" \
-              --data-urlencode "username=${CE_USERNAME}" \
-              --data-urlencode "password=${CE_PASSWORD}" \
-              --data-urlencode "acr_values=tenant:${ORG_ID}" \
-              --data-urlencode "scope=${SCOPES}")
+              --data-binary @-)
 
           if err=$(echo "$response" | jq -e -r '.error // empty') && [ -n "$err" ]; then
               echo "ROPC token request failed: $(echo "$response" | jq -r '.error_description // .error')" >&2
@@ -1283,7 +1312,12 @@ jobs:
         # DELEGATE_ORG_ID/DELEGATE_ORG_SLUG secrets used to build the backend
         # URL -- a mismatch here (not a coder_eval bug) is what a live run's
         # "Account id does not match" 401 from the connections_ API points at.
+        # continue-on-error: this step is advisory -- its own script already
+        # catches and reports unexpected input, but a step failure must still
+        # never gate the real `coder-eval run` below that it exists to help
+        # explain, not mask.
         if: steps.gate.outputs.present == 'true'
+        continue-on-error: true
         env:
           ACCESS_TOKEN: ${{ steps.ropc.outputs.access_token }}
           EXPECTED_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
@@ -1304,15 +1338,14 @@ jobs:
         if: steps.gate.outputs.present == 'true'
         env:
           DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
-          DELEGATE_ENV: alpha
+          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
           ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          # The SDK's --env resolution needs human-readable slugs alongside the
-          # GUIDs above (a bare AUTH_TOKEN/TENANT_ID/ORG_ID triple isn't enough
-          # for `environment: "alpha"` to resolve a backend URL) — these are
-          # read straight from process.env by the SDK itself, not plumbed
-          # through DelegateAgent's init options.
+          # Forwarded into `auth.organizationName` / `auth.tenantName` by
+          # DelegateAgent._build_init_options (see .claude/notes/agents.md §
+          # Delegate agent) — needed alongside the GUIDs above whenever
+          # `environment` (rather than `backendUrl`) resolves the backend.
           ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
           TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: .venv/bin/coder-eval run tasks/delegate/fizzbuzz_delegate.yaml --run-dir runs/delegate-live
@@ -1326,10 +1359,45 @@ jobs:
 
           results = list(Path("runs/delegate-live").rglob("task.json"))
           assert results, "no task.json written"
-          data = json.loads(results[0].read_text())
-          status = str(data.get("final_status", "")).lower()
-          assert "success" in status or "pass" in status, f"expected PASS, got final_status={data.get('final_status')}"
-          print("Live Delegate run PASSED:", data.get("final_status"))
+          for path in results:
+              data = json.loads(path.read_text())
+              assert data.get("final_status") == "SUCCESS", (
+                  f"{path}: expected SUCCESS, got final_status={data.get('final_status')}"
+              )
+              print(f"Live Delegate run PASSED ({path}):", data.get("final_status"))
+          PY
+
+      - name: Run Delegate live unit tests (assert PASS)
+        if: steps.gate.outputs.present == 'true'
+        env:
+          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_delegate_agent_live.py \
+            -m live -n0 -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-delegate-live.xml
+
+      - name: Assert Delegate live tests actually ran (not silently skipped)
+        if: steps.gate.outputs.present == 'true'
+        run: |
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("tmp/junit-delegate-live.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          passed = total - skipped - errors - failures
+          print(f"delegate-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
+          if passed < 1:
+              sys.exit("Live Delegate tests reported zero PASSED tests (missing prerequisite / silent skip?)")
           PY
 
       - name: Upload Delegate live-test artifacts on failure

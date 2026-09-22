@@ -55,8 +55,8 @@ if (!sdkEntryPath) {
   process.exit(2);
 }
 
-function writeLine(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+function writeLine(obj, callback) {
+  process.stdout.write(JSON.stringify(obj) + "\n", callback);
 }
 
 let agent = null;
@@ -74,8 +74,7 @@ async function handleInit(msg) {
       // clear crash instead of hanging on a line that will never arrive. Exits,
       // like every other `fatal` site: the Python side's crash-handling treats
       // ALL `fatal` messages as "the host is exiting", so this one must too.
-      writeLine({ type: "fatal", message: `event serialization failed: ${err}` });
-      process.exit(1);
+      writeLine({ type: "fatal", message: `event serialization failed: ${err}` }, () => process.exit(1));
     }
   });
   await agent.initialize(msg.options || {});
@@ -141,13 +140,19 @@ rl.on("close", () => {
 // Both handlers below write a `fatal` line before exiting so the Python side's
 // read loop never hangs waiting for a line that will never arrive -- the
 // original failure mode this design exists to avoid (see
-// .claude/notes/agents.md § Delegate agent).
+// .claude/notes/agents.md § Delegate agent). The exit happens from the write's
+// own callback, not the next statement: stdout is a pipe here, so
+// process.stdout.write() is asynchronous, and process.exit() called before it
+// flushes can drop this exact line -- degrading the Python side's crash
+// message to the generic "closed its output stream unexpectedly".
 process.on("unhandledRejection", (err) => {
-  writeLine({ type: "fatal", message: `unhandled rejection: ${(err && err.message) || err}` });
-  process.exit(1);
+  writeLine({ type: "fatal", message: `unhandled rejection: ${(err && err.message) || err}` }, () =>
+    process.exit(1)
+  );
 });
 
 process.on("uncaughtException", (err) => {
-  writeLine({ type: "fatal", message: `uncaught exception: ${(err && err.message) || err}` });
-  process.exit(1);
+  writeLine({ type: "fatal", message: `uncaught exception: ${(err && err.message) || err}` }, () =>
+    process.exit(1)
+  );
 });

@@ -44,7 +44,7 @@ To override the auto-search, set **one** of:
 
 Either:
 
-- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars. Confirmed live: when `DELEGATE_ENV` (rather than `DELEGATE_BACKEND_URL`) resolves the backend, also set `ORG_SLUG` and `TENANT_SLUG` (the human-readable org/tenant names, not the GUIDs above) — the SDK's `environment` resolution reads `organizationName`/`tenantName` off the `auth` object passed to `initialize()`, not off `process.env` directly (its own error message's "set ORG_SLUG and TENANT_SLUG env vars" advice describes the separate `delegate-cli` wrapper's behavior, not this SDK class), so this agent forwards them into `auth.organizationName`/`auth.tenantName` itself. Without them, init fails with `--env alpha needs org/tenant slugs`. Skip both by setting `DELEGATE_BACKEND_URL` directly instead.
+- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars (each also accepts a `DELEGATE_`-namespaced spelling — `DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID` — checked first, since the bare names collide with what other tooling like npm/Vault/Terraform commonly exports). Confirmed live: when `DELEGATE_ENV` (rather than `DELEGATE_BACKEND_URL`) resolves the backend, also set `ORG_SLUG` and `TENANT_SLUG` (or `DELEGATE_ORG_SLUG`/`DELEGATE_TENANT_SLUG`; the human-readable org/tenant names, not the GUIDs above) — the SDK's `environment` resolution reads `organizationName`/`tenantName` off the `auth` object passed to `initialize()`, not off `process.env` directly (its own error message's "set ORG_SLUG and TENANT_SLUG env vars" advice describes the separate `delegate-cli` wrapper's behavior, not this SDK class), so this agent forwards them into `auth.organizationName`/`auth.tenantName` itself. Without them, init fails with `--env alpha needs org/tenant slugs`. Skip both by setting `DELEGATE_BACKEND_URL` directly instead.
 - **Saved login** — a prior `delegate-sdk` `runLoginFlow` / `delegate-cli login` that wrote `~/.aria/sdk-auth.json`. The Node host reads this itself (via the SDK's own `loadAndRefreshAuth()`) when no `AUTH_TOKEN` is supplied — this agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. This path already carries the slugs, so `ORG_SLUG`/`TENANT_SLUG` aren't needed.
 
 ## Usage
@@ -61,7 +61,9 @@ coder-eval run tasks/delegate/hello_date_delegate.yaml --type delegate --model v
 agent:
   type: delegate
   model: virtuoso-1-5
-  effort: high        # low | medium | high | xhigh
+  effort: high        # low | medium | high | xhigh | max
+  project_id: invoice-approval  # client-side wiki-routing key; None means session-scoped wiki state
+  session_id: abc-123           # pins the SDK session id a turn omits; project_id takes precedence
   enable_computer_use: false   # default; screen tools off, file/shell/Office/PDF unaffected
   plugins:
     - type: local
@@ -74,6 +76,8 @@ success_criteria:
 ```
 
 `enable_computer_use` defaults to `false` — this is a headless eval harness: `true` requires macOS Accessibility/Screen-Recording grants a CI runner does not have, and the SDK throws unconditionally on Linux when it's enabled. File, shell, Office and PDF tools are unaffected either way.
+
+`project_id` and `session_id` both route the SDK to a "wiki" — its per-project/per-session persistent scratch state. `project_id` is client-side only (never sent to the backend) and picks a stable directory; leaving it unset falls back to session-scoped state under a server-assigned session id instead. `session_id`, unlike `project_id`, IS a backend entity: pinning one skips session creation, so it must be an id the backend already accepts — do not guess one.
 
 ### Skills
 
@@ -173,7 +177,7 @@ Live integration tests (drive a real `@uipath/delegate-sdk` install against a re
 uv run pytest -m live tests/test_delegate_agent_live.py
 ```
 
-CI runs the same kind of check as a manually-dispatched `delegate-live-tests` job in
+CI runs the same kind of check as the `delegate-live-tests` job in
 [`pr-checks.yml`](../../.github/workflows/pr-checks.yml): it mints a fresh access
 token via the OAuth2 Resource Owner Password Credentials (ROPC) grant against a
 dedicated bot user, then runs `tasks/delegate/fizzbuzz_delegate.yaml` end to end and

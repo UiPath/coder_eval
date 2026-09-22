@@ -260,7 +260,7 @@ def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
             messages.extend(e.messages)
 
     _SteppedDatetime.at_ms = 500  # dispatch before the turn state exists: head
-    state = _TurnState(task_id="t", iteration=1, user_input="go", model="m")
+    state = _TurnState(iteration=1, user_input="go", model="m")
 
     _SteppedDatetime.at_ms = 700
     agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "input": {}}, state, emit)

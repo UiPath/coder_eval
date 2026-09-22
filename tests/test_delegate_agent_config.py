@@ -26,8 +26,8 @@ def test_validates_and_defaults():
     cfg = DelegateAgentConfig(type="delegate")
     assert cfg.type == AgentKind.DELEGATE
     assert cfg.effort is None
-    assert cfg.project_id == ""
-    assert cfg.session_id == ""
+    assert cfg.project_id is None
+    assert cfg.session_id is None
     assert cfg.enable_computer_use is False
 
 

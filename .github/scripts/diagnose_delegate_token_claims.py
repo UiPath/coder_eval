@@ -22,7 +22,10 @@ TENANT_CANDIDATES = ["prt_id", "tenant_id", "tenantId"]
 
 def _decode_claims(payload: str) -> dict[str, object]:
     padded = payload + "=" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded))
+    decoded = json.loads(base64.urlsafe_b64decode(padded))
+    if not isinstance(decoded, dict):
+        raise SystemExit(f"token payload is {type(decoded).__name__}, not a JSON object")
+    return decoded
 
 
 def _print_verdict(claims: dict[str, object], candidates: list[str], expected: str, label: str) -> None:
@@ -43,4 +46,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Advisory only: never let a diagnostic failure (a malformed argv, a
+    # missing EXPECTED_* var) gate the real `coder-eval run` this step exists
+    # to help explain, rather than mask.
+    try:
+        main()
+    except Exception as exc:
+        print(f"claims diagnostic unavailable: {exc}")
