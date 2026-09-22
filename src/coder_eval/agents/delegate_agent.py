@@ -270,10 +270,9 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
-        # Backend round-trips begun. The SDK opens each with a thinking or message
-        # event (empty for a tool-only reply) and closes it with its tool results.
+        # Backend round-trips begun. A tool-only reply streams no text, so each call
+        # after the first opens once the previous call's tools have all returned.
         self.api_calls = 0
-        self.in_api_call = False
 
         self.model_used: str | None = model
         self.usage: TokenUsage | None = None
@@ -717,10 +716,10 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if usage is not None:
             state.usage = usage
 
+        if state.api_calls == 0 and (event_type in _TEXT_EVENT_TYPES or event_type == "tool_call"):
+            state.api_calls = 1
+
         if event_type in _TEXT_EVENT_TYPES:
-            if not state.in_api_call:
-                state.in_api_call = True
-                state.api_calls += 1
             text = msg.get("content")
             if isinstance(text, str) and text:
                 state.text_parts.append(text)
@@ -737,8 +736,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         elif event_type == "tool_call":
             self._handle_tool_call(msg, state, emit)
         elif event_type == "tool_result":
-            state.in_api_call = False
             self._handle_tool_result(msg, state, emit)
+            if not state.open_tools:
+                state.api_calls += 1
         elif event_type == "error":
             message = msg.get("message") or msg.get("content") or "unknown error"
             state.error_message = str(message)

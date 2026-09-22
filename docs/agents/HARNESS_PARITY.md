@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call runs from its first `thinking` or `message` event to its tool results |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -560,10 +560,11 @@ Each harness finds the call boundary in its own stream (the table above):
 - **Antigravity** attaches `usage_metadata` to one step per call, and the next call
   opens with a MODEL step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
-- **Delegate**'s SDK has no round-trip marker. It opens each reply with a `thinking`
-  or `message` event (empty for a tool-only reply) and streams the reply's text as
-  more `message` events, so the harness counts a call from its first such event to
-  its tool results. That is the same count as the SDK's own internal `stepCount`.
+- **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
+  its tool call, with no text before it. So the next call opens when every tool the
+  previous call announced has returned, since those results go back to the model,
+  and the cap fires before call N+1 can run anything. A reply that announces
+  several tools before their results counts once.
 
 Every harness except claude-code enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops
