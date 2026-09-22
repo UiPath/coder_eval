@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..analysis import calculate_command_statistics
 from ..durations import format_ms
-from ..models import FinalStatus, eval_result_total_cost, sum_costs
+from ..models import JUDGE_CRITERION_TYPES, FinalStatus, eval_result_total_cost, sum_costs
 from ..result_metrics import expected_turns_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
@@ -440,7 +440,7 @@ def _render_judge_section(criteria: list[CriterionResult], heading: str = "Judge
     for cr in criteria:
         # criterion_type identifies judges; details/findings/transcript may all
         # be present (typed JudgeCriterionResult) or in model_extra (round-tripped).
-        if cr.criterion_type not in ("llm_judge", "agent_judge"):
+        if cr.criterion_type not in JUDGE_CRITERION_TYPES:
             continue
         findings_raw = getattr(cr, "findings", []) or []
         findings = [str(f).strip() for f in findings_raw if str(f).strip()]

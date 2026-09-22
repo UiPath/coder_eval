@@ -391,3 +391,69 @@ with a plain synchronous call, because offloading a single fast syscall only wid
 cancellation window. The cleanup itself is deliberately synchronous: a bare `await` inside
 `finally` is cancellable, and cancelling as that line is reached would skip cleanup and leak
 the copy with no reaper.
+
+## System One rubric scoring
+
+A System One model (TypeSafe's `jev`) does not generate text. It reads one state and answers
+a map of typed questions — `noul` (P(yes)), `choice` (a distribution over options), `score` (a
+distribution over ordered levels) — with calibrated probabilities. That inverts what a judge
+criterion has to defend against. There is no prose to parse, so the whole `submit_verdict`
+tool channel has no counterpart here: the response schema is fixed by the questions that were
+asked, and a model that answers off-schema is a wire fault, not a grading fault. It also means
+there is no system prompt to hold an identity, so the transcript's system-prompt slot carries
+the rubric as sent — that, not a persona, is what a reviewer needs to replay a grade.
+
+### The score is ours, not the model's
+
+The model reports a distribution; the grade is arithmetic we do on it. Each question resolves
+to a value in [0.0, 1.0] through the author's own `expected` / `values`, and the criterion
+score is their weighted mean. Keeping that reduction on our side buys three things a text
+judge cannot have: the same answers always produce the same grade, the arithmetic is printable
+(`findings` carries one line per question, with the value and the weight), and a rubric can be
+re-scored from an archived transcript without another call.
+
+`scoring: expected` weights every outcome by its probability, so a model that is genuinely
+torn lands mid-scale instead of being rounded into a confident-looking verdict — the point of
+a calibrated model. `argmax` exists for the case where partial credit is misleading rather
+than informative: a gate. The default is `expected` because discarding the confidence is the
+lossy choice and should be the one you ask for.
+
+A distribution that is absent, non-numeric or sums to zero falls back to the point answer
+(`choice` / `score` / `noul`) rather than grading as 0.0 — a broken `probabilities` block is a
+provider fault, and the point answer is still a real answer. A question that is *unanswered*,
+or answered with the wrong primitive, is the opposite case: it scores 0.0 at its full weight
+and names itself in `findings`, because the rubric asked something the grade depends on and
+dropping it would quietly inflate the mean.
+
+### What it does not share with `llm_judge`
+
+It does not read `checker_context.api_route`. The eval route resolves a TEXT judge model, and
+substituting one for a System One model is not a fallback, it is a different API. The
+credential comes from the env var *named* by `api_key_env`, so only the name is ever stored on
+the criterion or persisted into a run record. A transport failure raises
+`JudgeInfrastructureError` and escalates the row, rather than following `llm_judge`'s
+unconfigured-transport arm into a scored 0.0 — an ungraded row must not read as a failed one.
+
+A 200 response whose body carries no usable `answers` map is the same class of fault. Reducing
+it would score every question "no answer returned" and finalize the row as a graded 0.0, which
+reads as a failure the agent earned; it escalates instead.
+
+### Non-finite values fail CLOSED
+
+`json.loads` accepts the `NaN` and `Infinity` tokens, so a non-finite float arrives through an
+ordinary 200 — and `base_url` may point at any gateway. NaN is unordered, so the obvious clamp
+`max(0.0, min(1.0, x))` returns **1.0** for it: the naive reading of a malformed answer is FULL
+credit. Every wire value is therefore checked with `math.isfinite` before it is used (`_is_number`),
+`_clamp` maps a non-finite input to 0.0, and a question's `weight` is bounded and rejects inf/NaN
+so the weighted mean cannot become `inf/inf`. The rule is that an unusable answer never earns
+credit; it scores 0.0 and says so in `findings`.
+
+`argmax` uses a strict `> 0.5` for `noul`. At exactly 0.5 the agreement is 0.5 whichever way
+`expected` points, so `>=` passed a maximally uncertain answer in *both* directions.
+
+### The reference scrub runs before serialization
+
+`system_one_judge` persists its state as `json.dumps(state)`, which escapes newlines and tabs.
+`scrub_reference` matches raw file text, so scrubbing the *rendered* JSON silently misses every
+multi-line reference. The state's strings are scrubbed first, then serialized — a leak shipped
+exactly this way, so the leak-canary test uses a multi-line, quoted reference on purpose.
