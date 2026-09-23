@@ -1068,7 +1068,8 @@ def _render_installed_tools(result: EvaluationResult) -> str:
 _SIMULATION_STOP_REASON_LABELS = {
     "criteria_passed": ("success", "criteria passed"),
     "stop_token": ("neutral", "simulator ended dialog"),
-    "max_turns": ("failure", "turn cap reached"),
+    "max_turns": ("failure", "exchange cap reached"),
+    "agent_max_turns": ("failure", "agent max_turns reached"),
     "budget": ("failure", "token budget exhausted"),
     "error": ("failure", "simulator error"),
 }

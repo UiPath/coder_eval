@@ -190,8 +190,9 @@ as every other agent.
 5. **`allowed_tools` / `disallowed_tools` are not read.** The harness runs with its
    full builtin tool set, so an Antigravity run has tools (web search, subagents,
    URL fetch) that the same task file denies on Claude Code and Codex.
-6. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
-   so the cap counts resolved tool calls instead, enforced on the step loop. See
+6. **`max_turns` is counted by the harness.** One `communicate()` is a single SDK turn
+   here, so the harness counts model API calls itself (a MODEL step at a new
+   `step_index` opens one) and enforces the cap on the step loop. See
    [Run-Limit Parity](HARNESS_PARITY.md).
 7. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task

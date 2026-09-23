@@ -408,7 +408,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         if state.max_turns_reached():
                             state.max_turns_hit = True
                             self._log.debug(
-                                "max_turns (%s visible turns) reached; ending step loop",
+                                "max_turns (%s API calls) reached; ending step loop",
                                 state.max_turns,
                             )
                             break
@@ -438,9 +438,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         conversation is cancelled (best-effort) and the turn finalizes cleanly as
         ``STOPPED_EARLY`` (``crashed=False``).
 
-        ``max_turns`` caps VISIBLE turns — resolved tool calls — enforced in-stream
-        on the same boundary as the cooperative stop: one ``communicate()`` here is
-        a single SDK turn, so a native counter would cap at 1 and mean nothing.
+        ``max_turns`` caps main-thread model API calls, Claude Code's unit,
+        enforced in-stream on the same boundary as the cooperative stop.
         See docs/agents/HARNESS_PARITY.md.
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
@@ -723,6 +722,10 @@ class _AntigravityTurnState:
         self.commands: list[CommandTelemetry] = []
         self._output_parts: list[str] = []
         self._assistant_turns = 0
+        # Main-thread API calls begun; one spans its first new MODEL step to its usage.
+        self.api_calls = 0
+        self._in_api_call = False
+        self._seen_steps: set[tuple[str, Any]] = set()
 
         # ToolStart on first sight of an id; ToolEnd at DONE.
         self._next_seq = 0
@@ -754,14 +757,12 @@ class _AntigravityTurnState:
         return self.stopped_early_hit or self.max_turns_hit
 
     def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
+        """True once the model begins API call ``max_turns + 1``, the unit Claude Code's ``--max-turns`` caps.
 
-        Delegates to ``EventCollector.visible_turn_count``, the single
-        agent-agnostic capture path, so one ``max_turns`` means the same thing here
-        and on Codex. It counts RESOLVED tool calls, so the call that reaches the
-        cap keeps its result instead of being force-closed as unresolved.
+        The next call opens only after the previous call's tools finish, so every
+        call under the cap keeps its tool results.
         """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.max_turns is not None and self.api_calls > self.max_turns
 
     def _seed_first_generation_window(self, source: Any) -> None:
         """Move the first window's mark to the first observed MODEL output.
@@ -789,6 +790,11 @@ class _AntigravityTurnState:
         sstatus = _enum_value(step.status)
         ssource = _enum_value(step.source)
         self._seed_first_generation_window(ssource)
+        step_key = (getattr(step, "trajectory_id", "") or "", step.step_index)
+        if ssource == _SOURCE_MODEL and step_key not in self._seen_steps and not self._in_api_call:
+            self._in_api_call = True
+            self.api_calls += 1
+        self._seen_steps.add(step_key)
         starget = _enum_value(step.target)
         done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
 
@@ -810,6 +816,9 @@ class _AntigravityTurnState:
 
         # Per-generation usage: fold into the turn total and cut an AssistantMessage.
         if step.usage_metadata is not None:
+            if not self._in_api_call:
+                self.api_calls += 1
+            self._in_api_call = False
             gen = _to_token_usage(step.usage_metadata, self.model)
             self.total_usage = self.total_usage + gen
             self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
@@ -1013,7 +1022,7 @@ class _AntigravityTurnState:
                 model_used=self.model,
                 assistant_turn_count=self._assistant_turns,
                 messages=self.messages,
-                num_turns=self._assistant_turns,
+                num_turns=self.api_calls,
                 crashed=crashed,
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,

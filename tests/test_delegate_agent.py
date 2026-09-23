@@ -380,14 +380,85 @@ class TestCommunicate:
         record = await agent.communicate("hi again")
         assert record.agent_output == "clean turn"
 
-    async def test_max_turns_exhausted(self, patch_exec, tmp_path):
-        events = [
-            _line({"type": "message", "content": "one"}),
-            _line({"type": "message", "content": "two"}),
+    @staticmethod
+    def _round_trip(n: int) -> list[bytes]:
+        """One backend round-trip: an empty reply, then its tool call and result."""
+        return [
+            _line({"type": "message", "content": ""}),
+            _line({"type": "tool_call", "toolId": f"t{n}", "toolName": "shell", "input": {}}),
+            _line({"type": "tool_result", "toolId": f"t{n}", "output": "ok"}),
         ]
+
+    async def test_max_turns_exhausted(self, patch_exec, tmp_path):
+        events = [*self._round_trip(0), *self._round_trip(1), *self._round_trip(2)]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=1)
         assert record.max_turns_exhausted is True
+        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0"]
+        assert record.num_turns == 2
+
+    async def test_max_turns_counts_round_trips_not_text_chunks(self, patch_exec, tmp_path):
+        """The SDK streams a reply as several message events; they are one round-trip."""
+        events = [
+            *self._round_trip(0),
+            _line({"type": "thinking", "content": "wrap up"}),
+            _line({"type": "message", "content": "all "}),
+            _line({"type": "message", "content": "done"}),
+            _line({"type": "send_ok", "result": "all done"}),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
+
+    async def test_max_turns_stops_a_tool_only_reply_before_its_tool_runs(self, patch_exec, tmp_path):
+        """A tool-only reply streams no text event, only its tool call."""
+        events = [
+            _line({"type": "message", "content": "on it"}),
+            *[
+                _line({"type": kind, "toolId": f"t{n}", "toolName": "shell", "output": "ok"})
+                for n in range(3)
+                for kind in ("tool_call", "tool_result")
+            ],
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is True
+        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0", "t1"]
+        assert record.num_turns == 3
+
+    async def test_max_turns_counts_a_batched_reply_once(self, patch_exec, tmp_path):
+        events = [
+            _line({"type": "message", "content": ""}),
+            _line({"type": "tool_call", "toolId": "a", "toolName": "shell"}),
+            _line({"type": "tool_call", "toolId": "b", "toolName": "shell"}),
+            _line({"type": "tool_result", "toolId": "a", "output": "ok"}),
+            _line({"type": "tool_result", "toolId": "b", "output": "ok"}),
+            _line({"type": "message", "content": "done"}),
+            _line({"type": "send_ok", "result": "done"}),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
+
+    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
+        """Tool b never returns, so the next call opens on its first new tool call."""
+        events = [
+            _line({"type": "tool_call", "toolId": "a", "toolName": "shell"}),
+            _line({"type": "tool_call", "toolId": "b", "toolName": "shell"}),
+            _line({"type": "tool_result", "toolId": "a", "output": "ok"}),
+            *[
+                _line({"type": kind, "toolId": f"t{n}", "toolName": "shell", "output": "ok"})
+                for n in range(3)
+                for kind in ("tool_call", "tool_result")
+            ],
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is True
+        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "t0"]
+        assert record.num_turns == 3
 
     async def test_communicate_before_start_raises(self):
         agent = DelegateAgent(_config())

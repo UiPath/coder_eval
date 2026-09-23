@@ -61,14 +61,12 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
 
 - **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same
   thing on every backend, so a divergence is either fixed or documented — never silent.
-  **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool
-  calls, read live off the shared `EventCollector.visible_turn_count`, the same list
-  `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both,
-  so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit
-  (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT
-  the same budget across harnesses. OpenCode and Pi each keep a native unit too, because
-  their CLIs stream a real multi-step loop per `communicate()`
-  (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same
+  **`run_limits.max_turns` counts main-thread model API calls on every harness**, per
+  iteration (each retry and dialog exchange starts at zero). Codex and Antigravity run one
+  SDK turn per `communicate()`, so each counts calls from its own stream (Codex
+  `thread/tokenUsage/updated`, Antigravity MODEL steps). claude-code keeps the CLI's
+  `--max-turns` plus a backstop that counts main-thread `message_id`s. OpenCode and Pi
+  stream one `step_start` / `turn_start` per call. The cap is enforced on the same
   loop boundary as the cooperative early stop and finalizes cleanly as
   `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in
   `_drain()`, so the background-work poll loop honors it too.

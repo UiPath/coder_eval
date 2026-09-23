@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) | message-event cap (forwarded `message`-type SDK events, NOT tool calls or backend round-trips — the host exposes no round-trip boundary) |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -531,8 +531,7 @@ needed to drive it.
   when a generation begins. Nothing in the timing accounting reads it — the
   head and tail are measured from the first and last `AssistantMessage`
   instead, which is uniform across all five — so this is recorded rather than
-  fixed. It is NOT a `max_turns` hazard: `EventCollector.visible_turn_count` is
-  `len(self._commands)`, derived from `ToolEndEvent`, and `_turn_starts` feeds
+  fixed. It is NOT a `max_turns` hazard: no cap reads it, and `_turn_starts` feeds
   only `assistant_turn_count` on the no-`AgentEndEvent` fallback path. The real
   cost of normalizing it is that the event drives the live renderers, so moving
   it changes the turn boundaries users watch during a run.
@@ -540,50 +539,49 @@ needed to drive it.
 All three are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
 
-## `max_turns` counts visible turns on Codex and Antigravity
+## `max_turns` counts model API calls on every harness
 
-A "visible turn" is one entry in the run's timeline: one resolved tool call. It is
-the unit `result_metrics.visible_turn_count` reports and the unit that lands in
-`TurnRecord.commands`. Both backends count it live off the shared
-`EventCollector.visible_turn_count`, so one `max_turns` value means one thing on
-both.
+One turn is one main-thread model API call, the unit Claude Code's `--max-turns`
+counts. `max_turns: N` lets the agent make N calls and still runs the tools the Nth
+call asked for. The turn ends when call N+1 begins, so a reply that finishes within
+N calls completes normally. Sub-agent calls do not count. `TurnRecord.num_turns`
+reports the same count, and a turn the cap ended reads N+1, as the Claude Code CLI
+reports it.
 
-They need their own counter because a native one would be meaningless: Codex and
-Antigravity each deliver exactly **one SDK turn per `communicate()` call**, so an
-SDK-level cap would clamp at 1 no matter what the task asked for.
+Each harness finds the call boundary in its own stream (the table above):
 
-The cap is enforced on the same loop boundary as the cooperative early stop: the
-step or notification that reaches the cap is processed whole, and the next one is
-never pulled. The in-flight turn is then cancelled server-side (best effort) so
-the cap actually stops spend. A run cut this way finalizes cleanly as
-`max_turns_exhausted` — it is not a crash, and it is not retried.
+- **claude-code** applies the cap in the CLI, and the harness reads the CLI's
+  `error_max_turns` stop. The CLI does not apply it on every route, so the harness
+  also counts distinct main-thread `message_id`s and ends the turn itself when call
+  N+1 begins.
+- **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
+  tools finish. An item starts as its tool runs, so waiting for the next call's
+  first item would let one tool of call N+1 act. A call that ran tools therefore
+  opens the next call at its `tokenUsage`, since the results always go back to the
+  model, and the cap fires before call N+1 can run anything.
+- **Antigravity** attaches `usage_metadata` to one step per call, and the next call
+  opens with a MODEL step at a new `step_index`.
+- **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
+- **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
+  its tool call, with no text before it. So the next call opens when every tool the
+  previous call announced has returned, since those results go back to the model,
+  and the cap fires before call N+1 can run anything. A reply that announces
+  several tools before their results counts once. If a tool never returns, the
+  next call opens at the model's next text or new tool call instead.
 
-**claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
-left alone rather than reimplemented in a different unit. Its unit is the SDK's own
-agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so the
-same number bounds very different amounts of work: under a prompt that encourages
-batching, a cap of N here permits many more than N tool calls, where it buys exactly
-N on the other two.
+Every harness enforces the cap on the same loop boundary as the
+cooperative early stop, then kills or cancels the in-flight turn so the cap stops
+spend. A run cut this way finalizes cleanly as `max_turns_exhausted`. It is not a
+crash, and it is not retried.
 
-**OpenCode also keeps a native unit — its stream's own steps.** Unlike Codex and
-Antigravity, `opencode run` executes a real multi-step agent loop per invocation
-and streams it (`step_start` / `step_finish`), so the natural agent-loop unit
-exists and is honored: `max_turns: N` allows N complete steps and cuts the run
-when step N+1 begins, with the completed steps' tokens intact. A step is one
-assistant generation and may carry several tool calls — so, as with claude-code,
-the same number is a looser tool-call budget than on the visible-turn backends.
+One call can carry several parallel tool calls, so `max_turns` bounds model calls,
+not tool calls. A model that batches does more work per turn, on every harness
+alike.
 
-**Pi keeps a native unit too — its `turn_start` agent-loop steps.** Like OpenCode,
-`pi -p --mode json` runs a real multi-step agent loop per invocation and streams it
-(`turn_start` / `turn_end`), so `max_turns: N` allows N complete turns and cuts the
-run when turn N+1 begins, with the completed turns' tokens intact. Pi streams
-incrementally, so the cut genuinely stops spend mid-run. A Pi turn is one assistant
-generation and may carry several tool calls — the same looser budget as claude-code
-and OpenCode.
-
-**So holding `max_turns` constant across harnesses does not hold the budget
-constant.** If you are A/B-ing across backends and the cap is close to binding, that
-is the number to distrust.
+The count is per iteration: each retry and each dialog exchange starts at zero. A
+dialog whose agent hits the cap inside an exchange ends with `stop_reason:
+agent_max_turns`. That is distinct from `max_turns`, the simulator's cap on
+exchanges.
 
 ### What a capped run looks like
 
@@ -595,12 +593,12 @@ The signals a capped run leaves behind, on every backend:
   `MAX_TURNS_EXHAUSTED` (reporting category `failed`, icon `M`). Never `ERROR`,
   and never retried.
 - `max_turns_exhausted: true` on the task record.
-- On Codex and Antigravity, the count of *resolved* tool calls the model itself
-  issued equals the cap. Two things can add a further *recorded* command, and
-  neither means the cap leaked:
-    - A tool call already in flight when the cap fires is force-closed and recorded
-      with `result_status: unknown` rather than dropped, so the trajectory shows what
-      was interrupted.
+- `num_turns` is the cap plus one.
+- The calls under the cap are recorded whole. Two things can add a further
+  *recorded* command, and neither means the cap leaked:
+    - A tool call from call N+1 that the harness saw before it stopped is
+      force-closed and recorded with `result_status: unknown` rather than dropped,
+      so the trajectory shows what was interrupted.
     - On Codex, a sub-agent's inner tool calls are recovered from its rollout after
       the pump stops, so the child's work and its tokens still reach the record. The
       cap bounds what the model was allowed to do, not what the record may explain.

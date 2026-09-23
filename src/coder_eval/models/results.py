@@ -395,9 +395,9 @@ class TurnRecord(BaseModel):
     num_turns: int | None = Field(
         default=None,
         description=(
-            "Number of inner-loop turns the SDK reported for this communicate() call "
-            "(from ResultMessage.num_turns). None when the SDK did not emit a "
-            "ResultMessage (e.g. crash partial before the final message arrived)."
+            "Main-thread model API calls in this communicate() call, the unit max_turns caps; "
+            "max_turns + 1 when the cap ended the turn. None when the agent crashed before "
+            "reporting it (e.g. a Claude Code partial before its ResultMessage arrived)."
         ),
     )
     max_turns_exhausted: bool = Field(
@@ -457,6 +457,7 @@ class SimulationTelemetry(BaseModel):
         "criteria_passed",
         "stop_token",
         "max_turns",
+        "agent_max_turns",
         "budget",
         "error",
         "run_limit_exceeded",

@@ -105,6 +105,10 @@ _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 _TEXT_EVENT_TYPES = frozenset({"thinking", "message"})
 
 
+def _tool_id(msg: dict[str, Any]) -> str:
+    return str(msg.get("toolId") or msg.get("id") or msg.get("callId") or "")
+
+
 def _env(bare_name: str) -> str | None:
     """Read a ``DELEGATE_``-namespaced auth var, falling back to the bare name.
 
@@ -270,6 +274,13 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
+        # Backend round-trips begun. A tool-only reply streams no text, so each call
+        # after the first opens once the previous call's tools have all returned.
+        self.api_calls = 0
+        # A result arrived while other tools were still open, so the next call is not
+        # counted yet. If the model speaks or calls a new tool first, those tools never
+        # returned and the next call has begun.
+        self.results_incomplete = False
 
         self.model_used: str | None = model
         self.usage: TokenUsage | None = None
@@ -659,7 +670,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
                 self._handle_event(msg, state, emit)
 
-                if max_turns is not None and state.message_events >= max_turns:
+                if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
                     await self._abandon_host_after_loop_exit()
                     break
@@ -713,6 +724,15 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if usage is not None:
             state.usage = usage
 
+        if state.api_calls == 0 and (event_type in _TEXT_EVENT_TYPES or event_type == "tool_call"):
+            state.api_calls = 1
+        elif state.results_incomplete and (
+            event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(msg) not in state.open_tools)
+        ):
+            self._close_open_tools(state, emit)
+            state.api_calls += 1
+            state.results_incomplete = False
+
         if event_type in _TEXT_EVENT_TYPES:
             text = msg.get("content")
             if isinstance(text, str) and text:
@@ -731,6 +751,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             self._handle_tool_call(msg, state, emit)
         elif event_type == "tool_result":
             self._handle_tool_result(msg, state, emit)
+            state.results_incomplete = bool(state.open_tools)
+            if not state.open_tools:
+                state.api_calls += 1
         elif event_type == "error":
             message = msg.get("message") or msg.get("content") or "unknown error"
             state.error_message = str(message)
@@ -742,7 +765,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
     def _handle_tool_call(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         # UNVERIFIED: exact id-field spelling.
-        tool_id = str(msg.get("toolId") or msg.get("id") or msg.get("callId") or uuid.uuid4())
+        tool_id = _tool_id(msg) or str(uuid.uuid4())
         tool_name = str(msg.get("toolName") or msg.get("tool") or "unknown")
         parameters = msg.get("input")
         parameters = parameters if isinstance(parameters, dict) else {}
@@ -764,7 +787,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         emit(ToolStartEvent(task_id=self.task_id, turn_id=state.turn_id, tool=telemetry))
 
     def _handle_tool_result(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
-        tool_id = str(msg.get("toolId") or msg.get("id") or msg.get("callId") or "")
+        tool_id = _tool_id(msg)
         telemetry = state.open_tools.pop(tool_id, None)
         if telemetry is None:
             # A result with no matching open call (id mismatch or unknown shape).
@@ -896,7 +919,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 model_used=state.model_used,
                 assistant_turn_count=max(state.message_events, 1) if not crashed else state.message_events,
                 messages=messages,
-                num_turns=None if crashed else max(state.message_events, 1),
+                num_turns=None if crashed else max(state.api_calls, 1),
                 max_turns_exhausted=state.max_turns_exhausted,
                 result_summary=ResultSummary(
                     is_error=crashed,
