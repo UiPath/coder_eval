@@ -64,6 +64,8 @@ _PRICING: dict[str, ModelPricing] = {
     # every other Claude model uses. Fable 5 pays $1 on the identical $10 base.
     "claude-fable-5-1": ModelPricing(10.0, 50.0, 12.50, 0.25),
     "claude-fable-5": ModelPricing(10.0, 50.0, 12.50, 1.0),
+    # Opus 5.5 prices cache hits at 0.05x input, not the usual 0.1x.
+    "claude-opus-5-5": ModelPricing(4.0, 20.0, 5.0, 0.20),
     # Opus 4.5 and later dropped to $5/$25; 4.1 and 4 keep the old $15/$75. The
     # version boundary is the price boundary: a newer Opus is not the dearer one.
     "claude-opus-5": ModelPricing(5.0, 25.0, 6.25, 0.50),
@@ -91,7 +93,7 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-3-opus-20240229": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-3-sonnet-20240229": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-3-haiku-20240307": ModelPricing(0.25, 1.25, 0.30, 0.03),
-    # OpenAI GPT-5 / Codex (direct or Azure). No cache-write fee: cache_write == input below.
+    # OpenAI (direct or Azure). Cache writes are free before GPT-5.6 (== input), 1.25x input from 5.6 on.
     "gpt-5-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5.1-codex-max": ModelPricing(1.25, 10.0, 1.25, 0.125),
@@ -105,21 +107,25 @@ _PRICING: dict[str, ModelPricing] = {
     # CAVEAT: flat rate, so gpt-5.5's long-context surcharge (2x input / 1.5x
     # output past 272K input tokens) is not modelled and reads low.
     "gpt-5.5": ModelPricing(5.0, 30.0, 5.0, 0.50),
-    # Pro tiers offer no prompt caching, so cache_read is nominal.
-    "gpt-5.5-pro": ModelPricing(30.0, 180.0, 30.0, 3.0),
-    "gpt-5.4-pro": ModelPricing(30.0, 180.0, 30.0, 3.0),
+    # Pro tiers have no cached-input discount, so cache_read == input.
+    "gpt-5.5-pro": ModelPricing(30.0, 180.0, 30.0, 30.0),
+    "gpt-5.4-pro": ModelPricing(30.0, 180.0, 30.0, 30.0),
     "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
     "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
     # HAZARD: a single CURRENT-rate card with no effective date, so a repriced
     # model makes historical runs re-price at today's rate. Sol's rate is
     # promotional through at least 2026-11-21; re-check then.
-    "gpt-5.6-sol": ModelPricing(4.0, 20.0, 4.0, 0.40),
-    "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.0, 0.20),
-    "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.20, 0.02),
+    "gpt-5.6-sol": ModelPricing(4.0, 20.0, 5.0, 0.40),
+    "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.50, 0.20),
+    "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
+    # CAVEAT: flat rate; GPT-6's >272K-input tier (2x input / 1.5x output) is not modelled and reads low.
+    "gpt-6-astra": ModelPricing(10.0, 50.0, 12.50, 1.00),
+    "gpt-6-sol": ModelPricing(2.0, 10.0, 2.50, 0.20),
+    "gpt-6-luna": ModelPricing(0.10, 0.50, 0.125, 0.01),
     # Keyed on the literal ids ListModels returns. No cache-write fee, so
     # cache_write == input (unused). CAVEAT: Pro's >200K-token tier costs more, so
-    # a very-large-context run reads LOW. List rates; discounted by half through
-    # 2026-12-31.
+    # a very-large-context run reads LOW. List rates; 3.6-3.8 Flash are discounted
+    # by half through 2026-12-31.
     "gemini-3.8-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.7-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.6-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
@@ -148,8 +154,8 @@ _PRICING: dict[str, ModelPricing] = {
     # why these three carry per_request_billing (the mirror omits them).
     # Rationale: .claude/notes/reporting.md § Cost joining
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30, per_request_billing=True),
-    "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932, per_request_billing=True),
-    "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898, per_request_billing=True),
+    "z-ai/glm-5.2": ModelPricing(0.6496, 2.0416, 0.6496, 0.12064, per_request_billing=True),
+    "deepseek/deepseek-v4-pro": ModelPricing(0.951432, 1.902864, 0.951432, 0.079286, per_request_billing=True),
     **_DELEGATE_PRICING,
 }
 
