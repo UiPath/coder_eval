@@ -1771,6 +1771,36 @@ async def test_claude_agent_max_turns_backstop_ends_a_turn_the_cli_did_not_cap()
 
 
 @pytest.mark.asyncio
+async def test_claude_agent_cooperative_stop_kills_the_cli():
+    """A cooperative stop with no timeout or cap still kills the CLI instead of leaving it running."""
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    pulled = 0
+    passed_transport = []
+
+    async def mock_query(prompt, options, transport=None):
+        nonlocal pulled
+        passed_transport.append(transport)
+        for n in range(200):
+            for message in _api_call(n):
+                pulled += 1
+                yield message
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            patch.object(ClaudeCodeAgent, "_kill_transport") as kill,
+        ):
+            turn_record = await agent.communicate("loop forever", should_stop=lambda: pulled >= 4)
+
+    assert passed_transport[0] is not None
+    kill.assert_called_once_with(passed_transport[0])
+    assert pulled == 4
+    assert turn_record.crashed is False
+    assert turn_record.max_turns_exhausted is False
+
+
+@pytest.mark.asyncio
 async def test_claude_agent_max_turns_backstop_ignores_emissions_and_subagent_calls():
     """Per-block emissions share one API call, and sub-agent calls have their own cap."""
     from tests._fixtures.golden_streams.claude_fixtures import ResultMessage

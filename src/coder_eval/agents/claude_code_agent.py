@@ -987,7 +987,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         try:
             options, transport, effective_model = self._build_claude_query(
-                user_input, timeout, max_turns, capture_stderr
+                user_input, timeout, max_turns, capture_stderr, can_stop=should_stop is not None
             )
             # Set on the state BEFORE the AgentStart emit and any finalize path
             # (finalize reads it for cost backfill); stays None if setup crashed.
@@ -1147,6 +1147,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if should_stop is not None and should_stop():
                 state.stopped_early_hit = True
                 self._log.debug("Cooperative stop requested; ending message loop at this boundary")
+                self._kill_transport(self._active_transport)
                 break
 
     def _build_claude_query(
@@ -1155,11 +1156,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         timeout: float | None,
         max_turns: int | None,
         stderr_callback: Callable[[str], None],
+        *,
+        can_stop: bool = False,
     ) -> tuple[ClaudeAgentOptions, SubprocessCLITransport | None, str | None]:
-        """Build the SDK options (+ a timeout-only transport) for one turn.
+        """Build the SDK options (+ a killable transport) for one turn.
 
-        ``transport`` is None unless a ``timeout`` is set: it is pre-constructed
-        only so the watchdog can hard-kill the subprocess. ``effective_model`` may
+        ``transport`` is None unless a timeout, a turn cap or a cooperative stop
+        (``can_stop``) can end the turn: it is pre-constructed only so the harness
+        can hard-kill the subprocess. ``effective_model`` may
         be None on a DirectRoute with no configured model. ``stderr_callback`` is
         wired in here but owned by ``communicate``.
         """
@@ -1226,12 +1230,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # For later inspection: captures every field, defaults included.
         self._sdk_options_dump = dump_dataclass(options)
 
-        # Pre-constructed only under a timeout or turn cap, to retain the subprocess
-        # handle for hard-kill. None otherwise, so the SDK uses its own default and
+        # Pre-constructed only when the harness may end the turn, to retain the
+        # subprocess handle for hard-kill. None otherwise, so the SDK uses its own default and
         # tests can mock query() without a real CLI. Closing the SDK's query()
         # stream does not end the CLI: it never closes the generator it wraps.
         transport: SubprocessCLITransport | None = None
-        if timeout is not None or max_turns is not None:
+        if timeout is not None or max_turns is not None or can_stop:
             transport = SubprocessCLITransport(prompt=user_input, options=options)
 
         return options, transport, effective_model
