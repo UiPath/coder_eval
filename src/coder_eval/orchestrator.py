@@ -2646,7 +2646,7 @@ class Orchestrator:
 
                 if turn_record.max_turns_exhausted:
                     self.result.max_turns_exhausted = True
-                    stop_reason = DialogStopReason.MAX_TURNS
+                    stop_reason = DialogStopReason.AGENT_MAX_TURNS
                     logger.warning(
                         "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",
                         turns_completed,

@@ -457,6 +457,7 @@ class SimulationTelemetry(BaseModel):
         "criteria_passed",
         "stop_token",
         "max_turns",
+        "agent_max_turns",
         "budget",
         "error",
         "run_limit_exceeded",

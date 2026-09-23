@@ -121,13 +121,15 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
 2. **`stop_on_criteria_pass`** (`criteria_passed`) — every success criterion passes. Requires
    per-turn checking (`check_criteria: every_turn` or `both`); pairing it with the default
    `end_of_dialog` is rejected at load time, since there would be nothing to check against.
-3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent exhausting its *own* inner
-   `max_turns` mid-exchange ends the dialog with the same reason.
+3. **`max_turns`** (`max_turns`) — the hard cap on exchanges.
 4. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
    dialog ends and the task is **still scored** — unlike
    [`run_limits.max_total_tokens`](TASK_DEFINITION_GUIDE.md#run-limits), which covers the subject
    agent only and aborts.
-5. **`stop_token`** (`stop_token`) — only if none of the above fired is the simulator asked for
+5. **`run_limits.max_turns`** (`agent_max_turns`): the agent used up its own model-call cap inside
+   one exchange. That cap restarts on every exchange, so this reason means one exchange ran long, not
+   that the dialog ran out of exchanges.
+6. **`stop_token`** (`stop_token`) — only if none of the above fired is the simulator asked for
    another message; the sentinel token in *that fresh utterance* ends the dialog. This is the
    workhorse in practice — the simulator decides, in character, that it got what it wanted — but it
    is evaluated **last**, so a turn that trips `max_turns` or the budget never gets the chance to
