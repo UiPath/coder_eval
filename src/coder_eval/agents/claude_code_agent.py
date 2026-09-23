@@ -1226,11 +1226,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # For later inspection: captures every field, defaults included.
         self._sdk_options_dump = dump_dataclass(options)
 
-        # Pre-constructed only under a timeout, to retain the subprocess handle
-        # for hard-kill. None otherwise, so the SDK uses its own default and tests
-        # can mock query() without a real CLI.
+        # Pre-constructed only under a timeout or turn cap, to retain the subprocess
+        # handle for hard-kill. None otherwise, so the SDK uses its own default and
+        # tests can mock query() without a real CLI. Closing the SDK's query()
+        # stream does not end the CLI: it never closes the generator it wraps.
         transport: SubprocessCLITransport | None = None
-        if timeout is not None:
+        if timeout is not None or max_turns is not None:
             transport = SubprocessCLITransport(prompt=user_input, options=options)
 
         return options, transport, effective_model

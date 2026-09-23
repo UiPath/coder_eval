@@ -202,7 +202,7 @@ async def _capture_sdk_options(
             self.content = "ok"
             self.model = "mock-model"
 
-    async def mock_query(prompt, options):
+    async def mock_query(prompt, options, transport=None):
         captured_options.append(options)
         yield AssistantMessage()
         yield ResultMessage()
@@ -1741,8 +1741,11 @@ async def test_claude_agent_max_turns_backstop_ends_a_turn_the_cli_did_not_cap()
     agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
     pulled = 0
 
+    passed_transport = []
+
     async def mock_query(prompt, options, transport=None):
         nonlocal pulled
+        passed_transport.append(transport)
         for n in range(200):
             for message in _api_call(n):
                 pulled += 1
@@ -1751,9 +1754,15 @@ async def test_claude_agent_max_turns_backstop_ends_a_turn_the_cli_did_not_cap()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
-        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            patch.object(ClaudeCodeAgent, "_kill_transport") as kill,
+        ):
             turn_record = await agent.communicate("loop forever", max_turns=3)
 
+    # No turn timeout here, so the cap alone must give the backstop a process to kill.
+    assert passed_transport[0] is not None
+    kill.assert_called_once_with(passed_transport[0])
     assert pulled == 3 * 2 + 1
     assert turn_record.crashed is False
     assert turn_record.max_turns_exhausted is True
