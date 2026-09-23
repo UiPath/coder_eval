@@ -442,6 +442,24 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
+    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
+        """Tool b never returns, so the next call opens on its first new tool call."""
+        events = [
+            _line({"type": "tool_call", "toolId": "a", "toolName": "shell"}),
+            _line({"type": "tool_call", "toolId": "b", "toolName": "shell"}),
+            _line({"type": "tool_result", "toolId": "a", "output": "ok"}),
+            *[
+                _line({"type": kind, "toolId": f"t{n}", "toolName": "shell", "output": "ok"})
+                for n in range(3)
+                for kind in ("tool_call", "tool_result")
+            ],
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is True
+        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "t0"]
+        assert record.num_turns == 3
+
     async def test_communicate_before_start_raises(self):
         agent = DelegateAgent(_config())
         with pytest.raises(RuntimeError, match="start"):

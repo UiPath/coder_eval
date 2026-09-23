@@ -566,7 +566,8 @@ Each harness finds the call boundary in its own stream (the table above):
   its tool call, with no text before it. So the next call opens when every tool the
   previous call announced has returned, since those results go back to the model,
   and the cap fires before call N+1 can run anything. A reply that announces
-  several tools before their results counts once.
+  several tools before their results counts once. If a tool never returns, the
+  next call opens at the model's next text or new tool call instead.
 
 Every harness enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops
