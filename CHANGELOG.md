@@ -2,6 +2,69 @@
 
 <!-- version list -->
 
+## v0.12.6 (2026-09-23)
+
+### Bug Fixes
+
+- **claude-code**: End a turn the CLI did not cap at max_turns
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **claude-code**: Kill the CLI on a cooperative stop
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **claude-code**: Kill the CLI on a max_turns backstop stop without a turn timeout
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **codex**: End a capped turn before the next call can run a tool
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **delegate**: Count a tool-only reply as a model call
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **delegate**: Keep counting model calls when a tool never returns
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **evalboard**: Compare visible turns, not SDK num_turns, against expected_turns
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **pricing**: Add Opus 5.5 and GPT-6, correct rates that moved publicly
+  ([#195](https://github.com/UiPath/coder_eval/pull/195),
+  [`11b902f`](https://github.com/UiPath/coder_eval/commit/11b902fa9bc0d307bcab22801dc56523fcc1d92a))
+
+- **run-limits**: Count max_turns as model API calls on every harness
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **run-limits**: Count max_turns as model API calls on every harness and enforce it on claude-code
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **run-limits**: Stop a turn mid-flight once a token or USD budget is crossed
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **simulation**: End a dialog with agent_max_turns when the agent hits its own cap
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+### Documentation
+
+- **parity**: Record the claude-code max_turns backstop
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+- **run-limits**: Say max_turns restarts per iteration and expected_turns counts tool calls
+  ([#194](https://github.com/UiPath/coder_eval/pull/194),
+  [`17fb10f`](https://github.com/UiPath/coder_eval/commit/17fb10f1250b23df0aa80d33e568996b892711dd))
+
+
 ## v0.12.5 (2026-09-22)
 
 ### Bug Fixes
