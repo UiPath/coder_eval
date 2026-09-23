@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from itertools import pairwise
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -146,31 +147,23 @@ def test_resolve_workspaces_includes_workdir_and_skill_roots(tmp_path):
     ]
 
 
-def test_workspace_only_permits_skill_reads_with_resolved_workspaces(tmp_path):
-    """Drives the harness's real ``workspace_only`` policy: a skill read is denied when
-    scoped to the workdir alone (the bug), but permitted once the resolved skill roots
-    join ``workspaces`` (the fix). ``skills_paths`` feeds discovery, not the file-tool
-    allowlist, so the roots must be in ``workspaces`` for the agent to read SKILL.md."""
-    policy = pytest.importorskip("google.antigravity.hooks.policy")
-    ag_types = pytest.importorskip("google.antigravity.types")
-
+def test_resolved_workspaces_cover_skill_reads(tmp_path):
+    """The harness confines file tools to ``workspaces`` (enforced inside localharness
+    since google-antigravity 0.1.18, not by a Python-side predicate), and
+    ``skills_paths`` feeds discovery, not that allowlist, so the resolved skill roots
+    must be in ``workspaces`` for the agent to read SKILL.md."""
     repo = tmp_path / "skills-repo"
     _make_skill(repo / "skills", "uipath-sdd")
-    skill_md = repo / "skills" / "uipath-sdd" / "SKILL.md"
+    skill_md = (repo / "skills" / "uipath-sdd" / "SKILL.md").resolve()
     workdir = tmp_path / "work"
     workdir.mkdir()
 
     agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
     agent.working_directory = workdir
-    skills_paths = agent._resolve_skills_paths(None)
+    workspaces = [Path(w).resolve() for w in agent._resolve_workspaces(agent._resolve_skills_paths(None))]
 
-    def read_denied(workspaces) -> bool:
-        policies = policy.workspace_only([str(w) for w in workspaces])
-        tc = ag_types.ToolCall(name="read_file", canonical_path=str(skill_md))
-        return any(p.when(tc) for p in policies if p.when is not None)
-
-    assert read_denied([workdir]) is True  # workdir only: out-of-workspace → denied
-    assert read_denied(agent._resolve_workspaces(skills_paths)) is False  # resolved workspaces permit it
+    assert not skill_md.is_relative_to(workdir.resolve())
+    assert any(skill_md.is_relative_to(w) for w in workspaces)
 
 
 def test_to_token_usage_maps_gemini_buckets():

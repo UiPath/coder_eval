@@ -66,7 +66,7 @@ RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKA
 
 # --- 3. Node LTS + the Claude Code CLI, under the kit dir. -------------------
 ARG NODE_VERSION=22.14.0
-ARG CLAUDE_CODE_VERSION=2.1.177
+ARG CLAUDE_CODE_VERSION=2.1.281
 # Download to a file first so a bad URL fails the build loudly (a piped
 # `curl | tar` would mask a 404 and only surface later as a missing npm), and
 # verify the tarball against nodejs.org's published SHASUMS256 before extracting
@@ -109,6 +109,6 @@ RUN chmod +x /usr/local/bin/coder_eval_entrypoint.sh
 # label; labels don't survive `COPY --from`). The claude-code pin mirrors the
 # framework image — a parity test (tests/test_image_from_dockerfiles.py) enforces it.
 ARG CODER_EVAL_VERSION=unknown
-ARG CLAUDE_CODE_VERSION=2.1.177
+ARG CLAUDE_CODE_VERSION=2.1.281
 LABEL org.coder-eval.version="${CODER_EVAL_VERSION}"
 LABEL org.coder-eval.claude-code-version="${CLAUDE_CODE_VERSION}"

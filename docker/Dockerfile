@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # tag and is bumped deliberately -- mirrors the codex CLI pin
 # (`openai-codex-cli-bin==…` in pyproject). Leaving it at `@latest` let Docker
 # layer caching freeze it nondeterministically across rebuilds.
-ARG CLAUDE_CODE_VERSION=2.1.177
+ARG CLAUDE_CODE_VERSION=2.1.281
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
@@ -39,7 +39,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Pi Node CLI, pinned — same rationale as the Claude Code pin above (the agent
 # binary is a dominant non-model driver of results; @latest would freeze
 # nondeterministically under layer caching). Node 22 + npm are already present.
-ARG PI_VERSION=0.84.4
+ARG PI_VERSION=0.87.1
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
