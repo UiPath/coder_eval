@@ -95,9 +95,12 @@ the raw text alone can stop counting.
 It is memoized because the early-stop watcher re-scans the whole accumulated trajectory on
 every tool-call event, normalizing the same command many times per run.
 
-The regex search window is capped to bound ReDoS on a large command string, and
-normalization runs over that same truncated window, so `shlex` never sees more than the cap
-and needs no separate guard.
+Each regex search is bounded to 2000 characters to limit ReDoS on a large command string,
+but the whole command is searched: the first 2000 characters, then the rest in windows that
+start and end on logical-line boundaries. Agents write long heredoc scripts that end in the
+command a task checks for (`cat > x <<EOF ... EOF` then `uip agent validate`), and a single
+leading window scored those as never run. Normalization runs per window, so `shlex` never
+sees more than the bound and needs no separate guard.
 
 ## Recording a CLI invocation
 
