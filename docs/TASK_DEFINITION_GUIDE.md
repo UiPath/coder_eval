@@ -255,8 +255,8 @@ run_limits:
 
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
-| `max_turns` | *unset* | `> 0` | Hard cap on main-thread model API calls per iteration, Claude Code's turn, counted the same on every harness. The tools the last allowed call asks for still run; the turn ends when the next call begins. Unset uses the SDK default. See [HARNESS_PARITY.md](agents/HARNESS_PARITY.md). |
-| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
+| `max_turns` | *unset* | `> 0` | Hard cap on main-thread model API calls per iteration, Claude Code's turn, counted the same on every harness. The tools the last allowed call asks for still run; the turn ends when the next call begins. Each retry and each dialog exchange starts a fresh count. Unset uses the SDK default. See [HARNESS_PARITY.md](agents/HARNESS_PARITY.md). |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for visible turns (tool calls plus the final reply) summed over the whole task, a different unit from `max_turns`. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
@@ -327,8 +327,8 @@ that did: a budgeted task that failed counts as over budget, while tasks with no
 `expected_turns` budget are excluded entirely (success or fail).
 
 The count compared against the budget is **visible turns** — one per tool call
-plus one for the agent's final reply — *not* the SDK's `total_turns` (which
-counts assistant messages and can bundle several tool calls into one).
+plus one for the agent's final reply. It is *not* `total_turns`, which counts
+model API calls (the `max_turns` unit), and one call can batch several tool calls.
 
 Set it to the number of turns a competent agent should need for the task. Pick
 budgets consistently across a suite — the headline % is only comparable when
@@ -1721,7 +1721,7 @@ The simulator runs as a tools-disabled Claude Code agent on its own resolved `Ap
 **Semantics:**
 
 - The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
-- `max_turns` is the intra-dialog cap (the worst-case agent call budget per trial). Use `n_trials` for variance sampling.
+- `max_turns` caps exchanges. Each exchange also gets a fresh `run_limits.max_turns` of model API calls, so the worst case per trial is the product of the two. Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 

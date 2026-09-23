@@ -32,18 +32,20 @@ class RunLimits(BaseModel):
     max_turns: int | None = Field(
         default=None,
         gt=0,
-        description="Max main-thread model API calls per iteration, on every harness. None = SDK default.",
+        description=(
+            "Max main-thread model API calls per iteration, on every harness. Each retry and each "
+            "dialog exchange starts a fresh count. None = SDK default."
+        ),
     )
     expected_turns: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "Soft target for cumulative visible turns across a task. A 'turn' is one "
-            "entry in the Turn timeline: each tool call contributes 1, plus 1 for the "
-            "final reply when present. "
-            "When the running total exceeds this, the orchestrator logs a one-shot "
-            "warning and the report renders a badge — the run is NOT aborted "
-            "(use max_turns for a hard cap). None disables the check."
+            "Soft target for visible turns summed over the whole task: each tool call counts 1, "
+            "plus 1 for the final reply when present. This is a different unit and scope from "
+            "max_turns, which caps model API calls per iteration. When the running total exceeds "
+            "this, the orchestrator logs a one-shot warning and the report renders a badge; the "
+            "run is NOT aborted. None disables the check."
         ),
     )
     task_timeout: int | None = Field(

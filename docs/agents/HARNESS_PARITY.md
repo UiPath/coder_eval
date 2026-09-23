@@ -578,6 +578,11 @@ One call can carry several parallel tool calls, so `max_turns` bounds model call
 not tool calls. A model that batches does more work per turn, on every harness
 alike.
 
+The count is per iteration: each retry and each dialog exchange starts at zero. A
+dialog whose agent hits the cap inside an exchange ends with `stop_reason:
+agent_max_turns`. That is distinct from `max_turns`, the simulator's cap on
+exchanges.
+
 ### What a capped run looks like
 
 The signals a capped run leaves behind, on every backend:
