@@ -35,6 +35,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
   - [skill_triggered](#skill_triggered)
+  - [system_one_judge](#system_one_judge)
 - [Checker Context](#checker-context)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
@@ -715,7 +716,7 @@ All criteria share these fields:
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `cli_called`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
+- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`, `system_one_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
@@ -1334,6 +1335,66 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 **Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
+
+### `system_one_judge`
+
+Grade with a **System One model** ([TypeSafe's `jev`](https://docs.typesafe.ai/concepts/system-one)) instead of a text LLM. A System One model generates no text: it reads one state and answers a map of typed questions with calibrated probabilities, all in one round trip. The rubric you write **is** the grading schema, so there is no prompt to follow, no tool call to force, and no verdict to parse.
+
+```yaml
+- type: "system_one_judge"
+  description: "Rubric grade of the refactor"
+  prompt: "The agent was asked to extract the retry loop into a helper."
+  files: ["src/client.py"]
+  questions:
+    helper_extracted:
+      type: noul
+      instructions: "Is the retry loop extracted into a named helper function?"
+    behaviour_preserved:
+      type: noul
+      instructions: "Does the refactor preserve the original retry semantics?"
+      weight: 2.0
+    naming:
+      type: score
+      instructions: "How well does the helper's name describe what it does?"
+      criteria: ["opaque", "workable", "self-explanatory"]
+    leftovers:
+      type: noul
+      instructions: "Is any dead code left behind?"
+      expected: false
+```
+
+**Question types**
+
+| Type | What the model returns | How the rubric turns it into 0.0–1.0 |
+| --- | --- | --- |
+| `noul` | P(yes) | `expected: true` (default) scores P(yes); `expected: false` scores 1 − P(yes) |
+| `choice` | the top option plus a distribution over all of them | `expected: <option>` scores that one option 1.0; `values: {option: 0.0–1.0}` gives partial credit per option |
+| `score` | a position on an ordered spectrum, plus a distribution over levels | levels ramp evenly from 0.0 (first) to 1.0 (last) unless `values:` overrides them |
+
+`choice` needs exactly one of `expected` or `values`. `score` takes 2–10 levels, ordered worst-first. Every question takes a `weight` (default 1.0).
+
+A `choice` question's `criteria` is a map of option to a description of when it applies, but when the option names speak for themselves you can write a bare list instead — it widens to that map with null descriptions, which the API accepts:
+
+```yaml
+exception_handling:
+  type: choice
+  instructions: "How does the function catch failures from requests.get?"
+  criteria: [none, bare_except, broad_exception, specific_timeout]
+  expected: specific_timeout
+  weight: 2.0
+```
+
+Option order is preserved as written, and a repeated option is a load-time error rather than a silently collapsed map.
+
+**What the judge reads.** By default the state is `prompt` plus the `files` you list. Three flags widen it, each off by default: `include_agent_output` adds the agent's own final message, `include_tool_calls` adds a summary of its tool-call trajectory, and `include_dialog` adds the multi-turn user/agent exchange (only meaningful in [simulation mode](#simulation)). Turning the first two on is what lets a rubric grade *how* the agent worked and whether its summary was honest, not just the artifact it left behind — see `tasks/smoke_system_one_judge.yaml` for a rubric that does both. `include_reference` (on by default) adds the reference solution. Each section is capped independently by `max_state_chars`.
+
+**Scoring** — the criterion score is computed by the harness, not the model: each question resolves to a value in [0.0, 1.0] and the score is their weighted mean. `scoring: expected` (default) weights every outcome by its probability, so a half-confident answer lands mid-scale; `scoring: argmax` reads only the top answer and discards the confidence. Either way the reduction is deterministic given the answers, and `findings` records the arithmetic per question so the grade is auditable line by line.
+
+**Credentials** — the bearer token comes from the env var named by `api_key_env` (default `TYPESAFE_API_KEY`); only the *name* is stored in the task and in run records. `base_url` (default `https://api.typesafe.ai/v1`) points the criterion at a gateway or a recording proxy. Unlike `llm_judge`, this criterion does **not** honour `checker_context.api_route` — a System One model is not interchangeable with a text model, so the eval route's judge model would be the wrong default.
+
+**When to reach for it over `llm_judge`** — a rubric with many small, repeated questions; a large dataset where a text judge's per-row cost dominates; or a grade you need to be reproducible and inspectable rather than argued in prose. Reach for `llm_judge` instead when the grade genuinely needs open-ended reasoning you cannot enumerate in advance.
+
+**Failure modes** — a transport failure escalates the row to `ERROR` (it is eval infrastructure, not agent quality) rather than scoring 0.0. A question the API leaves unanswered, or answers with the wrong primitive, scores 0.0 at its full weight and says so in `findings`.
 
 ## Checker Context
 

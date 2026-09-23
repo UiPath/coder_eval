@@ -187,7 +187,7 @@ class JudgeTranscript(BaseModel):
 
 
 class JudgeCriterionResult(CriterionResult):
-    """Per-row result for judge criteria (``llm_judge`` / ``agent_judge``).
+    """Per-row result for judge criteria (``llm_judge`` / ``agent_judge`` / ``system_one_judge``).
 
     Carries ``findings`` (bullet evidence the judge cited from the artifacts)
     and an optional ``transcript`` so reviewers can audit the judge's verdict
@@ -240,7 +240,9 @@ class JudgeCriterionResult(CriterionResult):
 #
 # CONVENTION: a new criterion type needing a non-``"basic"`` result class adds its
 # ``criterion_type`` to the matching frozenset in the same PR.
-_JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge"})
+JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge", "system_one_judge"})
+"""Criterion types whose rows deserialize as ``JudgeCriterionResult``. Also the
+rendering gate in ``reports/html.py`` — one set, so the two cannot drift."""
 _CLASSIFICATION_CRITERION_TYPES = frozenset({"classification_match", "skill_triggered"})
 
 
@@ -261,7 +263,7 @@ def _criterion_result_discriminator(v: Any) -> str:
         if kind:
             return str(kind)
         ct = v.get("criterion_type", "")
-        if ct in _JUDGE_CRITERION_TYPES:
+        if ct in JUDGE_CRITERION_TYPES:
             return "judge"
         if ct in _CLASSIFICATION_CRITERION_TYPES:
             return "classification"

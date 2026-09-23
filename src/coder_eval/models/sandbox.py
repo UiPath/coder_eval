@@ -223,6 +223,10 @@ class DockerDriverConfig(BaseModel):
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_REGION",
             "BEDROCK_MODEL",
+            # Grading runs in the in-container orchestrator, and system_one_judge
+            # calls TypeSafe directly rather than through API_BACKEND. Without
+            # this, a docker task ERRORs on every row though the key is on the host.
+            "TYPESAFE_API_KEY",
             # Required alongside AWS_BEARER_TOKEN_BEDROCK to route the in-container
             # SDK through Bedrock instead of ~/.claude OAuth.
             "CLAUDE_CODE_USE_BEDROCK",

@@ -1,7 +1,7 @@
 """C1.4 — criteria portability audit for the Harbor export direction.
 
 Not every criterion type can grade truthfully inside a verifier container another
-harness built. This module classifies each of the 15 types so the packager can refuse
+harness built. This module classifies each of the 16 types so the packager can refuse
 an unsupported task **at export time**, where the operator sees why.
 
 Classification, v1:
@@ -14,7 +14,8 @@ Classification, v1:
   grades against ``/logs/agent/trajectory.json`` (ATIF).
 - ``NEEDS_CLI_RECORDER`` — ``cli_called``. Hard-error until the export bakes the
   recorder shim in.
-- ``NEEDS_CREDENTIALS`` — ``llm_judge``, ``agent_judge``, ``uipath_eval``. Never
+- ``NEEDS_CREDENTIALS`` — ``llm_judge``, ``agent_judge``, ``system_one_judge``,
+  ``uipath_eval``. Never
   blocking — assumes the operator provisions credentials themselves.
 
 Rationale: .claude/notes/reporting.md § Not every criterion can grade inside someone else's container
@@ -53,10 +54,11 @@ _PORTABILITY_BY_TYPE: dict[str, CriterionPortability] = {
     "cli_called": CriterionPortability.NEEDS_CLI_RECORDER,
     "llm_judge": CriterionPortability.NEEDS_CREDENTIALS,
     "agent_judge": CriterionPortability.NEEDS_CREDENTIALS,
+    "system_one_judge": CriterionPortability.NEEDS_CREDENTIALS,
     "uipath_eval": CriterionPortability.NEEDS_CREDENTIALS,
 }
 
-# Registry-derived coverage: fails closed on a 16th criterion type added to the
+# Registry-derived coverage: fails closed on a 17th criterion type added to the
 # union without a portability classification, rather than silently exporting
 # it as if it were PORTABLE.
 _KNOWN_CRITERION_TYPES = frozenset(_PORTABILITY_BY_TYPE)

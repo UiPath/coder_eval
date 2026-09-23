@@ -295,7 +295,8 @@ class JudgeContext:
 class JudgeContextBuilder:
     """Builds ``JudgeContext`` from criterion knobs + sandbox + turn records.
 
-    Both ``LLMJudgeCriterion`` and ``AgentJudgeCriterion`` share the same context
+    ``LLMJudgeCriterion``, ``AgentJudgeCriterion`` and ``SystemOneJudgeCriterion``
+    share the same context
     knobs (``files``, ``include_reference``, ``include_agent_output``,
     ``include_tool_calls``, ``include_dialog``, ``max_file_chars``,
     ``max_dialog_chars``), so no adapter layer is needed — the builder is

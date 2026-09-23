@@ -488,16 +488,21 @@ jobs:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
-      # tasks_run for --tags smoke-pass. 8 task files (hello_date, dataset_example,
-      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test,
-      # anti_cheat_reference, record_cli_responses); dataset_example fans out to 2
-      # inline rows, so 9 sub-tasks. If you add/remove a smoke-pass task or change
-      # the dataset row count, bump these.
+      # Grades smoke_system_one_judge. Not a Bedrock credential: the System One
+      # judge calls TypeSafe directly and ignores the run's API backend. A
+      # missing key escalates that task to ERROR rather than failing a criterion,
+      # so the preflight step below fails loudly instead.
+      TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+      # tasks_run for --tags smoke-pass. 9 task files (hello_date, dataset_example,
+      # smoke_llm_judge, smoke_agent_judge, smoke_system_one_judge, byod_smoke_test,
+      # agentless_smoke_test, anti_cheat_reference, record_cli_responses);
+      # dataset_example fans out to 2 inline rows, so 10 sub-tasks. If you
+      # add/remove a smoke-pass task or change the dataset row count, bump these.
       #
       # anti_cheat_reference lives in a SUBDIRECTORY, which `tasks/*.yaml` does not
       # match — the smoke-pass step names its path explicitly. Keep that in sync.
-      EXPECTED_SMOKE_PASS_RUN: "9"
-      EXPECTED_SMOKE_PASS_SUCCEEDED: "9"
+      EXPECTED_SMOKE_PASS_RUN: "10"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "10"
       # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).
@@ -571,6 +576,15 @@ jobs:
       # record_cli_responses is the record_cli per-invocation-response probe and
       # is also driver: docker, so it needs that same image; it is flat in
       # tasks/, so the glob already matches it.
+      - name: Verify smoke secrets present
+        # smoke_system_one_judge grades through TypeSafe. Without the key the
+        # criterion raises JudgeInfrastructureError and the task lands in
+        # tasks_errored, which reads as "the harness broke" rather than "the
+        # secret is missing". Fail here, where the message says which.
+        run: |
+          : "${TYPESAFE_API_KEY:?TYPESAFE_API_KEY missing — needed by smoke_system_one_judge}"
+          echo "All smoke secrets present."
+
       - name: Run smoke-pass bucket (expect all to succeed)
         run: |
           .venv/bin/coder-eval run tasks/*.yaml tasks/anti_cheat_reference/*.yaml \
@@ -697,6 +711,8 @@ jobs:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+      # The System One judge's own endpoint — unrelated to either route above.
+      TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
 
     steps:
       - name: Checkout code
@@ -746,6 +762,7 @@ jobs:
           : "${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK missing}"
           : "${AWS_REGION:?AWS_REGION missing}"
           : "${BEDROCK_MODEL:?BEDROCK_MODEL missing}"
+          : "${TYPESAFE_API_KEY:?TYPESAFE_API_KEY missing}"
           echo "All live-test secrets present."
 
       - name: Run claude-settings enforcement live tests (DirectRoute)
@@ -773,6 +790,17 @@ jobs:
             -m live -v --tb=short --strict-markers -ra -n 4 \
             --junit-xml=tmp/junit-settings-bedrock.xml
 
+      - name: Run System One judge wire-contract live tests
+        # The only thing in CI that talks to TypeSafe. The unit tests mock the
+        # invoker, so nothing else catches a change to the answer shape the
+        # reduction assumes — notably the STRING level keys ("0", "1", ...) in a
+        # score answer's probabilities. `-n0`: three questions in one round trip,
+        # so there is nothing to parallelize.
+        run: |
+          .venv/bin/pytest tests/test_system_one_judge_live.py \
+            -m live -n0 -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-system-one.xml
+
       - name: Assert live tests actually ran (not silently skipped)
         # Parse JUnit XML for *passed* count, not collected count. Pytest collects
         # @pytest.mark.skipif-marked tests even when the predicate is True, so a
@@ -798,11 +826,17 @@ jobs:
               return total - skipped - errors - failures
           p_settings_direct = passed("tmp/junit-settings.xml")
           p_settings_bedrock = passed("tmp/junit-settings-bedrock.xml")
-          print(f"Passed: settings(direct)={p_settings_direct}, settings(bedrock)={p_settings_bedrock}")
+          p_system_one = passed("tmp/junit-system-one.xml")
+          print(
+              f"Passed: settings(direct)={p_settings_direct}, "
+              f"settings(bedrock)={p_settings_bedrock}, system_one={p_system_one}"
+          )
           if p_settings_direct < 1:
               sys.exit("test_claude_settings_enforcement_live.py (DirectRoute) reported zero PASSED tests")
           if p_settings_bedrock < 1:
               sys.exit("test_claude_settings_enforcement_live.py (BedrockRoute) reported zero PASSED tests")
+          if p_system_one < 1:
+              sys.exit("test_system_one_judge_live.py reported zero PASSED tests")
           PY
 
       - name: Run cost-budget smoke (max_usd → COST_BUDGET_EXCEEDED via DirectRoute)

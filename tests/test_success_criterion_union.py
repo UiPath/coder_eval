@@ -53,6 +53,10 @@ MINIMAL_PAYLOADS: dict[str, dict] = {
     "skill_triggered": {"description": "d", "expected_skill": "s", "skill_name": "s"},
     "llm_judge": {"description": "d", "prompt": "grade it"},
     "agent_judge": {"description": "d", "prompt": "grade it"},
+    "system_one_judge": {
+        "description": "d",
+        "questions": {"correct": {"type": "noul", "instructions": "Is the solution correct?"}},
+    },
 }
 
 
