@@ -249,6 +249,7 @@ Optional:
 | `expected_stdout` | Expected stdout content. When set, stdout is also checked. |
 | `stdout_match` | How to match stdout: 'exact' (stripped), 'contains' (substring), 'regex' (pattern) |
 | `score_from_stdout` | When true, read a float score (0.0-1.0) from the first line of stdout. Remaining lines are captured as details. Non-zero exit code or parse failure -> score 0.0. Mutually exclusive with expected_stdout. |
+| `read_only` | Declares this command an artifact-only check: it writes nothing and reaches no live service. Its one effect is that a graded run also runs it after an agent crash or turn timeout, on the diagnostic path, where the result is recorded but never scored. Nothing verifies the declaration; see the Task Definition Guide for when to set it. |
 
 ### `skill_triggered`
 

@@ -108,6 +108,23 @@ VERDICT, never the facts — the seeding cannot restore a fact the execute phase
 captured. The budget gate runs AFTER the criteria on the graded path purely for
 partial-credit visibility, and there is no partial credit under `execute`.
 
+### Post-failure evidence is declared, not proven
+
+A timed-out run used to score 0.00 on artifacts that every grader accepted, because the
+whole uipath-maestro-flow suite grades through `run_command` and the path ran only file
+checks. `read_only: true` admits a single named command.
+
+The gate could not stay a ClassVar: `run_command` is safe or unsafe per criterion, not
+per type, and no analysis decides which — an arbitrary shell command can start a cloud
+job (`uip maestro flow debug` does). So the flag is the AUTHOR's claim, the ClassVar
+stayed the type-level answer, and `evaluable_after_agent_failure` became the per-instance
+one every caller asks. Widening the flag to the base would let a judge declare itself
+deterministic, which is a different and false claim.
+
+What keeps it honest: results land in `post_failure_criteria_results`, which
+`calculate_weighted_score` never reads. A timed-out run stays ERROR at 0.0 no matter what
+the diagnostic pass finds — the flag buys evidence, never a verdict.
+
 ### Rates need verdict evidence, not bucket counts
 
 A published rate divides by rows that actually carry a verdict, not by a bucket count. The

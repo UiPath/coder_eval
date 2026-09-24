@@ -140,7 +140,19 @@ class BaseSuccessCriterion(BaseModel, ABC):
     """True if this criterion requires agent turn records to evaluate correctly."""
 
     supports_post_failure_evaluation: ClassVar[bool] = False
-    """True for deterministic, read-only artifact checks safe to run after agent failure."""
+    """Type-level only: True for criterion TYPES that are always deterministic, read-only
+    artifact checks. It cannot answer for an instance -- ``run_command`` decides per
+    criterion -- so every caller asks ``evaluable_after_agent_failure`` instead."""
+
+    @property
+    def evaluable_after_agent_failure(self) -> bool:
+        """True when THIS criterion is safe to run after a terminal agent failure.
+
+        The per-instance answer the orchestrator asks, so a type whose safety
+        depends on how the criterion is authored (``run_command``) can decide it
+        from its own fields instead of from the class.
+        """
+        return self.supports_post_failure_evaluation
 
     @property
     def is_stop_armed(self) -> bool:
@@ -398,6 +410,20 @@ class RunCommandCriterion(BaseSuccessCriterion):
             "Mutually exclusive with expected_stdout."
         ),
     )
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Declares this command an artifact-only check: it writes nothing and reaches no live "
+            "service. Its one effect is that a graded run also runs it after an agent crash or "
+            "turn timeout, on the diagnostic path, where the result is recorded but never scored. "
+            "Nothing verifies the declaration; see the Task Definition Guide for when to set it."
+        ),
+    )
+
+    @property
+    def evaluable_after_agent_failure(self) -> bool:
+        """Author-declared, not proven -- see ``read_only``."""
+        return self.read_only
 
     @model_validator(mode="after")
     def check_score_from_stdout_exclusivity(self) -> RunCommandCriterion:
