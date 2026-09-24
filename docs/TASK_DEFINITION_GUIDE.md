@@ -905,7 +905,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
   stdout_match: "exact"               # "exact" (default), "contains", or "regex"
   description: "Script must output the correct text"
 
-# Graded even when the agent's turn times out or the agent crashes
+# Graded even when the turn times out, the agent crashes, or a budget breach cuts grading short
 - type: "run_command"
   command: "python graders/check_flow.py"
   read_only: true                     # declaration, not enforcement -- see below
@@ -920,7 +920,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
 | `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
-| `read_only` | `false` | Declares the command inspects artifacts only. Its sole effect: the criterion is also graded after a terminal agent failure — see [Post-failure criterion evidence](REPORT_SCHEMA.md#post-failure-criterion-evidence). |
+| `read_only` | `false` | Declares the command inspects artifacts only. Its sole effect: the criterion is also graded on the post-failure diagnostic path — after a turn timeout, an agent crash, or a budget breach that stopped grading. See [Post-failure criterion evidence](REPORT_SCHEMA.md#post-failure-criterion-evidence). |
 
 `read_only` is an author declaration, **not** a restriction. coder-eval cannot decide
 whether a shell command is pure, so it verifies nothing and confines nothing: the

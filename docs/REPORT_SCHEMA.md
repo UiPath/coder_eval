@@ -188,8 +188,9 @@ fields so subclass keys round-trip.
 
 ### Post-failure criterion evidence
 
-When an agent crashes or its turn times out, coder-eval runs only deterministic,
-read-only artifact criteria while the sandbox is still live: `file_exists`,
+When an agent crashes, its turn times out, or a token/cost budget breach stops grading
+part-way, coder-eval runs only deterministic, read-only artifact criteria while the
+sandbox is still live: `file_exists`,
 `file_contains`, `file_matches_regex`, `file_check`, `json_check`,
 `reference_comparison`, and `classification_match`. A `run_command` criterion joins them
 only when the task author sets [`read_only: true`](TASK_DEFINITION_GUIDE.md#run_command)

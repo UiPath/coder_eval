@@ -893,8 +893,10 @@ class Orchestrator:
         """Evaluate diagnostic criteria before the live sandbox is torn down.
 
         Results stay outside the canonical scored list. Only criteria that
-        declare themselves deterministic and read-only run on this path. This
-        excludes judges and checks that execute sandbox commands.
+        declare themselves deterministic and read-only run on this path. That
+        excludes judges and trajectory checks, and every ``run_command``
+        criterion except one the task author marked ``read_only`` -- which DOES
+        execute a sandbox command here.
         """
         if self.result is None:
             return
