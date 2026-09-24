@@ -20,7 +20,7 @@ Rationale: .claude/notes/reporting.md § Harbor export
 from __future__ import annotations
 
 import shlex
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from coder_eval.harbor.agent_paths import AGENT_TASK_YAML_PATH
 
@@ -62,7 +62,7 @@ class CoderEvalAgent(BaseInstalledAgent):
     on PATH there exactly as ``tests/test.sh`` assumes it is for grading.
     """
 
-    SUPPORTS_ATIF: bool = True
+    SUPPORTS_ATIF: ClassVar[bool] = True
 
     @staticmethod
     def name() -> str:
