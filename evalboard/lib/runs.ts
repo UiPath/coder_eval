@@ -102,6 +102,9 @@ export interface TaskResultSummary {
     status: string | null;
     weightedScore: number | null;
     durationSeconds: number | null;
+    // The agent's turns alone, without setup and grading. Optional so test
+    // factories that predate it stay valid.
+    agentSeconds?: number | null;
     totalCostUsd: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
@@ -892,6 +895,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         status: t.status ?? null,
         weightedScore: t.weighted_score ?? null,
         durationSeconds: t.duration ?? null,
+        agentSeconds: agentSecondsFromRaw(t),
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
