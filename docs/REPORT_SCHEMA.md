@@ -191,9 +191,10 @@ fields so subclass keys round-trip.
 When an agent crashes or its turn times out, coder-eval runs only deterministic,
 read-only artifact criteria while the sandbox is still live: `file_exists`,
 `file_contains`, `file_matches_regex`, `file_check`, `json_check`,
-`reference_comparison`, and `classification_match`. Judges, trajectory checks,
-`run_command`, and `uipath_eval` are recorded with
-`evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
+`reference_comparison`, and `classification_match`. A `run_command` criterion joins them
+only when the task author sets [`read_only: true`](TASK_DEFINITION_GUIDE.md#run_command)
+on it. Judges, trajectory checks, plain `run_command`, and `uipath_eval` are recorded
+with `evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
 The diagnostic list is additive evidence. An `ERROR` run remains `ERROR`, and its
 canonical score remains 0.0.
 

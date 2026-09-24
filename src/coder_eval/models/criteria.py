@@ -140,7 +140,17 @@ class BaseSuccessCriterion(BaseModel, ABC):
     """True if this criterion requires agent turn records to evaluate correctly."""
 
     supports_post_failure_evaluation: ClassVar[bool] = False
-    """True for deterministic, read-only artifact checks safe to run after agent failure."""
+    """True for criterion TYPES that are always deterministic, read-only artifact checks."""
+
+    @property
+    def evaluable_after_agent_failure(self) -> bool:
+        """True when THIS criterion is safe to run after a terminal agent failure.
+
+        The per-instance answer the orchestrator asks, so a type whose safety
+        depends on how the criterion is authored (``run_command``) can decide it
+        from its own fields instead of from the class.
+        """
+        return self.supports_post_failure_evaluation
 
     @property
     def is_stop_armed(self) -> bool:
@@ -398,6 +408,25 @@ class RunCommandCriterion(BaseSuccessCriterion):
             "Mutually exclusive with expected_stdout."
         ),
     )
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "The task author's DECLARATION that this command only inspects artifacts: it writes "
+            "nothing, reaches no live service, and returns the same verdict every run. Its only "
+            "effect is eligibility -- the criterion is also graded after a terminal agent failure "
+            "(turn timeout or agent crash), while the sandbox is still live, so a timed-out run "
+            "records what the artifacts were worth. That result is diagnostic and never moves "
+            "final_status or weighted_score. UNVERIFIED AND UNENFORCED: purity of a shell command "
+            "is not decidable here, the command runs exactly as it would normally, and nothing "
+            "stops a mutating command from being marked. Leave it false for anything that writes "
+            "state or calls a live tenant (e.g. 'uip maestro flow debug', which starts a cloud job)."
+        ),
+    )
+
+    @property
+    def evaluable_after_agent_failure(self) -> bool:
+        """Author-declared, not proven -- see ``read_only``."""
+        return self.read_only
 
     @model_validator(mode="after")
     def check_score_from_stdout_exclusivity(self) -> RunCommandCriterion:

@@ -863,6 +863,13 @@ class Orchestrator:
         return f"post-failure grading could not complete ({type(error).__name__}{suffix})"
 
     @staticmethod
+    def _unavailable_reason(criterion: SuccessCriterion) -> str:
+        reason = "the criterion is not a deterministic, read-only artifact check"
+        if criterion.type == "run_command":
+            reason += " (declare 'read_only: true' on it if the command only inspects artifacts)"
+        return reason
+
+    @staticmethod
     def _not_evaluated_result(criterion: SuccessCriterion, reason: str) -> CriterionResult:
         return CriterionResult(
             criterion_type=criterion.type,
@@ -903,7 +910,7 @@ class Orchestrator:
         runnable: list[SuccessCriterion] = []
         unavailable_positions: set[int] = set()
         for position, criterion in enumerate(self.task.success_criteria):
-            if not criterion.supports_post_failure_evaluation:
+            if not criterion.evaluable_after_agent_failure:
                 unavailable_positions.add(position)
             else:
                 runnable.append(criterion)
@@ -925,12 +932,7 @@ class Orchestrator:
         recovered: CriteriaResults = []
         for position, criterion in enumerate(self.task.success_criteria):
             if position in unavailable_positions:
-                recovered.append(
-                    self._not_evaluated_result(
-                        criterion,
-                        "the criterion is not a deterministic, read-only artifact check",
-                    )
-                )
+                recovered.append(self._not_evaluated_result(criterion, self._unavailable_reason(criterion)))
             else:
                 recovered.append(next(checked_iter))
         self.result.post_failure_criteria_results = recovered
