@@ -43,7 +43,7 @@ dependencies = [
     # explicitly since our code/tests construct httpx2 types directly. Capped to
     # mirror anthropic's own bound on it (`httpx2<3,>=2.0.0`).
     "httpx2>=2.12.0,<3.0.0",
-    "claude-agent-sdk>=0.2.159",
+    "claude-agent-sdk>=0.2.157",
     "anyio>=4.14.2",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
@@ -112,7 +112,7 @@ litellm = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex>=0.156.1",
+    "openai-codex>=0.155.1",
 ]
 # Optional extra that enables Antigravity agent support:
 #   - AntigravityAgent implementation using Google's official google-antigravity SDK
@@ -131,7 +131,7 @@ codex = [
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.18",
+    "google-antigravity==0.1.17",
 ]
 # Optional extra that enables OpenCode agent support.
 #
@@ -212,14 +212,14 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# openai-codex 0.156.1 hardpins `openai-codex-cli-bin==0.156.1` (a stable
+# openai-codex 0.155.1 hardpins `openai-codex-cli-bin==0.155.1` (a stable
 # release; the SDK version now tracks the codex CLI version line). Naming it
 # here documents and holds the pinned cli-bin build — the harness binary is a
 # dominant non-model driver of eval results, so it travels with the coder_eval
 # release tag and is bumped deliberately (mirrors the antigravity localharness
-# and claude-code CLI pins). 0.156.1 publishes manylinux wheels (x86_64 +
+# and claude-code CLI pins). 0.155.1 publishes manylinux wheels (x86_64 +
 # aarch64), so CI/Linux installs work.
-override-dependencies = ["openai-codex-cli-bin==0.156.1"]
+override-dependencies = ["openai-codex-cli-bin==0.155.1"]
 
 constraint-dependencies = [
     # Fix known CVEs in transitive dependencies

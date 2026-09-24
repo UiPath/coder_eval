@@ -148,10 +148,10 @@ def test_resolve_workspaces_includes_workdir_and_skill_roots(tmp_path):
 
 
 def test_resolved_workspaces_cover_skill_reads(tmp_path):
-    """The harness confines file tools to ``workspaces`` (enforced inside localharness
-    since google-antigravity 0.1.18, not by a Python-side predicate), and
-    ``skills_paths`` feeds discovery, not that allowlist, so the resolved skill roots
-    must be in ``workspaces`` for the agent to read SKILL.md."""
+    """The harness confines file tools to ``workspaces`` (enforced inside localharness,
+    not by a Python-side predicate), and ``skills_paths`` feeds discovery, not that
+    allowlist, so the resolved skill roots must be in ``workspaces`` for the agent to
+    read SKILL.md."""
     repo = tmp_path / "skills-repo"
     _make_skill(repo / "skills", "uipath-sdd")
     skill_md = (repo / "skills" / "uipath-sdd" / "SKILL.md").resolve()
