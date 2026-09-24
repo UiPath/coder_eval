@@ -60,55 +60,55 @@ describe("summarizeListing", () => {
             tasksSucceeded: 0,
             tasksRun: 0,
             tasksGraded: 0,
-            durationSeconds: null,
-            durationPartial: false,
+            agentSeconds: null,
+            agentPartial: false,
         });
     });
 
-    test("sums cost, duration, and task counts across runs", () => {
+    test("sums cost, agent time, and task counts across runs", () => {
         const t = summarizeListing([
             row({
                 tasksSucceeded: 8,
                 tasksRun: 10,
                 totalCostUsd: 1.5,
-                taskDurationSeconds: 120,
+                agentSeconds: 120,
             }),
             row({
                 tasksSucceeded: 3,
                 tasksRun: 5,
                 totalCostUsd: 2.25,
-                taskDurationSeconds: 60,
+                agentSeconds: 60,
             }),
         ]);
         expect(t.costUsd).toBeCloseTo(3.75);
-        expect(t.durationSeconds).toBe(180);
+        expect(t.agentSeconds).toBe(180);
         expect(t.tasksSucceeded).toBe(11);
         expect(t.tasksRun).toBe(15);
         expect(t.costPartial).toBe(false);
-        expect(t.durationPartial).toBe(false);
+        expect(t.agentPartial).toBe(false);
     });
 
-    test("flags partial when a run lacks cost or duration", () => {
-        // One run recorded cost/duration, one didn't: sum reflects only the
+    test("flags partial when a run lacks cost or agent time", () => {
+        // One run recorded cost/agent time, one didn't: sum reflects only the
         // recorded run and the *Partial flags say so.
         const t = summarizeListing([
-            row({ totalCostUsd: 4, taskDurationSeconds: 30 }),
-            row({ totalCostUsd: null, taskDurationSeconds: null }),
+            row({ totalCostUsd: 4, agentSeconds: 30 }),
+            row({ totalCostUsd: null, agentSeconds: null }),
         ]);
         expect(t.costUsd).toBe(4);
         expect(t.costPartial).toBe(true);
-        expect(t.durationSeconds).toBe(30);
-        expect(t.durationPartial).toBe(true);
+        expect(t.agentSeconds).toBe(30);
+        expect(t.agentPartial).toBe(true);
     });
 
     test("all-missing cost stays null, not zero", () => {
         // A window where no run has a cost must read "—", not "$0.00" — the
-        // sum is unknown, not zero. Same for duration.
+        // sum is unknown, not zero. Same for agent time.
         const t = summarizeListing([row({}), row({})]);
         expect(t.costUsd).toBeNull();
         expect(t.costPartial).toBe(false);
-        expect(t.durationSeconds).toBeNull();
-        expect(t.durationPartial).toBe(false);
+        expect(t.agentSeconds).toBeNull();
+        expect(t.agentPartial).toBe(false);
     });
 });
 
@@ -1275,6 +1275,16 @@ describe("projectRunRow", () => {
                 "07-30",
             );
             expect(scoped?.tasks).toHaveLength(2);
+        });
+
+        test("sums agent time over the tasks that ran, whole or filtered", () => {
+            const r = run("r", [
+                task({ taskId: "a", tags: ["keep"], agentSeconds: 30 }),
+                task({ taskId: "b", agentSeconds: 12 }),
+                task({ taskId: "c", tags: ["keep"], agentSeconds: 99, matureSkipped: true }),
+            ]);
+            expect(scopeRunTasks(r, null, null)?.agentSeconds).toBe(42);
+            expect(scopeRunTasks(r, "keep", null)?.agentSeconds).toBe(30);
         });
     });
 });
