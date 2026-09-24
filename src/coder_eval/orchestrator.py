@@ -54,6 +54,7 @@ from .models import (
     PreRunCommand,
     PreservationMode,
     ReferenceComparisonCriterion,
+    RunCommandCriterion,
     SimulationConfig,
     SimulationTelemetry,
     SuccessCriterion,
@@ -865,7 +866,7 @@ class Orchestrator:
     @staticmethod
     def _unavailable_reason(criterion: SuccessCriterion) -> str:
         reason = "the criterion is not a deterministic, read-only artifact check"
-        if criterion.type == "run_command":
+        if isinstance(criterion, RunCommandCriterion):
             reason += " (declare 'read_only: true' on it if the command only inspects artifacts)"
         return reason
 
@@ -897,6 +898,10 @@ class Orchestrator:
         excludes judges and trajectory checks, and every ``run_command``
         criterion except one the task author marked ``read_only`` -- which DOES
         execute a sandbox command here.
+
+        Reached from an agent crash or a turn timeout only. A budget breach
+        raises after the canonical vector is already complete, so its guard in
+        ``_run_evaluation_with_failure_evidence`` re-raises before this runs.
         """
         if self.result is None:
             return

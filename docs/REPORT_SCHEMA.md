@@ -188,16 +188,17 @@ fields so subclass keys round-trip.
 
 ### Post-failure criterion evidence
 
-When an agent crashes, its turn times out, or a token/cost budget breach stops grading
-part-way, coder-eval runs only deterministic, read-only artifact criteria while the
-sandbox is still live: `file_exists`,
+When an agent crashes or its turn times out on a graded run, coder-eval runs only
+deterministic, read-only artifact criteria while the sandbox is still live: `file_exists`,
 `file_contains`, `file_matches_regex`, `file_check`, `json_check`,
 `reference_comparison`, and `classification_match`. A `run_command` criterion joins them
 only when the task author sets [`read_only: true`](TASK_DEFINITION_GUIDE.md#run_command)
 on it. Judges, trajectory checks, plain `run_command`, and `uipath_eval` are recorded
 with `evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
 The diagnostic list is additive evidence. An `ERROR` run remains `ERROR`, and its
-canonical score remains 0.0.
+canonical score remains 0.0. The list stays empty under `coder-eval execute`, and on a
+token/cost budget breach, which fires only after every criterion is already scored in
+`success_criteria_results`.
 
 ### TurnRecord
 

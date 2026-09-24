@@ -905,7 +905,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
   stdout_match: "exact"               # "exact" (default), "contains", or "regex"
   description: "Script must output the correct text"
 
-# Graded even when the turn times out, the agent crashes, or a budget breach cuts grading short
+# Also graded when the turn times out or the agent crashes
 - type: "run_command"
   command: "python graders/check_flow.py"
   read_only: true                     # declaration, not enforcement -- see below
@@ -920,13 +920,19 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
 | `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
-| `read_only` | `false` | Declares the command inspects artifacts only. Its sole effect: the criterion is also graded on the post-failure diagnostic path — after a turn timeout, an agent crash, or a budget breach that stopped grading. See [Post-failure criterion evidence](REPORT_SCHEMA.md#post-failure-criterion-evidence). |
+| `read_only` | `false` | Declares the command inspects artifacts only. Its sole effect: a graded run also runs the criterion after a turn timeout or an agent crash — see [Post-failure criterion evidence](REPORT_SCHEMA.md#post-failure-criterion-evidence). |
 
 `read_only` is an author declaration, **not** a restriction. coder-eval cannot decide
 whether a shell command is pure, so it verifies nothing and confines nothing: the
 command runs exactly as it always does. Set it only when the command reads artifacts and
 nothing else. Leave it `false` when the command writes state or calls a live service (a
 `uip maestro flow debug` grader starts a real cloud job, so it must stay `false`).
+
+Keep a `read_only` criterion's `timeout` short. The diagnostic pass runs after the agent
+is gone, and the commands are not interruptible: a `task_timeout` that expires mid-pass
+cancels the await, not the shell subprocess, so it keeps running while the sandbox is
+torn down. Without a `task_timeout` the pass is bounded only by the sum of these
+timeouts.
 
 ### `file_matches_regex`
 

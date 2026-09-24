@@ -442,8 +442,19 @@ async def test_read_only_run_command_is_graded_after_a_terminal_agent_error(tmp_
         ),
         RunCommandCriterion(
             type="run_command",
+            command="test -f missing.txt",
+            read_only=True,
+            description="declared read-only grader that fails",
+        ),
+        RunCommandCriterion(
+            type="run_command",
             command="touch should-not-run",
             description="undeclared sandbox command",
+        ),
+        LLMJudgeCriterion(
+            type="llm_judge",
+            prompt="Grade the artifact.",
+            description="paid judge",
         ),
     ]
     run_dir = tmp_path / "run" / "read_only_post_failure"
@@ -479,11 +490,20 @@ async def test_read_only_run_command_is_graded_after_a_terminal_agent_error(tmp_
 
     assert marker_seen == [False], "an undeclared run_command must not execute on this path"
 
-    declared, undeclared = result.post_failure_criteria_results
-    assert declared.evaluation_status == "evaluated"
-    assert declared.score == 1.0
+    passed, failed, undeclared, judge = result.post_failure_criteria_results
+    assert passed.evaluation_status == "evaluated"
+    assert passed.score == 1.0
+
+    # A real failing verdict, NOT the not_evaluated placeholder -- both score 0.0.
+    assert failed.evaluation_status == "evaluated"
+    assert failed.score == 0.0
+    assert "Not evaluated after terminal agent failure" not in (failed.details or "")
+
+    # The opt-in hint belongs only to the type that has the opt-in.
     assert undeclared.evaluation_status == "not_evaluated"
     assert "read_only: true" in (undeclared.details or "")
+    assert judge.evaluation_status == "not_evaluated"
+    assert "read_only: true" not in (judge.details or "")
 
     # The evidence is additive: the run is still the failure it was.
     assert result.final_status == "ERROR"

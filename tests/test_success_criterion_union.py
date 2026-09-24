@@ -139,6 +139,14 @@ def test_run_command_is_not_post_failure_evaluable_by_default():
     assert task.success_criteria[0].evaluable_after_agent_failure is False
 
 
+@pytest.mark.parametrize("tag", sorted(MINIMAL_PAYLOADS))
+def test_post_failure_property_tracks_the_type_answer(tag: str):
+    """Only ``run_command`` may diverge from its ClassVar, and only via ``read_only``."""
+    criterion = _make_task([{"type": tag, **MINIMAL_PAYLOADS[tag]}]).success_criteria[0]
+
+    assert criterion.evaluable_after_agent_failure is criterion.supports_post_failure_evaluation
+
+
 def test_validate_registry_passes():
     CriterionRegistry.discover()
     validate_registry()

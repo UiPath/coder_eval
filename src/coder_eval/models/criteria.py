@@ -140,7 +140,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
     """True if this criterion requires agent turn records to evaluate correctly."""
 
     supports_post_failure_evaluation: ClassVar[bool] = False
-    """True for criterion TYPES that are always deterministic, read-only artifact checks."""
+    """Type-level only: True for criterion TYPES that are always deterministic, read-only
+    artifact checks. It cannot answer for an instance -- ``run_command`` decides per
+    criterion -- so every caller asks ``evaluable_after_agent_failure`` instead."""
 
     @property
     def evaluable_after_agent_failure(self) -> bool:
@@ -411,17 +413,10 @@ class RunCommandCriterion(BaseSuccessCriterion):
     read_only: bool = Field(
         default=False,
         description=(
-            "The task author's DECLARATION that this command only inspects artifacts: it writes "
-            "nothing, reaches no live service, and returns the same verdict every run. Its only "
-            "effect is eligibility -- the criterion is also graded on the post-failure diagnostic "
-            "path, while the sandbox is still live, so a run that died mid-flight still records "
-            "what the artifacts were worth. Three failures reach that path: a turn timeout, an "
-            "agent crash, and a token or cost budget breach that stopped grading part-way. The "
-            "command runs on every one of them. That result is diagnostic and never moves "
-            "final_status or weighted_score. UNVERIFIED AND UNENFORCED: purity of a shell command "
-            "is not decidable here, the command runs exactly as it would normally, and nothing "
-            "stops a mutating command from being marked. Leave it false for anything that writes "
-            "state or calls a live tenant (e.g. 'uip maestro flow debug', which starts a cloud job)."
+            "Declares this command an artifact-only check: it writes nothing and reaches no live "
+            "service. Its one effect is that a graded run also runs it after an agent crash or "
+            "turn timeout, on the diagnostic path, where the result is recorded but never scored. "
+            "Nothing verifies the declaration; see the Task Definition Guide for when to set it."
         ),
     )
 
