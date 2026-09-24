@@ -544,9 +544,8 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         expect(cell("Unaccounted").textContent).toBe("5.0s (50%)");
     });
 
-    test("the four pre-existing cells still render their values", () => {
+    test("the pre-existing cells still render their values", () => {
         renderStrip(10);
-        expect(cell("Messages").textContent).toBe("1");
         expect(cell("Generation").textContent).toBe("4.0s");
         expect(cell("Tool exec").textContent).toBe("1.0s");
         expect(cell("Slow events").textContent).toBe("0 gen · 0 tool");
@@ -788,6 +787,19 @@ describe("MessageTimelineSection — agent time vs eval overhead", () => {
         expect(cell("Unaccounted").textContent).toBe("500ms (8%)");
         // 4s overhead = 2.5s setup + 1s grading + 0.5s other.
         expect(cell("Other").textContent).toBe("500ms");
+    });
+
+    test("a residual that rounds to 0% of agent time is hidden", () => {
+        render(
+            <MessageTimelineSection
+                messages={[message()]}
+                taskDurationSeconds={10}
+                agentSeconds={6.002}
+                harnessStartupMs={1000}
+                harnessTeardownMs={1000}
+            />,
+        );
+        expect(screen.queryByText("Unaccounted")).toBeNull();
     });
 
     test("without per-turn durations the residual spans the whole task", () => {
