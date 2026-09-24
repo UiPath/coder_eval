@@ -131,11 +131,14 @@ export function withinExpectedTimeRateForTasks(
     return eligible > 0 ? (within / eligible) * 100 : null;
 }
 
-// Seconds of every task that ran, over the number that passed. Mirrors the
+// Agent seconds of every task that ran, over the number that passed. Mirrors the
 // runner's headline (timing.py::time_per_passed_task) so a filtered front-page
 // view and the block stamped into run.json compute the same thing on the same
 // rows. The Slack rollup does not report this yet — the metric is being watched
 // on the dashboard first.
+//
+// Agent time, not the row's `duration`: setup and grading are eval scaffolding
+// no skill can change, and their share differs by harness.
 //
 // Mature-skipped rows leave BOTH sides. They are carried-forward passes with no
 // duration, so counting them only in the denominator divides real seconds by a
@@ -147,7 +150,7 @@ export function timePerPassedTaskForTasks(
     const executed = tasks.filter((t) => !t.matureSkipped);
     const passed = executed.filter((t) => isPassStatus(t.status)).length;
     if (!passed) return null;
-    const total = executed.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
+    const total = executed.reduce((a, t) => a + (t.agentSeconds ?? 0), 0);
     return total > 0 ? total / passed : null;
 }
 

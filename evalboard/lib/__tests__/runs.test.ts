@@ -11,6 +11,7 @@ import {
     test,
 } from "vitest";
 import {
+    agentSecondsFromRaw,
     aggregateSubAgentUsage,
     type ArtifactRef,
     clearRunCacheDir,
@@ -497,6 +498,24 @@ describe("visibleTurnsFromRaw (historical backfill)", () => {
     test("null when neither the field nor actual_commands is present", () => {
         expect(visibleTurnsFromRaw({})).toBeNull();
         expect(visibleTurnsFromRaw({ has_final_reply: true })).toBeNull();
+    });
+});
+
+describe("agentSecondsFromRaw", () => {
+    test("sums every turn, leaving out setup and grading", () => {
+        expect(
+            agentSecondsFromRaw({
+                duration: 130,
+                iterations: [{ duration_seconds: 40 }, { duration_seconds: 60 }],
+            }),
+        ).toBe(100);
+    });
+
+    test("null when no turn recorded a duration", () => {
+        expect(agentSecondsFromRaw({ duration: 24 })).toBeNull();
+        expect(
+            agentSecondsFromRaw({ iterations: [{ duration_seconds: null }] }),
+        ).toBeNull();
     });
 });
 

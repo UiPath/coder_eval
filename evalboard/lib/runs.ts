@@ -503,6 +503,7 @@ export interface RawTaskResult {
     status?: string;
     weighted_score?: number;
     duration?: number;
+    iterations?: { duration_seconds?: number | null }[] | null;
     total_cost_usd?: number;
     input_tokens?: number | null;
     output_tokens?: number | null;
@@ -1141,6 +1142,9 @@ export interface RunOverviewTask {
     skill: string | null;
     totalCostUsd: number | null;
     durationSeconds: number | null;
+    // The agent's turns alone: `durationSeconds` minus sandbox setup, pre_run,
+    // grading and cleanup. Optional so test factories that predate it stay valid.
+    agentSeconds?: number | null;
     weightedScore: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
@@ -1257,6 +1261,13 @@ function mostCommonAgentType(rows: RawTaskResult[]): string | null {
     return best;
 }
 
+export function agentSecondsFromRaw(t: RawTaskResult): number | null {
+    const seconds = (t.iterations ?? [])
+        .map((i) => i.duration_seconds)
+        .filter((d): d is number => typeof d === "number" && d > 0);
+    return seconds.length ? seconds.reduce((a, d) => a + d, 0) : null;
+}
+
 export async function readRunOverview(
     id: string,
     source: Source = DEFAULT_SOURCE,
@@ -1275,6 +1286,7 @@ export async function readRunOverview(
                 skill: deriveSkill(t.task_path, tags),
                 totalCostUsd: t.total_cost_usd ?? null,
                 durationSeconds: t.duration ?? null,
+                agentSeconds: agentSecondsFromRaw(t),
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,

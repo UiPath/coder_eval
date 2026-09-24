@@ -304,12 +304,12 @@ describe("timePerPassedTaskForTasks", () => {
         // divided real seconds by tasks that never ran. A codex nightly whose
         // runner block said 3m12s rendered as 1m17s on the front page.
         const executed = [
-            task({ durationSeconds: 100 }),
-            task({ durationSeconds: 300 }),
+            task({ agentSeconds: 100 }),
+            task({ agentSeconds: 300 }),
         ];
         const carried = [
-            task({ durationSeconds: 0, matureSkipped: true }),
-            task({ durationSeconds: 0, matureSkipped: true }),
+            task({ agentSeconds: 0, matureSkipped: true }),
+            task({ agentSeconds: 0, matureSkipped: true }),
         ];
         expect(timePerPassedTaskForTasks([...executed, ...carried])).toBe(
             timePerPassedTaskForTasks(executed),
@@ -332,8 +332,8 @@ describe("timePerPassedTaskForTasks", () => {
     test("divides all seconds that ran by the number that passed", () => {
         expect(
             timePerPassedTaskForTasks([
-                task({ durationSeconds: 100 }),
-                task({ durationSeconds: 300 }),
+                task({ agentSeconds: 100 }),
+                task({ agentSeconds: 300 }),
             ]),
         ).toBe(200);
     });
@@ -343,8 +343,8 @@ describe("timePerPassedTaskForTasks", () => {
         // says so: 400 seconds over the single pass.
         expect(
             timePerPassedTaskForTasks([
-                task({ durationSeconds: 100 }),
-                task({ status: "FAILURE", durationSeconds: 300 }),
+                task({ agentSeconds: 100 }),
+                task({ status: "FAILURE", agentSeconds: 300 }),
             ]),
         ).toBe(400);
     });
@@ -352,13 +352,22 @@ describe("timePerPassedTaskForTasks", () => {
     test("null when nothing passed", () => {
         expect(
             timePerPassedTaskForTasks([
-                task({ status: "FAILURE", durationSeconds: 300 }),
+                task({ status: "FAILURE", agentSeconds: 300 }),
             ]),
         ).toBeNull();
     });
 
     test("null when no duration was recorded", () => {
         expect(timePerPassedTaskForTasks([task({})])).toBeNull();
+    });
+
+    test("counts agent seconds, not the row's full duration", () => {
+        expect(
+            timePerPassedTaskForTasks([
+                task({ durationSeconds: 130, agentSeconds: 100 }),
+                task({ durationSeconds: 330, agentSeconds: 300 }),
+            ]),
+        ).toBe(200);
     });
 });
 
