@@ -122,6 +122,31 @@ def test_model_dump_exclude_unset_round_trip():
     assert round_tripped.success_criteria[0].type == "file_exists"
 
 
+def test_read_only_survives_exclude_unset_round_trip():
+    """``read_only`` gates post-failure grading, so a dropped flag silently loses a score."""
+    task = _make_task([{"type": "run_command", "description": "d", "command": "true", "read_only": True}])
+
+    round_tripped = TaskDefinition.model_validate(task.model_dump(exclude_unset=True))
+
+    criterion = round_tripped.success_criteria[0]
+    assert criterion.read_only is True
+    assert criterion.evaluable_after_agent_failure is True
+
+
+def test_run_command_is_not_post_failure_evaluable_by_default():
+    task = _make_task([{"type": "run_command", "description": "d", "command": "true"}])
+
+    assert task.success_criteria[0].evaluable_after_agent_failure is False
+
+
+@pytest.mark.parametrize("tag", sorted(MINIMAL_PAYLOADS))
+def test_post_failure_property_tracks_the_type_answer(tag: str):
+    """Only ``run_command`` may diverge from its ClassVar, and only via ``read_only``."""
+    criterion = _make_task([{"type": tag, **MINIMAL_PAYLOADS[tag]}]).success_criteria[0]
+
+    assert criterion.evaluable_after_agent_failure is criterion.supports_post_failure_evaluation
+
+
 def test_validate_registry_passes():
     CriterionRegistry.discover()
     validate_registry()
