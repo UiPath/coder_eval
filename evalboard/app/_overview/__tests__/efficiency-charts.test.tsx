@@ -32,7 +32,7 @@ describe("EfficiencyCharts", () => {
     test("opens on the wall-clock metric", () => {
         renderCharts();
         expect(screen.getByRole("heading")).toHaveTextContent(
-            "Time per Passed Task",
+            "Agent Time per Passed Task",
         );
         expect(
             screen.getByRole("tab", { name: "Time" }),

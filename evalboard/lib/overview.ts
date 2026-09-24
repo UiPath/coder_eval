@@ -131,11 +131,14 @@ export function withinExpectedTimeRateForTasks(
     return eligible > 0 ? (within / eligible) * 100 : null;
 }
 
-// Seconds of every task that ran, over the number that passed. Mirrors the
+// Agent seconds of every task that ran, over the number that passed. Mirrors the
 // runner's headline (timing.py::time_per_passed_task) so a filtered front-page
 // view and the block stamped into run.json compute the same thing on the same
 // rows. The Slack rollup does not report this yet — the metric is being watched
 // on the dashboard first.
+//
+// Agent time, not the row's `duration`: setup and grading are eval scaffolding
+// no skill can change, and their share differs by harness.
 //
 // Mature-skipped rows leave BOTH sides. They are carried-forward passes with no
 // duration, so counting them only in the denominator divides real seconds by a
@@ -147,7 +150,7 @@ export function timePerPassedTaskForTasks(
     const executed = tasks.filter((t) => !t.matureSkipped);
     const passed = executed.filter((t) => isPassStatus(t.status)).length;
     if (!passed) return null;
-    const total = executed.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
+    const total = executed.reduce((a, t) => a + (t.agentSeconds ?? 0), 0);
     return total > 0 ? total / passed : null;
 }
 
@@ -191,6 +194,8 @@ export interface RunListingRow {
     tasksExecuted: number;
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    // Optional so existing test factories stay valid.
+    agentSeconds?: number | null;
     // Run-level harness (coder-eval AgentKind) for the Harness column; null on
     // legacy runs that predate the RunConfig stamp / carry no agent_config.type.
     // Optional so existing test factories stay valid.
@@ -208,8 +213,8 @@ export interface RunListingTotals {
     tasksSucceeded: number;
     tasksRun: number;
     tasksGraded: number; // the pass-rate denominator; see RunListingRow.tasksGraded
-    durationSeconds: number | null; // null when no matched run recorded a duration
-    durationPartial: boolean;
+    agentSeconds: number | null; // null when no matched run recorded agent time
+    agentPartial: boolean;
 }
 
 // Sum a matched-run slice into a window rollup. Pure over RunListingRow[] so it
@@ -221,8 +226,8 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
     let tasksSucceeded = 0;
     let tasksRun = 0;
     let tasksGraded = 0;
-    let durationSeconds = 0;
-    let durationRuns = 0;
+    let agentSeconds = 0;
+    let agentRuns = 0;
     for (const r of rows) {
         tasksSucceeded += r.tasksSucceeded;
         tasksRun += r.tasksRun;
@@ -231,9 +236,9 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
             costUsd += r.totalCostUsd;
             costRuns += 1;
         }
-        if (r.taskDurationSeconds != null) {
-            durationSeconds += r.taskDurationSeconds;
-            durationRuns += 1;
+        if (r.agentSeconds != null) {
+            agentSeconds += r.agentSeconds;
+            agentRuns += 1;
         }
     }
     return {
@@ -242,8 +247,8 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
         tasksSucceeded,
         tasksRun,
         tasksGraded,
-        durationSeconds: durationRuns > 0 ? durationSeconds : null,
-        durationPartial: durationRuns > 0 && durationRuns < rows.length,
+        agentSeconds: agentRuns > 0 ? agentSeconds : null,
+        agentPartial: agentRuns > 0 && agentRuns < rows.length,
     };
 }
 
@@ -1075,6 +1080,18 @@ export interface ScopedRun {
     // second count over `tasks` — which drops rows with no task_id — could
     // disagree with the duration's own denominator.
     tasksExecuted: number;
+    agentSeconds: number | null;
+}
+
+function sumAgentSeconds(tasks: RunOverviewTask[]): number | null {
+    let sum = 0;
+    let any = false;
+    for (const t of tasks) {
+        if (t.matureSkipped || t.agentSeconds == null) continue;
+        sum += t.agentSeconds;
+        any = true;
+    }
+    return any ? sum : null;
 }
 
 export function scopeRunTasks(
@@ -1089,6 +1106,7 @@ export function scopeRunTasks(
         taskDurationSeconds: overview.taskDurationSeconds,
         // ?? for an overview built before the field existed (test factories).
         tasksExecuted: overview.tasksExecuted ?? overview.tasks.length,
+        agentSeconds: sumAgentSeconds(overview.tasks),
     };
     if (tag == null && needle == null) return wholeRun;
 
@@ -1138,6 +1156,7 @@ export function scopeRunTasks(
         totalCostUsd: costHasAny ? costSum : null,
         taskDurationSeconds: durAllPresent ? durSum : null,
         tasksExecuted: matching.filter((t) => !t.matureSkipped).length,
+        agentSeconds: sumAgentSeconds(matching),
     };
 }
 
@@ -1155,6 +1174,7 @@ function rowFromScoped(
         tasksExecuted: scoped.tasksExecuted,
         totalCostUsd: scoped.totalCostUsd,
         taskDurationSeconds: scoped.taskDurationSeconds,
+        agentSeconds: scoped.agentSeconds,
         harness: harness ?? null,
     };
 }
