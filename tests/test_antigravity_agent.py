@@ -11,7 +11,6 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from itertools import pairwise
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -135,7 +134,9 @@ def test_resolve_skills_paths_empty_without_sources():
 
 
 def test_resolve_workspaces_includes_workdir_and_skill_roots(tmp_path):
-    """workspaces = sandbox workdir + resolved skill roots, so SKILL.md stays readable."""
+    """workspaces = sandbox workdir + resolved skill roots. The harness confines file tools to
+    ``workspaces``, and ``skills_paths`` feeds discovery only, so a skill root missing here
+    is discovered and then denied on every read of its SKILL.md."""
     repo = tmp_path / "skills-repo"
     _make_skill(repo / "skills", "uipath-sdd")
     agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
@@ -145,25 +146,6 @@ def test_resolve_workspaces_includes_workdir_and_skill_roots(tmp_path):
         str(tmp_path / "work"),
         str((repo / "skills").resolve()),
     ]
-
-
-def test_resolved_workspaces_cover_skill_reads(tmp_path):
-    """The harness confines file tools to ``workspaces`` (enforced inside localharness,
-    not by a Python-side predicate), and ``skills_paths`` feeds discovery, not that
-    allowlist, so the resolved skill roots must be in ``workspaces`` for the agent to
-    read SKILL.md."""
-    repo = tmp_path / "skills-repo"
-    _make_skill(repo / "skills", "uipath-sdd")
-    skill_md = (repo / "skills" / "uipath-sdd" / "SKILL.md").resolve()
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-
-    agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
-    agent.working_directory = workdir
-    workspaces = [Path(w).resolve() for w in agent._resolve_workspaces(agent._resolve_skills_paths(None))]
-
-    assert not skill_md.is_relative_to(workdir.resolve())
-    assert any(skill_md.is_relative_to(w) for w in workspaces)
 
 
 def test_to_token_usage_maps_gemini_buckets():

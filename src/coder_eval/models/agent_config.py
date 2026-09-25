@@ -362,7 +362,7 @@ class OpenCodeAgentConfig(BaseAgentConfig):
 
 
 # A STRICT SUPERSET of ThinkingLevel, so Pi gets its own literal -- reuse would
-# forbid valid Pi levels. Confirmed against ``pi --help`` on Pi 0.84.4.
+# forbid valid Pi levels. Confirmed against ``pi --help`` on Pi 0.87.1.
 type PiThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 

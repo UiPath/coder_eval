@@ -275,7 +275,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         return roots
 
     def _resolve_workspaces(self, skills_paths: list[str]) -> list[str]:
-        """Workspace roots for the harness's ``workspace_only`` file-tool policy.
+        """Workspace roots the harness confines its file tools to.
 
         The sandbox working directory (the write target) plus the resolved skill
         roots. ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
@@ -341,9 +341,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             cfg = LocalAgentConfig(
                 model=self._effective_model(),
                 api_key=api_key,
-                # File tools are confined to ``workspaces`` by the auto-prepended
-                # workspace_only policy — see _resolve_workspaces for why the skill
-                # roots must be in here and not only in ``skills_paths``.
+                # The harness confines file tools to ``workspaces``; see
+                # _resolve_workspaces for why the skill roots must be in here and
+                # not only in ``skills_paths``.
                 workspaces=self._resolve_workspaces(skills_paths),
                 # Autonomous execution: approve every tool call, which the default
                 # policy would deny. ``permission_mode`` is deliberately NOT mapped
