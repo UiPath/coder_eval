@@ -5,7 +5,7 @@ events on stdout, and reduces that stream into the standardized coder_eval event
 protocol so :class:`EventCollector` builds the ``TurnRecord``. The design mirrors
 :mod:`coder_eval.agents.opencode_agent`.
 
-Three grammar facts that are not obvious from the event names (``pi`` 0.84.4):
+Three grammar facts that are not obvious from the event names (``pi`` 0.87.1):
 
 - ``agent_start`` can appear MORE THAN ONCE per invocation — Pi auto-retries a
   transient provider error internally — and ``agent_end`` is therefore NOT
@@ -149,7 +149,7 @@ _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "disallowed_tools",
 )
 
-# The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
+# The full recognized Pi vocabulary (from `pi` 0.87.1). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
 # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
 _RECOGNIZED_EVENTS = frozenset(

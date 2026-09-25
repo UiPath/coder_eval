@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # tag and is bumped deliberately -- mirrors the codex CLI pin
 # (`openai-codex-cli-bin==…` in pyproject). Leaving it at `@latest` let Docker
 # layer caching freeze it nondeterministically across rebuilds.
-ARG CLAUDE_CODE_VERSION=2.1.177
+ARG CLAUDE_CODE_VERSION=2.1.281
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
@@ -39,7 +39,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Pi Node CLI, pinned — same rationale as the Claude Code pin above (the agent
 # binary is a dominant non-model driver of results; @latest would freeze
 # nondeterministically under layer caching). Node 22 + npm are already present.
-ARG PI_VERSION=0.84.4
+ARG PI_VERSION=0.87.1
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
@@ -84,12 +84,12 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # pulls the `uipath` SDK from public PyPI (no credentials required).
 ARG CODER_EVAL_UV_EXTRAS=""
 
-# safe-chain min-age exclusions for the codex cli-bin pin (see pyproject [tool.uv])
-# and the pinned Antigravity harness. Codex and Antigravity are always installed,
-# so the default excludes their pinned packages from the min-age gate (the
-# google-antigravity release tracks the rapidly-moving Gemini harness and may be
+# safe-chain min-age exclusions for the codex cli-bin pin (see pyproject [tool.uv]),
+# the pinned Antigravity harness, and claude-agent-sdk (its wheel bundles the Claude
+# Code CLI). All three are always installed, so the default excludes their pinned
+# packages from the min-age gate (each tracks a rapidly-moving harness and may be
 # newer than the gate window); callers may override.
-ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex,google-antigravity"
+ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex,google-antigravity,claude-agent-sdk"
 
 # All extras (codex, antigravity, litellm, and the opt-in uipath) resolve from
 # public PyPI per uv.lock, so the build needs no private-index credentials.

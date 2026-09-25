@@ -29,6 +29,8 @@ env:
   # Anthropic-credit spend off this path; DirectRoute is exercised elsewhere.
   API_BACKEND: "bedrock"
   CLAUDE_CODE_USE_BEDROCK: "1"
+  # Same expression as pr-checks.yml (see the comment there).
+  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk
 
 jobs:
   harbor-e2e:

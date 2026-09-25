@@ -18,9 +18,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# HAZARD: bounds ReDoS on a large command string. Normalization runs over this
-# same truncated window, so shlex needs no separate size guard.
+# HAZARD: bounds ReDoS on a large command string. Every search window is at most
+# this long and normalization runs per window, so shlex needs no separate size guard.
 _MAX_PATTERN_SEARCH_LEN = 2000
+_WINDOW_OVERLAP = 256
+_LOGICAL_LINE_END = re.compile(r"(?<!\\)\n")
 
 
 def _is_shell_program(arg0: str) -> bool:
@@ -97,16 +99,48 @@ def _normalize_shell(cmd_text: str) -> str | None:
     return " ".join(tokens)
 
 
+def _search_windows(cmd_text: str) -> list[str]:
+    """Slices of ``cmd_text`` a pattern is searched in, each at most ``_MAX_PATTERN_SEARCH_LEN``.
+
+    The first window is the leading ``_MAX_PATTERN_SEARCH_LEN`` characters, so every
+    match the single leading window found is still found. The rest of the command is
+    packed into windows that start and end on logical-line boundaries (a
+    backslash-continued line stays whole), so a command on a line after a long heredoc
+    is still seen. A single logical line longer than the bound is cut into bound-sized
+    pieces overlapping by ``_WINDOW_OVERLAP``, so a match up to that long is never
+    split. Work stays linear in the command length and each regex search stays within
+    the ReDoS bound.
+    """
+    cap = _MAX_PATTERN_SEARCH_LEN
+    if len(cmd_text) <= cap:
+        return [cmd_text]
+    bounds: list[tuple[int, int]] = []
+    start = end = 0
+    for line_end in [m.end() for m in _LOGICAL_LINE_END.finditer(cmd_text)] + [len(cmd_text)]:
+        if line_end - start > cap:
+            if end > start:
+                bounds.append((start, end))
+                start = end
+            while line_end - start > cap:
+                bounds.append((start, start + cap))
+                start += cap - _WINDOW_OVERLAP
+        end = line_end
+    if end > start:
+        bounds.append((start, end))
+    return [cmd_text[:cap]] + [cmd_text[s:e] for s, e in bounds if s > 0]
+
+
 def _match_haystacks(cmd_text: str, *, is_shell: bool) -> list[str]:
     """Strings a pattern may match against for one command.
 
-    Always the raw ``cmd_text`` truncated to the ReDoS bound; when ``is_shell``,
-    additionally the quote-resolved, wrapper-stripped form of that **same
-    truncated window** (see :func:`_normalize_shell`). Normalizing the already-
-    truncated slice keeps both haystacks describing the same window, so quote-
-    stripping can never slide content from past the cap into the match, and
-    caps ``shlex`` input at ``_MAX_PATTERN_SEARCH_LEN`` for free. Matching is
-    "either" — a pattern hits the command if it matches ANY haystack.
+    When ``is_shell``, every search window of ``cmd_text`` (see
+    :func:`_search_windows`) plus the quote-resolved, wrapper-stripped form of each
+    window (see :func:`_normalize_shell`). Otherwise only the leading
+    ``_MAX_PATTERN_SEARCH_LEN`` characters: a non-shell tool's params are JSON, and a
+    later window of a Write/Edit body is file content, not something the agent ran.
+    Normalizing per window keeps every haystack within the ReDoS bound and caps
+    ``shlex`` input for free. Matching is "either" -- a pattern hits the command if it
+    matches ANY haystack.
 
     ``is_shell`` is decided once by the caller (a Bash tool whose ``command`` is
     a non-empty ``str``) and passed in, rather than re-derived here from
@@ -114,9 +148,11 @@ def _match_haystacks(cmd_text: str, *, is_shell: bool) -> list[str]:
     its params to JSON, where shell tokenization is meaningless, and must NOT be
     normalized (else stripped JSON quotes could newly satisfy an exclusion).
     """
-    window = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
-    haystacks = [window]
-    if is_shell:
+    if not is_shell:
+        return [cmd_text[:_MAX_PATTERN_SEARCH_LEN]]
+    haystacks: list[str] = []
+    for window in _search_windows(cmd_text):
+        haystacks.append(window)
         normalized = _normalize_shell(window)
         if normalized is not None and normalized != window:
             haystacks.append(normalized)

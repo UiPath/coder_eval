@@ -38,11 +38,12 @@ env:
   TELEMETRY_ENABLED: "false"
   # The `uipath-*` pool enforces a minimum package-age safe-chain check on installs.
   # Workflow-level so every installing job inherits it; per-job copies are how some
-  # jobs previously ended up with no exclusions at all. The literal is the operative
-  # value — no secret of that name exists at repo or org level, so the bare `secrets.`
-  # reference this replaced resolved to an empty list. (Image builds carry their own
-  # list in docker/Dockerfile; deliberately not the same set.)
-  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
+  # jobs previously ended up with no exclusions at all. A repo secret of this name
+  # replaces the literal when set, so claude-agent-sdk sits outside the `||`: its wheel
+  # bundles the Claude Code CLI, and new-model support ships there faster than the
+  # gate window. (Image builds carry their own list in docker/Dockerfile; deliberately
+  # not the same set.)
+  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk
 
 jobs:
   quality-gate:

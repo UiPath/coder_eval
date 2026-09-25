@@ -2,7 +2,13 @@
 
 from datetime import datetime
 
-from coder_eval.criteria.command_executed import _MAX_PATTERN_SEARCH_LEN, _match_haystacks, _normalize_shell
+from coder_eval.criteria.command_executed import (
+    _MAX_PATTERN_SEARCH_LEN,
+    _WINDOW_OVERLAP,
+    _match_haystacks,
+    _normalize_shell,
+    _search_windows,
+)
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CommandExecutedCriterion
 from coder_eval.models.results import TurnRecord
@@ -1072,18 +1078,12 @@ class TestShellQuotingNormalization:
         result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
         assert result.score == 1.0
 
-    def test_normalized_haystack_shares_the_raw_truncation_window(self):
-        """Both haystacks describe the same <=2000-char window (no past-cap leak).
-
-        Normalization runs over the already-truncated window. Normalizing the
-        FULL command would let quote-stripping slide content from past the cap
-        into the normalized haystack and change the verdict of a task relying on
-        the 2000-char bound.
-        """
-        cmd = "bash -lc " + ("word " * 600) + "TARGET"  # TARGET sits well past 2000 chars
+    def test_long_single_line_is_searched_in_bounded_windows(self):
+        """A match past the bound on one long line is found, and no haystack exceeds the bound."""
+        cmd = "bash -lc " + ("word " * 600) + "TARGET"
         haystacks = _match_haystacks(cmd, is_shell=True)
         assert all(len(h) <= _MAX_PATTERN_SEARCH_LEN for h in haystacks)
-        assert not any("TARGET" in h for h in haystacks)
+        assert any("TARGET" in h for h in haystacks)
 
     def test_negative_assertion_not_dodged_by_quoting(self):
         """A quote-obfuscated retired call is still caught by a max_count=0 gate."""
@@ -1101,3 +1101,89 @@ class TestShellQuotingNormalization:
         )
         result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
         assert result.score == 0.0
+
+
+def _heredoc_then(tail: str, body_lines: int = 60) -> str:
+    body = "\n".join(f"    line_{i} = {'x' * 60}" for i in range(body_lines))
+    return f"cat > build.py <<'EOF'\n{body}\nEOF\n{tail}"
+
+
+class TestSearchWindows:
+    """The pattern search covers the whole command, one bounded window at a time."""
+
+    def test_short_command_is_a_single_window(self):
+        assert _search_windows("uip agent validate .") == ["uip agent validate ."]
+
+    def test_every_window_is_bounded_and_the_first_keeps_the_leading_slice(self):
+        cmd = _heredoc_then("cd .. && uip agent validate .", body_lines=300)
+        windows = _search_windows(cmd)
+        assert len(cmd) > 4 * _MAX_PATTERN_SEARCH_LEN
+        assert windows[0] == cmd[:_MAX_PATTERN_SEARCH_LEN]
+        assert all(len(w) <= _MAX_PATTERN_SEARCH_LEN for w in windows)
+        assert windows[-1].endswith("cd .. && uip agent validate .")
+
+    def test_later_windows_start_on_a_line(self):
+        cmd = _heredoc_then("uip agent refresh .")
+        for w in _search_windows(cmd)[1:]:
+            assert cmd[cmd.index(w) - 1] == "\n"
+
+    def test_backslash_continuation_stays_in_one_window(self):
+        pad = "x" * (_MAX_PATTERN_SEARCH_LEN - 40)
+        cmd = f"echo {pad}\ngh pr create \\\n  --title t \\\n  --body b"
+        assert any("gh pr create \\\n  --title t \\\n  --body b" in w for w in _search_windows(cmd))
+
+    def test_long_line_pieces_overlap(self):
+        line = "a" * (3 * _MAX_PATTERN_SEARCH_LEN)
+        windows = _search_windows(line)
+        assert windows[1].startswith(line[_MAX_PATTERN_SEARCH_LEN - _WINDOW_OVERLAP : _MAX_PATTERN_SEARCH_LEN])
+        marker = "b" * _WINDOW_OVERLAP
+        split = line[: _MAX_PATTERN_SEARCH_LEN - 100] + marker + line[_MAX_PATTERN_SEARCH_LEN:]
+        assert any(marker in w for w in _search_windows(split))
+
+    def test_command_after_long_heredoc_satisfies_min_count(self):
+        cmd = _heredoc_then("cd .. && uip agent refresh MyAgent && uip agent validate MyAgent --output json")
+        assert cmd.index("uip agent validate") > _MAX_PATTERN_SEARCH_LEN
+        turn_records = [_make_turn([_make_command(parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="validates the agent",
+            tool_name="Bash",
+            command_pattern=r"uip\s+agent\s+validate",
+            min_count=1,
+        )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
+
+    def test_forbidden_command_after_long_heredoc_trips_max_count(self):
+        cmd = _heredoc_then("uip or users list")
+        turn_records = [_make_turn([_make_command(parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT use retired `uip or users list`",
+            tool_name="Bash",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 0.0
+
+    def test_exclusion_after_long_heredoc_drops_the_command(self):
+        cmd = _heredoc_then("uip agent validate . --dry-run")
+        turn_records = [_make_turn([_make_command(parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="real validate, not a dry run",
+            tool_name="Bash",
+            command_pattern=r"uip\s+agent\s+validate",
+            exclude_pattern=r"--dry-run",
+            min_count=1,
+        )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 0.0
+
+    def test_non_shell_tool_body_past_the_bound_is_not_searched(self):
+        content = "y" * (2 * _MAX_PATTERN_SEARCH_LEN) + "\nDo not run `uip or users list`, it is retired.\n"
+        write = _make_command(tool_name="Write", parameters={"file_path": "/work/NOTES.md", "content": content})
+        turn_records = [_make_turn([write])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT use retired `uip or users list`",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
