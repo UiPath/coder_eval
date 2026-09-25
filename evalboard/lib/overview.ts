@@ -1310,7 +1310,8 @@ const ADHOC_LOAD_SLACK = 10;
 
 // The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc" here
 // means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which is
-// exactly the set listRunIdsInWindow excludes from the chart and main table.
+// exactly the set listRunIdsInWindow excludes from the chart and main table,
+// plus date-named runs from the last 30 days that meta.json flags adhoc.
 //
 // Only the newest `limit + ADHOC_LOAD_SLACK` candidates are loaded, ordered by
 // the date in the id; loading all 165 to show ten rows cost ~294 MB per cold
@@ -1336,13 +1337,15 @@ export async function getAdhocRunListing(
     const budget = limit == null ? dated.length : limit + ADHOC_LOAD_SLACK;
     const loadedAll = budget >= dated.length;
     const toLoad = [...undated, ...dated.slice(0, budget).map((d) => d.id)];
-    const perRun = await mapWithConcurrency(
-        toLoad,
-        FETCH_CONCURRENCY,
-        cachedLoadPerRunFor(source),
-    );
-    const listing = buildAdhocRows(perRun, limit);
+    const [perRun, recentDaily] = await Promise.all([
+        mapWithConcurrency(toLoad, FETCH_CONCURRENCY, cachedLoadPerRunFor(source)),
+        loadWindowData("30d", source),
+    ]);
+    const flaggedDaily = recentDaily.filter((r) => r.adhoc);
+    const listing = buildAdhocRows([...perRun, ...flaggedDaily], limit);
     // `total` drives "Show more", so a truncated load must report the candidate
     // count or the section caps itself at the first page.
-    return loadedAll ? listing : { ...listing, total: ids.length };
+    return loadedAll
+        ? listing
+        : { ...listing, total: ids.length + flaggedDaily.length };
 }
