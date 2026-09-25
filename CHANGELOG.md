@@ -2,6 +2,95 @@
 
 <!-- version list -->
 
+## v0.12.7 (2026-09-25)
+
+### Bug Fixes
+
+- **criteria**: Search past the 2000-char bound only in Bash commands
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **criteria**: Search the whole command in command_executed and bump harness SDKs for Opus 5.5
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **criteria**: Search the whole command in command_executed, not just the first 2000 chars
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **docs**: Drop the budget-breach trigger, cut read_only to its contract
+  ([#197](https://github.com/UiPath/coder_eval/pull/197),
+  [`28c846e`](https://github.com/UiPath/coder_eval/commit/28c846ea6858fef04d366d245e5f7b679c2b75a1))
+
+- **evalboard**: List date-named runs flagged adhoc in the Ad-hoc section
+  ([#200](https://github.com/UiPath/coder_eval/pull/200),
+  [`5bf4a72`](https://github.com/UiPath/coder_eval/commit/5bf4a72693f007e93da678b58e0ddb84fa1bf63c))
+
+- **harbor**: Declare SUPPORTS_ATIF as a ClassVar to match harbor 0.23
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+### Build System
+
+- **deps**: Bump harness SDKs and CLIs to latest
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **deps**: Exempt claude-agent-sdk from the 48h package-age gate and take the latest SDK
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **deps**: Hold the SDK bump to releases past CI's 48h package-age gate
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+### Continuous Integration
+
+- **harbor**: Exempt claude-agent-sdk from the package-age gate in Harbor E2E
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+### Documentation
+
+- **agents**: Update Pi and Antigravity references for the harness bump
+  ([#196](https://github.com/UiPath/coder_eval/pull/196),
+  [`3aa2db3`](https://github.com/UiPath/coder_eval/commit/3aa2db30cdb07e47ca2cce98b47385eedb2de9cd))
+
+- **criteria**: Name the budget-breach trigger on the post-failure path
+  ([#197](https://github.com/UiPath/coder_eval/pull/197),
+  [`28c846e`](https://github.com/UiPath/coder_eval/commit/28c846ea6858fef04d366d245e5f7b679c2b75a1))
+
+### Features
+
+- **criteria**: Let a run_command criterion opt in to post-failure grading
+  ([#197](https://github.com/UiPath/coder_eval/pull/197),
+  [`28c846e`](https://github.com/UiPath/coder_eval/commit/28c846ea6858fef04d366d245e5f7b679c2b75a1))
+
+- **evalboard**: Count agent time apart from eval overhead, and filter runs by variant
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+- **evalboard**: Headline agent time per passed task, not full task wall clock
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+- **evalboard**: Show agent time on the run page and filter it by variant
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+- **evalboard**: Show summed agent time in the overview window tile
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+- **evalboard**: Simplify the task timing strip into one bar and two groups
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+- **evalboard**: Split the task timeline into agent time and eval overhead
+  ([#198](https://github.com/UiPath/coder_eval/pull/198),
+  [`b04829c`](https://github.com/UiPath/coder_eval/commit/b04829c4dec86772822a28ef1b3fa7316c1f3c8d))
+
+
 ## v0.12.6 (2026-09-23)
 
 ### Bug Fixes
