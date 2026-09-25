@@ -61,9 +61,9 @@ export interface RunMetrics {
     cost: number | null;
     costP50: number | null;
     costP90: number | null;
-    duration: number | null;
-    durationP50: number | null;
-    durationP90: number | null;
+    agentSeconds: number | null;
+    agentSecondsP50: number | null;
+    agentSecondsP90: number | null;
 }
 
 // Aggregate run-level metrics from a set of task rows. Status categorization is
@@ -82,9 +82,9 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     let errored = 0;
     let ungraded = 0;
     let cost = 0;
-    let durationSum = 0;
+    let agentSum = 0;
     const costSamples: number[] = [];
-    const durSamples: number[] = [];
+    const agentSamples: number[] = [];
     for (const t of tasks) {
         // A `switch` with an assertNever default, not an if/else chain with a
         // catch-all `else failed++`. That chain is what made adding "ungraded"
@@ -115,9 +115,9 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
             cost += t.totalCostUsd;
             costSamples.push(t.totalCostUsd);
         }
-        if (t.durationSeconds != null) {
-            durationSum += t.durationSeconds;
-            durSamples.push(t.durationSeconds);
+        if (t.agentSeconds != null) {
+            agentSum += t.agentSeconds;
+            agentSamples.push(t.agentSeconds);
         }
     }
     const graded = total - ungraded;
@@ -147,9 +147,9 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
         cost: costSamples.length ? cost : null,
         costP50: percentile(costSamples, 0.5),
         costP90: percentile(costSamples, 0.9),
-        duration: durSamples.length ? durationSum : null,
-        durationP50: percentile(durSamples, 0.5),
-        durationP90: percentile(durSamples, 0.9),
+        agentSeconds: agentSamples.length ? agentSum : null,
+        agentSecondsP50: percentile(agentSamples, 0.5),
+        agentSecondsP90: percentile(agentSamples, 0.9),
     };
 }
 
@@ -204,6 +204,46 @@ function Metric({
                     {sub}
                 </div>
             )}
+        </div>
+    );
+}
+
+function VariantFilter({
+    variants,
+    selected,
+    onSelect,
+}: {
+    variants: string[];
+    selected: string | null;
+    onSelect: (variant: string | null) => void;
+}) {
+    return (
+        <div
+            className="flex flex-wrap items-center gap-1.5"
+            role="group"
+            aria-label="Filter by variant"
+        >
+            <span className="text-xs text-gray-500 uppercase tracking-wide mr-1">
+                Variant
+            </span>
+            {[null, ...variants].map((v) => {
+                const active = v === selected;
+                return (
+                    <button
+                        key={v === null ? "all:" : `v:${v}`}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => onSelect(v)}
+                        className={`font-mono text-xs px-2 py-0.5 rounded border transition-colors ${
+                            active
+                                ? "bg-studio-blue text-white border-studio-blue"
+                                : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
+                        }`}
+                    >
+                        {v ?? "all"}
+                    </button>
+                );
+            })}
         </div>
     );
 }
@@ -329,6 +369,13 @@ export function RunView({
     const q = searchParams.get("q") ?? "";
     const [showAllTags, setShowAllTags] = useState(false);
 
+    const allVariants = useMemo(() => variantsOf(tasks), [tasks]);
+    const rawVariant = searchParams.get("variant");
+    const selectedVariant =
+        allVariants.length > 1 && rawVariant && allVariants.includes(rawVariant)
+            ? rawVariant
+            : null;
+
     // Commit a filter change to the URL WITHOUT a server round-trip.
     //
     // Every reader of `tags` / `rtags` / `q` on this page is client-side (see
@@ -388,11 +435,22 @@ export function RunView({
         [selectedReviewSet, selectedReviewTags, updateParam],
     );
 
+    const selectVariant = useCallback(
+        (variant: string | null) => {
+            const params = new URLSearchParams(window.location.search);
+            if (variant == null) params.delete("variant");
+            else params.set("variant", variant);
+            setSearchParams(params);
+        },
+        [setSearchParams],
+    );
+
     const clearAll = useCallback(() => {
         const params = new URLSearchParams(window.location.search);
         params.delete("q");
         params.delete("tags");
         params.delete("rtags");
+        params.delete("variant");
         setSearchParams(params);
     }, [setSearchParams]);
 
@@ -427,6 +485,11 @@ export function RunView({
 
     const filtered = useMemo(() => {
         let arr = tasks;
+        if (selectedVariant != null) {
+            arr = arr.filter(
+                (t) => (t.variantId ?? DEFAULT_VARIANT_ID) === selectedVariant,
+            );
+        }
         if (selectedTags.length > 0) {
             // Match on either real tags or the derived skill, so the same
             // `tags` URL param works for both rails. Robust to new runs where
@@ -459,9 +522,17 @@ export function RunView({
             });
         }
         return arr;
-    }, [tasks, selectedTags, selectedReviewTags, reviewsByTask, qLower]);
+    }, [
+        tasks,
+        selectedVariant,
+        selectedTags,
+        selectedReviewTags,
+        reviewsByTask,
+        qLower,
+    ]);
 
     const isFiltered =
+        selectedVariant != null ||
         selectedTags.length > 0 ||
         selectedReviewTags.length > 0 ||
         qLower.length > 0;
@@ -676,22 +747,30 @@ export function RunView({
                     }
                 />
                 <Metric
-                    label="Time"
-                    value={fmtDuration(metrics.duration)}
+                    label="Agent time"
+                    value={fmtDuration(metrics.agentSeconds)}
                     sub={
                         hasVariants
                             ? variantSub(variantMetrics, (m) =>
-                                  m.duration != null
-                                      ? fmtDuration(m.duration)
+                                  m.agentSeconds != null
+                                      ? fmtDuration(m.agentSeconds)
                                       : null,
                               )
-                            : metrics.durationP50 != null &&
-                                metrics.durationP90 != null
-                              ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
+                            : metrics.agentSecondsP50 != null &&
+                                metrics.agentSecondsP90 != null
+                              ? `p50 ${fmtDuration(metrics.agentSecondsP50)} · p90 ${fmtDuration(metrics.agentSecondsP90)}`
                               : undefined
                     }
                 />
             </div>
+
+            {allVariants.length > 1 && (
+                <VariantFilter
+                    variants={allVariants}
+                    selected={selectedVariant}
+                    onSelect={selectVariant}
+                />
+            )}
 
             {/* The colored skill/review/tag filter rail (+ its color legend)
                 is an internal-only surface — see lib/edition.ts. The public OSS
