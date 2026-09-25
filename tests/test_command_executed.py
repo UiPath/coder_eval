@@ -1175,3 +1175,15 @@ class TestSearchWindows:
             min_count=1,
         )
         assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 0.0
+
+    def test_non_shell_tool_body_past_the_bound_is_not_searched(self):
+        content = "y" * (2 * _MAX_PATTERN_SEARCH_LEN) + "\nDo not run `uip or users list`, it is retired.\n"
+        write = _make_command(tool_name="Write", parameters={"file_path": "/work/NOTES.md", "content": content})
+        turn_records = [_make_turn([write])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT use retired `uip or users list`",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0

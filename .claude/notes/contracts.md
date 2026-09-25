@@ -100,7 +100,9 @@ but the whole command is searched: the first 2000 characters, then the rest in w
 start and end on logical-line boundaries. Agents write long heredoc scripts that end in the
 command a task checks for (`cat > x <<EOF ... EOF` then `uip agent validate`), and a single
 leading window scored those as never run. Normalization runs per window, so `shlex` never
-sees more than the bound and needs no separate guard.
+sees more than the bound and needs no separate guard. Only a Bash command is windowed:
+another tool's params are JSON, and a later window of a Write/Edit body is file content,
+not a command the agent ran, so those keep the single leading window.
 
 ## Recording a CLI invocation
 
