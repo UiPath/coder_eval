@@ -32,10 +32,12 @@ from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, ass
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
 from tests._fixtures.golden_streams.antigravity_fixtures import (
     _agent_with_steps,
+    _FakeConversation,
     _no_sleep,
     _step,
     _tc,
     _usage,
+    _UsageMeter,
 )
 
 
@@ -322,6 +324,43 @@ async def test_communicate_maps_steps_to_turn_record():
     assert agent.pending_turn is None  # success path leaves no partial
 
 
+async def test_usage_comes_from_the_conversation_not_the_step():
+    """SDK 0.1.18 stopped filling ``Step.usage_metadata``; reading it booked every turn at zero tokens."""
+    step = _step("TEXT_RESPONSE", "DONE", content="done", complete=True)
+    step.usage_metadata = _usage(999, 0, 99, 0)
+    agent = _agent_with_steps([step])
+
+    tr = await agent.communicate("go")
+
+    assert tr.token_usage is None
+
+
+async def test_usage_billed_after_the_last_step_is_still_booked():
+    """The conversation may bill a call after its last Step; finalize books the remainder."""
+
+    class _BillsAfterTheLastStep(_FakeConversation):
+        async def receive_steps(self):
+            async for step in super().receive_steps():
+                yield step
+            self.meter.feed(SimpleNamespace(billed=_usage(40, 0, 7, 0)))
+
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        _step("TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, step_index=1),
+    ]
+    agent = _agent_with_steps([])
+    agent._sdk_agent = SimpleNamespace(conversation=_BillsAfterTheLastStep(steps), is_started=True)
+
+    tr = await agent.communicate("go")
+
+    assert tr.token_usage.uncached_input_tokens == 100 + 40
+    assert tr.token_usage.output_tokens == (5 + 5) + 7
+    assert tr.num_turns == 2
+    bucketed = [m for m in tr.messages if hasattr(m, "cache_creation_tokens")]
+    assert sum(m.input_tokens for m in bucketed) == tr.token_usage.uncached_input_tokens
+    assert sum(m.output_tokens for m in bucketed) == tr.token_usage.output_tokens
+
+
 async def test_communicate_normalizes_arg_keys_and_strips_done_only_results():
     """LS directory_path -> path, and tool-specific result fields that first
     appear at DONE (LS ``results``, WebSearch ``summary``) are stripped from
@@ -380,6 +419,7 @@ async def test_communicate_crash_sets_pending_partial_turn():
 
     class _Boom:
         last_response = ""
+        total_usage = _usage(0, 0, 0, 0)
 
         async def send(self, prompt, **kwargs):
             return None
@@ -419,6 +459,7 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
 
     class _Cancelled:
         last_response = ""
+        total_usage = _usage(0, 0, 0, 0)
 
         async def send(self, prompt, **kwargs):
             return None
@@ -982,6 +1023,11 @@ class _TwoLayerReentrancyGuardedConversation:
         self._batch_index = 0
         self._is_receiving = False  # lives on the "connection" layer, like the real SDK
         self.receive_steps_call_count = 0
+        self.meter = _UsageMeter()
+
+    @property
+    def total_usage(self):
+        return self.meter.read()
 
     async def send(self, prompt, **kwargs):
         return None
@@ -994,7 +1040,7 @@ class _TwoLayerReentrancyGuardedConversation:
             batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
             self._batch_index += 1
             for s in batch:
-                yield s
+                yield self.meter.feed(s)
         finally:
             self._is_receiving = False
 
@@ -1070,6 +1116,11 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
 
         def __init__(self) -> None:
             self.call_count = 0
+            self.meter = _UsageMeter()
+
+        @property
+        def total_usage(self):
+            return self.meter.read()
 
         async def send(self, prompt, **kwargs):
             return None
@@ -1083,7 +1134,9 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
                     target="TARGET_ENVIRONMENT",
                     tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
                 )
-                yield _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0))
+                yield self.meter.feed(
+                    _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0))
+                )
             else:
                 assert _WatchdogFiresLater.captured_on_timeout is not None
                 _WatchdogFiresLater.captured_on_timeout()
@@ -2065,6 +2118,7 @@ class TestAntigravityFirstWindowReseed:
 
         agent = AntigravityAgent(parse_agent_config(type="antigravity", model="gemini-3.5-flash"))
         collector = EventCollector()
+        self.meter = _UsageMeter()
         return _AntigravityTurnState(
             agent=agent,
             emit=CompositeStreamCallback([collector]),
@@ -2076,6 +2130,7 @@ class TestAntigravityFirstWindowReseed:
             model="gemini-3.5-flash",
             turn_start_time=0.0,
             clock=clock,
+            cumulative_usage=self.meter.read,
         )
 
     def test_the_first_step_moves_the_mark_off_the_turn_entry_stamp(self):
@@ -2127,7 +2182,7 @@ class TestAntigravityFirstWindowReseed:
         clock.at_ms = 900
         state.process_step(_step("THINKING", "ACTIVE", thinking="plan"))
         clock.at_ms = 2000
-        state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
+        state.process_step(self.meter.feed(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5))))
 
         message = _assistant(state)[0]
         assert message.started_at == self.BASE + timedelta(milliseconds=900), "opens at the RE-SEEDED mark"

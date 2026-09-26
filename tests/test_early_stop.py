@@ -2990,6 +2990,8 @@ class _CountingConversation:
         self.yielded = 0
         self.cancels = 0
         self.last_response = ""
+        # These streams bill nothing; the seam under test is the stop, not the usage.
+        self.total_usage = SimpleNamespace()
 
     async def send(self, prompt: Any, **_kwargs: Any) -> None:
         return None

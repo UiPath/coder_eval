@@ -25,7 +25,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -150,6 +150,22 @@ _TARGET_USER = "TARGET_USER"
 def _enum_value(x: Any) -> Any:
     """Return a (possibly str-enum) value as its plain ``.value``, else itself."""
     return getattr(x, "value", x)
+
+
+class _UsageCounts(NamedTuple):
+    """The four Gemini token counts, named as ``google.antigravity.types.UsageMetadata`` names them."""
+
+    prompt_token_count: int = 0
+    cached_content_token_count: int = 0
+    candidates_token_count: int = 0
+    thoughts_token_count: int = 0
+
+    @classmethod
+    def of(cls, usage: Any) -> "_UsageCounts":
+        return cls(*((getattr(usage, f, 0) or 0) for f in cls._fields))
+
+    def minus(self, other: "_UsageCounts") -> "_UsageCounts":
+        return _UsageCounts(*(a - b for a, b in zip(self, other, strict=True)))
 
 
 def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
@@ -480,6 +496,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             model=model,
             turn_start_time=turn_start_time,
             clock=clock,
+            cumulative_usage=lambda: self._sdk_agent.conversation.total_usage,
             max_turns=max_turns,
         )
 
@@ -677,10 +694,13 @@ class _AntigravityTurnState:
     agent's shared crash kernel builds ``pending_turn`` from ``collector``).
 
     Step-stream shape this consumes (observed): each ``step_index`` is yielded
-    repeatedly through ACTIVE -> DONE transitions; ``usage_metadata`` lands once
-    per generation on a DONE/terminal step (summing them == the turn total); a
-    tool call carries a stable ``id`` and its result is folded into expanded
-    ``args`` at DONE.
+    repeatedly through ACTIVE -> DONE transitions; a tool call carries a stable
+    ``id`` and its result is folded into expanded ``args`` at DONE.
+
+    Usage is NOT on the Step: the SDK accumulates it per model invocation on the
+    conversation, which ``cumulative_usage`` reads. Each rise since the last
+    reading is booked as one generation, and ``finalize`` books the remainder, so
+    the per-message buckets always sum to the turn total.
     """
 
     def __init__(
@@ -696,9 +716,12 @@ class _AntigravityTurnState:
         model: str,
         turn_start_time: float,
         clock: TurnClock,
+        cumulative_usage: Callable[[], Any],
         max_turns: int | None = None,
     ) -> None:
         self._agent = agent
+        self._cumulative_usage = cumulative_usage
+        self._usage_booked = _UsageCounts.of(cumulative_usage())
         self.emit = emit
         self.task_id = task_id
         self.turn_id = turn_id
@@ -815,13 +838,22 @@ class _AntigravityTurnState:
                 self._blocks.append(ContentBlock(block_type="text", sequence=0, text=step.content))
 
         # Per-generation usage: fold into the turn total and cut an AssistantMessage.
-        if step.usage_metadata is not None:
+        if self._book_new_usage():
             if not self._in_api_call:
                 self.api_calls += 1
             self._in_api_call = False
-            gen = _to_token_usage(step.usage_metadata, self.model)
-            self.total_usage = self.total_usage + gen
-            self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
+
+    def _book_new_usage(self) -> bool:
+        """Book the usage accrued since the last reading as one generation; False if none."""
+        now = _UsageCounts.of(self._cumulative_usage())
+        accrued = now.minus(self._usage_booked)
+        if not any(accrued):
+            return False
+        self._usage_booked = now
+        gen = _to_token_usage(accrued, self.model)
+        self.total_usage = self.total_usage + gen
+        self._flush_generation(gen, accrued.thoughts_token_count)
+        return True
 
     def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
         raw_name = _enum_value(call.name)
@@ -995,7 +1027,8 @@ class _AntigravityTurnState:
                 )
             )
 
-        # Flush any trailing blocks not yet attached to a generation (no usage).
+        # Usage that landed after the last Step, then any blocks it did not carry.
+        self._book_new_usage()
         if self._blocks:
             self._flush_generation(TokenUsage(), 0)
 
