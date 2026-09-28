@@ -1022,3 +1022,13 @@ re-derive from scratch.
   have, and it is a recurring class ONLY within one file so far — worth promoting to a rule
   if a second subprocess-driven agent repeats it. Caught in: final cross-phase review,
   delegate agent port.
+
+## From 2026-09-26 Antigravity SDK 0.1.18 usage regression
+
+- [ ] Runtime guard: fail an Antigravity turn that ran MODEL steps but booked zero
+  tokens, as OpenCode's `require_token_telemetry` does. SDK 0.1.18 deprecated
+  `Step.usage_metadata` (usage moved to `conversation.total_usage`), so every
+  Antigravity turn from `3aa2db30` on reported no tokens and no cost, and `api_calls`
+  stayed at 1 so `max_turns` never tripped — all silently, with `make verify` green.
+  A static rule cannot see an SDK field go dead; a live-telemetry smoke (one real turn,
+  assert `token_usage` is non-empty) in the harness-bump checklist would have.

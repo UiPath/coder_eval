@@ -67,8 +67,8 @@ All five harnesses can have tool execution inside a generation window, and it is
 subtracted out of every one of them — **once, centrally**, by
 `timing.py::subtract_tool_time`. No reducer does it itself; each
 publishes the raw window (see the two sections below). Every harness has the
-problem: Antigravity reports a `Step` for the tool and only a later
-`usage_metadata` `Step` cuts the message; Codex's message window is seeded from
+problem: Antigravity reports a `Step` for the tool and only a later rise in
+the conversation's billed usage cuts the message; Codex's message window is seeded from
 the first item's start and extended to the last item's completion; OpenCode, Pi
 and claude-code tile, each window opening where the previous one closed and
 running to the next, with every tool call in between running inside. In each the
@@ -559,8 +559,9 @@ Each harness finds the call boundary in its own stream (the table above):
   first item would let one tool of call N+1 act. A call that ran tools therefore
   opens the next call at its `tokenUsage`, since the results always go back to the
   model, and the cap fires before call N+1 can run anything.
-- **Antigravity** attaches `usage_metadata` to one step per call, and the next call
-  opens with a MODEL step at a new `step_index`.
+- **Antigravity** bills each call on the conversation's cumulative usage, not on a
+  step, so a rise in that total closes the call, and the next call opens with a MODEL
+  step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
 - **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
   its tool call, with no text before it. So the next call opens when every tool the

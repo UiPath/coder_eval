@@ -322,11 +322,12 @@ def _antigravity_turn() -> Turn:
     measurable head at all.
     """
     from coder_eval.agents.antigravity_agent import AntigravityAgent, _AntigravityTurnState
-    from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage
+    from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage, _UsageMeter
 
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, model="gemini-3.5-flash"))
     collector = EventCollector()
     clock = _InjectedClock(at_ms=500)  # dispatch before the first Step: head
+    meter = _UsageMeter()
     state = _AntigravityTurnState(
         agent=agent,
         emit=CompositeStreamCallback([collector]),
@@ -338,6 +339,7 @@ def _antigravity_turn() -> Turn:
         model="gemini-3.5-flash",
         turn_start_time=0.0,
         clock=clock,
+        cumulative_usage=meter.read,
     )
 
     clock.at_ms = 700
@@ -359,9 +361,11 @@ def _antigravity_turn() -> Turn:
         )
     )
     clock.at_ms = 2000
-    state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
+    state.process_step(meter.feed(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5))))
     clock.at_ms = 3000
-    state.process_step(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
+    state.process_step(
+        meter.feed(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
+    )
 
     return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=list(state.commands))
 

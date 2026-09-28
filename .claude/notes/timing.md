@@ -401,8 +401,8 @@ and the tail are already computed.
 
 A reducer's only remaining timing decision is where its window opens, which is the one
 genuinely harness-shaped part: two interleave a tool into a single window outright
-(Antigravity, whose Step for the tool arrives and only a later `usage_metadata` Step cuts
-the message, and Codex, whose `_flush_message` window extends to the last item's
+(Antigravity, whose Step for the tool arrives and only a later rise in the conversation's
+billed usage cuts the message, and Codex, whose `_flush_message` window extends to the last item's
 `completed_at_ms`) while the other three tile the turn contiguously, so a call open at a
 boundary runs inside two windows. Central subtraction handles both without either reducer
 knowing which it is.
