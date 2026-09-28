@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import re
 import tempfile
 import time
 import uuid
@@ -80,6 +79,7 @@ from .path_utils import (
 from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
+from .simulation.utterance import extract_utterance as _extract_utterance
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
 from .telemetry import Scalar, hash_identifier
@@ -153,13 +153,6 @@ async def _pump_stream(
             log_fn("[%s] %s", label, line)
 
 
-# Structural tags emitted by ClaudeCodeAgent._format_messages, which is the SSOT
-# for the vocabulary. Other bracketed words (markdown footnotes, pylint codes,
-# unknown SDK message types) are intentionally NOT matched — they pass through as
-# content. Telemetry-only, not a correctness-critical parser.
-_UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
-
-
 class EvalRouteOverrides(NamedTuple):
     """``checker_context.api_route``'s override fields. Named fields (rather than
     a bare tuple) so a future transposition at a call site is a typo'd attribute,
@@ -187,67 +180,6 @@ def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
     if isinstance(route, LiteLLMRoute):
         return f"{name} (model: {effective_model or route.model or 'default'})"
     return name
-
-
-def _extract_utterance(raw: str) -> str:
-    """Collapse a ClaudeCodeAgent-formatted transcript to a clean utterance.
-
-    Input looks like::
-
-        [ASSISTANT] Sure, I'll do X.
-        [TOOL USE] Read
-        [RESULT - SUCCESS] Here is the answer...
-
-    Prefers a non-empty ``[RESULT - ...]`` payload — the SDK's canonical final
-    utterance, which duplicates the final assistant text and otherwise makes
-    conversation.log read as if every message is repeated. Falls back to
-    concatenated ``[ASSISTANT]`` blocks, including any content appearing before
-    the first tag. ``[TOOL USE]`` lines are dropped, and untagged input (a pinned
-    ``initial_prompt``) is returned unchanged.
-
-    Asymmetric on purpose: ``[RESULT - SUCCESS]`` strips its label, while
-    ``[RESULT - ERROR]`` KEEPS its prefix so the error state stays visible in the
-    log.
-    """
-    if not raw:
-        return ""
-    lines = raw.splitlines()
-    if not any(_UTTERANCE_TAG_RE.match(ln) for ln in lines):
-        return raw
-
-    assistant_parts: list[str] = []
-    result_parts: list[str] = []
-    # Pre-tag content becomes an implicit ASSISTANT block (not dropped).
-    current_tag: str = "ASSISTANT"
-    current_buf: list[str] = []
-
-    def _flush() -> None:
-        text = "\n".join(current_buf).strip()
-        if not text:
-            return
-        if current_tag == "ASSISTANT":
-            assistant_parts.append(text)
-        elif current_tag == "RESULT - SUCCESS":
-            result_parts.append(text)
-        elif current_tag == "RESULT - ERROR":
-            result_parts.append(f"[RESULT - ERROR] {text}")
-        # TOOL USE is dropped.
-
-    for ln in lines:
-        match = _UTTERANCE_TAG_RE.match(ln)
-        if match:
-            _flush()
-            current_tag = match.group(1)
-            current_buf = [match.group(2) or ""]
-        else:
-            current_buf.append(ln)
-    _flush()
-
-    if result_parts:
-        return "\n\n".join(result_parts)
-    if assistant_parts:
-        return "\n\n".join(assistant_parts)
-    return raw
 
 
 def _extract_failure_reason(result: CriterionResult) -> str | None:
