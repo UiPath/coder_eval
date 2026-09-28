@@ -1,59 +1,24 @@
 """CE061: a generation window must come from the shared helper.
 
-Pi shipped measuring its window from its own ``turn_start`` while four sibling
-reducers tiled from a mark, so the wall clock between one turn's end and the
-next turn's start — the model time that PRODUCED that turn — fell into no
-bucket at all. Nothing failed. ``docs/agents/HARNESS_PARITY.md`` asserted the
-four-bucket identity, and the only sensor for it
-(``tests/_fixtures/golden_streams/_scrub.py``) checks ONE side: it catches a
-bucket claiming more time than the turn contains and says nothing about one
-claiming less. Pi's own tests passed because they were written against Pi's
-own arithmetic.
+In ``src/coder_eval/agents/``, a module that passes a non-``None``
+``generation_duration_ms=`` to an ``AssistantMessage`` must import
+``coder_eval.timing.close_window`` (a from-import under any alias, or the
+``timing`` module itself). The invariant is PROVENANCE of the window arithmetic;
+tool-time subtraction is CE063's.
 
-That is the shape this rule guards against: not a reducer that computes the
-window wrongly, but a reducer that computes it AT ALL instead of asking
-``coder_eval.timing.close_window``. A new harness whose author reimplements the
-arithmetic inline arrives with a green test suite by construction.
+EXEMPT, as honest claims that no window was measured: an explicit
+``generation_duration_ms=None`` and the kwarg absent. Not matched:
+``**``-expansion and ``model_copy(update={...})`` (CE058 covers that dict shape).
 
-Separate id from CE058, CE059 and CE060 deliberately. Those three are about the
-VALUES a message carries — an unknown duration published as a literal, a window
-built from one clock read, a missing identity. This one is about PROVENANCE:
-where the arithmetic came from. One invariant per id is what makes a ``# noqa``
-mean one thing.
+BLIND SPOT: this proves the module IMPORTS the helper, never that a particular
+call used it; the published value is always a local. The arithmetic's sensors
+are ``tests/test_timing_close_window.py`` and the per-reducer window tests.
 
-NOTE what this rule no longer covers, and deliberately: the tool SUBTRACTION is
-not part of a window's geometry any more, so "did this reducer subtract
-correctly" is not a question here. CE063 owns it — no module in ``agents/`` may
-import ``busy_ms`` at all.
+``TestCE061WindowViaCloseWindow::test_the_rule_is_now_exemption_free`` pins the
+suppression set EMPTY, so a new exemption must be argued for. Alias resolution,
+and its blind spot, live in ``_model_ctor.py``, shared with CE060.
 
-BLIND SPOT, and it is the whole weakness of the chosen shape: this proves the
-module IMPORTS the helper, never that any particular call used it. The value
-passed to ``generation_duration_ms=`` is always a local (``generation_ms``,
-``gen_parts[idx]``), so no AST rule can trace it back to a call. The sensors for
-the arithmetic itself are ``tests/test_timing_close_window.py`` and the
-per-reducer window tests; this rule adds only the cheap structural half that
-neither can reach — a sixth harness rolling its own.
-
-It costs NO suppression. It used to cost exactly one: ``claude_code_agent.py``
-computed its window from a monotonic delta and subtracted tool time once at
-finalization, because a call issued by an earlier emission is still running when
-the next window closes — and forcing that into ``close_window`` would have meant
-a mode flag on a helper whose whole value is having one shape. Moving the
-subtraction to ``timing.subtract_tool_time`` dissolved the exception:
-the collector is already the place where every span is known, so claude-code
-needs no separate pass and calls the same shrunken helper as the other four.
-``tests/test_custom_lint.py::TestCE061WindowViaCloseWindow::test_the_rule_is_now_exemption_free``
-pins the suppression set EMPTY, so a new exemption has to be argued for.
-
-EXEMPT, because both are honest claims that no window was measured: an explicit
-``generation_duration_ms=None`` (codex's rollout rebuild, claude-code's
-sub-agent synthesis) and the kwarg absent altogether, which defaults to
-``None``. Not matched: ``**``-expansion and ``model_copy(update={...})`` — CE058
-already covers the ``model_copy`` dict shape for timing literals.
-
-Alias resolution, and its blind spot, live in ``_model_ctor.py``, shared with
-CE060. The helper's own name is taken from the function object rather than
-written here as a string, so renaming it moves this rule too.
+Rationale: .claude/notes/lint-rules.md § CE061
 """
 
 import ast

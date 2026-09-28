@@ -180,14 +180,11 @@ class TestTemplateIgnorePatterns:
             # Verify main.py copied
             assert (sandbox_path / "main.py").exists()
 
-            # The .venv present here is the sandbox's own (setup creates one);
-            # assert the TEMPLATE's copy did not land, via a marker file the real
-            # venv can never contain. Unconditional on purpose: guarding this
-            # behind `if venv_bin.exists()` made the whole check vacuous the
-            # moment provisioning changed, which is exactly how it went
-            # unnoticed. The marker is also layout-independent -- asserting on
-            # `.venv/bin/python` would only work on POSIX, since a real venv puts
-            # its interpreter in `Scripts/python.exe` on Windows.
+            # The .venv here is the sandbox's own (setup creates one); assert the
+            # TEMPLATE's copy did not land, via a marker file the real venv never
+            # contains. Unconditional on purpose: an `if venv_bin.exists()` guard made
+            # the check vacuous, unnoticed, when provisioning changed. The marker is
+            # also layout-independent: `.venv/bin/python` exists only on POSIX.
             assert (sandbox_path / ".venv").exists()
             assert not (sandbox_path / ".venv" / "from_template.marker").exists()
         finally:

@@ -2,22 +2,12 @@
 
 Gated: needs a real docker daemon and the `coder-eval-agent` base image.
 
-This is the one thing the unit tests cannot prove. `tests/test_sandbox.py` asserts
-the venv is created with system site packages by reading `pyvenv.cfg`, which is a
-property of the flag, not of the outcome. The outcome only exists inside an image
-that provisions packages GLOBALLY — the shape every task image has (the framework
-image installs with `uv pip install --system`; skillsbench task images do
-`RUN pip install ...`). There, an isolated sandbox venv split the toolchain:
-`python` resolved to the venv and could not import the image's packages, while
-`pip` fell through to the image's global pip and reported them present.
+Pins the outcome inside an image that installs packages globally: a criterion's
+`python` imports the image's `pydantic`, and its `sys.prefix` is still the sandbox
+venv. `pydantic` is a coder_eval runtime dependency, so the base image has it
+globally with no build and no network.
 
-Measured against this test's own scenario:
-
-    main (isolated venv)             python -c "import pydantic"  ->  exit 1
-    with --system-site-packages      python -c "import pydantic"  ->  exit 0
-
-`pydantic` is a coder_eval runtime dependency, so the base image already has it
-installed globally — no build and no network are needed to reproduce the shape.
+Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
 """
 
 from __future__ import annotations

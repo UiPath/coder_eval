@@ -1,8 +1,8 @@
-"""Unit tests for replicate statistics helpers in reports_stats."""
+"""Unit tests for replicate statistics helpers in coder_eval.stats."""
 
 import pytest
 
-from coder_eval.reports_stats import (
+from coder_eval.stats import (
     bootstrap_mean_ci,
     cohens_d,
     paired_t_ci,

@@ -36,7 +36,7 @@ function Tile({
 // Front-page window rollup: total spend + shape of the runs in scope. Every
 // tile is summed over the same set — `runCount` and `totals` both come out of
 // getOverview's single pass, so the Runs tile can never disagree with the
-// Cost/Tasks/Pass/Compute tiles or with the charts. The totals are scoped to
+// Cost/Tasks/Pass/Agent time tiles or with the charts. The totals are scoped to
 // matching tasks whenever a filter is active.
 //
 // This describes the window the charts plot, NOT however far the run table below
@@ -91,9 +91,9 @@ export function WindowSummary({
                     valueClass={passClass(pct)}
                 />
                 <Tile
-                    label="Compute time"
-                    value={fmtDuration(totals.durationSeconds)}
-                    sub={totals.durationPartial ? "some runs missing" : undefined}
+                    label="Agent time"
+                    value={fmtDuration(totals.agentSeconds)}
+                    sub={totals.agentPartial ? "some runs missing" : undefined}
                 />
             </div>
         </section>

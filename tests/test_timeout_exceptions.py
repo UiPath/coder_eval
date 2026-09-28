@@ -89,7 +89,7 @@ class TestEvaluationTimeoutError:
 
 
 class TestTurnTimeoutErrorNoPartialField:
-    """TurnTimeoutError no longer carries partial_turn_record."""
+    """TurnTimeoutError has no partial_turn_record attribute."""
 
     def test_constructs_without_partial_kwarg(self):
         err = TurnTimeoutError(30.0, iteration=1)

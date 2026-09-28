@@ -40,10 +40,10 @@ const TABS: Array<{
     {
         key: "time",
         label: "Time",
-        heading: "Time per Passed Task",
-        title: "Total wall clock ÷ tasks passed. Every task's seconds count, failures included; only passes count in the denominator, so a run that fails more reads slower.",
+        heading: "Agent Time per Passed Task",
+        title: "Agent wall clock ÷ tasks passed. Counts the agent's turns only: sandbox setup, pre_run, grading and cleanup are excluded. Every task's agent seconds count, failures included; only passes count in the denominator, so a run that fails more reads slower.",
         blurb: (scoped) =>
-            "Seconds of every task that ran ÷ the number that passed · hover a point for the share within 2× expected" +
+            "Agent seconds of every task that ran (setup and grading excluded) ÷ the number that passed · hover a point for the share within 2× expected" +
             (scoped ? " · scoped to the active filter" : ""),
         render: (props) => <TimePerPassedTaskChart {...props} />,
     },

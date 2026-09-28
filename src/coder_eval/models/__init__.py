@@ -11,6 +11,7 @@ from coder_eval.models.agent_config import (
     BaseAgentConfig,
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
+    DelegateAgentConfig,
     LocalPluginConfig,
     NoneAgentConfig,
     OpenCodeAgentConfig,
@@ -26,6 +27,9 @@ from coder_eval.models.cli_match import (
     CliMatch,
     FlagMatch,
 )
+
+# Host→container contract (staged as context.json under driver: docker)
+from coder_eval.models.container_context import ContainerContext
 
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
@@ -67,6 +71,7 @@ from coder_eval.models.criteria import (
     SkillTriggeredCriterion,
     StopEarlyPolicy,
     SuccessCriterion,
+    SystemOneJudgeCriterion,
     UiPathEvalCriterion,
 )
 from coder_eval.models.enums import (
@@ -95,7 +100,12 @@ from coder_eval.models.experiment import (
 from coder_eval.models.judge import JudgeVerdict
 
 # Judge defaults
-from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
+from coder_eval.models.judge_defaults import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_SYSTEM_ONE_API_KEY_ENV,
+    DEFAULT_SYSTEM_ONE_BASE_URL,
+    DEFAULT_SYSTEM_ONE_MODEL,
+)
 
 # Limits
 from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD, RunLimits
@@ -124,6 +134,7 @@ from coder_eval.models.mutations import (
 
 # Results
 from coder_eval.models.results import (
+    JUDGE_CRITERION_TYPES,
     ClassificationCriterionResult,
     ClassLabelStats,
     ConfigLineageEntry,
@@ -186,6 +197,12 @@ from coder_eval.models.sandbox import (
     SandboxConfig,
     validate_template_sources_list,
 )
+from coder_eval.models.system_one import (
+    ChoiceQuestion,
+    NoulQuestion,
+    ScoreQuestion,
+    SystemOneQuestion,
+)
 
 # Tasks
 from coder_eval.models.tasks import (
@@ -236,6 +253,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "BaseAgentConfig",
     "ClaudeCodeAgentConfig",
     "CodexAgentConfig",
+    "DelegateAgentConfig",
     "LocalPluginConfig",
     "NoneAgentConfig",
     "OpenCodeAgentConfig",
@@ -272,6 +290,11 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "UiPathEvalCriterion",
     "LLMJudgeCriterion",
     "AgentJudgeCriterion",
+    "SystemOneJudgeCriterion",
+    "NoulQuestion",
+    "ChoiceQuestion",
+    "ScoreQuestion",
+    "SystemOneQuestion",
     "SkillTriggeredCriterion",
     "StopEarlyPolicy",
     "LiveSuccessCriterion",
@@ -296,6 +319,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TemplateSource",
     # Sandbox
     "DockerBuildConfig",
+    "ContainerContext",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
     "CONTAINER_GRADE_WORKSPACE",
@@ -341,6 +365,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CriterionStats",
     "FailedRowSummary",
     "ThresholdCheck",
+    "JUDGE_CRITERION_TYPES",
     "JudgeCriterionResult",
     "JudgeTranscript",
     "JudgeTranscriptToolCall",
@@ -366,6 +391,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "simulator_cost_usd",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
+    "DEFAULT_SYSTEM_ONE_MODEL",
+    "DEFAULT_SYSTEM_ONE_BASE_URL",
+    "DEFAULT_SYSTEM_ONE_API_KEY_ENV",
     "DEFAULT_STOP_EARLY_GATE_THRESHOLD",
     # Judge
     "JudgeVerdict",
@@ -413,12 +441,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "VariantResult",
 ]
 
-# Type aliases (forward compatible)
-# Typed as the discriminated union so callers that iterate the result list
-# and use ``isinstance(cr, JudgeCriterionResult)`` get the precise variant
-# membership. The runtime objects are concrete subclasses regardless; the
-# alias change is purely a type-checking precision fix that mirrors the
-# ``EvaluationResult.success_criteria_results`` field type.
+# Typed as the discriminated union so an ``isinstance`` over the result list gets
+# precise variant membership. The runtime objects are concrete subclasses either
+# way; this mirrors the ``EvaluationResult.success_criteria_results`` field type.
 type CriteriaResults = list[CriterionResultUnion]
 type SuccessCriteria = list[SuccessCriterion]
 type TurnRecords = list[TurnRecord]

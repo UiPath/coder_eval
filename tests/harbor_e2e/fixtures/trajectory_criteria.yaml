@@ -1,0 +1,43 @@
+task_id: "harbor_e2e_trajectory_criteria"
+description: >
+  Harbor E2E trajectory criteria: exercises command_executed (and, by the same
+  mechanism, commands_efficiency/skill_triggered would work identically) --
+  criteria that can only score correctly if the verifier phase actually reads
+  the agent phase's recorded trajectory. Catches a regression where the
+  verifier grades against a directory with no trajectory data at all (which
+  would silently score 0.0 here rather than fail loudly).
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  # Bash only -- no Read/Write/Edit -- so there is no alternative tool the
+  # agent could use to create done.txt instead of running `touch`. A prior
+  # version of this fixture allowed Write and asked for file *content*, which
+  # gave the agent a reason to prefer Write over the shell command this
+  # scenario exists to exercise; file_exists below never checks content, so
+  # nothing was gained by asking for it.
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: docker
+  docker:
+    image: coder-eval-agent:latest
+
+initial_prompt: >
+  Run the shell command `touch done.txt` to create an empty file named
+  done.txt.
+
+success_criteria:
+  - type: "file_exists"
+    path: "done.txt"
+    description: "The file done.txt must be created."
+  - type: "command_executed"
+    tool_name: "Bash"
+    # An optional path prefix (not a bare literal) because the agent legitimately
+    # runs `touch /work/done.txt` -- its own absolute cwd, not the bare relative
+    # name -- and real CI reproduced exactly that both times this fixture ran.
+    # The prefix must end in `/`, so `touch notdone.txt`/`touch xdone.txt` do
+    # not also match -- only a path ending in exactly `done.txt`.
+    command_pattern: "touch\\s+(\\S*/)?done\\.txt"
+    min_count: 1
+    description: "The agent must have run touch done.txt (requires trajectory hydration to grade)."

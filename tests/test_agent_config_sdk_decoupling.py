@@ -1,7 +1,7 @@
-"""Regression: BaseAgentConfig no longer leaks claude_agent_sdk types.
+"""BaseAgentConfig exposes no claude_agent_sdk types.
 
-``plugins`` stays on the vendor-neutral base (Codex + docker_runner read it) but is
-retyped to the local ``LocalPluginConfig`` TypedDict; ``setting_sources`` moves down to
+``plugins`` is on the vendor-neutral base (Codex + docker_runner read it), typed as the
+local ``LocalPluginConfig`` TypedDict; ``setting_sources`` is on
 ``ClaudeCodeAgentConfig`` (the only consumer).
 """
 

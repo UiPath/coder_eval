@@ -463,7 +463,7 @@ jobs:
           # The JUnit report must describe the same run, not merely be parseable: an empty
           # but well-formed <testsuites/> passed the old parse-only check. Trusted,
           # self-generated input (our writer emits no DTDs/entities), so stdlib ET is fine.
-          # `>=` not `==`: reports_junit.py also emits synthetic `skipped` / `suite-gates`
+          # `>=` not `==`: reports/junit.py also emits synthetic `skipped` / `suite-gates`
           # testsuites, which only ever ADD cases.
           cases = len(list(ET.parse(os.environ["JUNIT"]).getroot().iter("testcase")))
           if cases < len(rows):

@@ -28,7 +28,6 @@ class TestFileMatchesRegexCriterion:
             pattern=r"async def \w+\(",
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -37,7 +36,6 @@ class TestFileMatchesRegexCriterion:
         assert "async def my_function(" in result.details
         assert result.error is None
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_match_not_found(self, tmp_path):
@@ -58,7 +56,6 @@ class TestFileMatchesRegexCriterion:
             pattern=r"async def \w+\(",
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -67,7 +64,6 @@ class TestFileMatchesRegexCriterion:
         assert "not found" in result.details
         assert result.error is None
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_must_not_match(self, tmp_path):
@@ -89,7 +85,6 @@ class TestFileMatchesRegexCriterion:
             must_match=False,
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -97,7 +92,6 @@ class TestFileMatchesRegexCriterion:
         assert result.score == 1.0
         assert "correctly absent" in result.details
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_must_not_match_fails(self, tmp_path):
@@ -119,7 +113,6 @@ class TestFileMatchesRegexCriterion:
             must_match=False,
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -128,7 +121,6 @@ class TestFileMatchesRegexCriterion:
         assert "should not be present" in result.details
         assert "TODO" in result.details
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_with_flags(self, tmp_path):
@@ -150,7 +142,6 @@ class TestFileMatchesRegexCriterion:
             flags=re.IGNORECASE,
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -158,7 +149,6 @@ class TestFileMatchesRegexCriterion:
         assert result.score == 1.0
         assert "hello" in result.details
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_file_not_found(self, tmp_path):
@@ -175,7 +165,6 @@ class TestFileMatchesRegexCriterion:
             pattern=r"test",
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -183,7 +172,6 @@ class TestFileMatchesRegexCriterion:
         assert result.score == 0.0
         assert "does not exist" in result.error
 
-        # Cleanup
         sandbox.cleanup(preserve=False)
 
     def test_regex_invalid_pattern(self, tmp_path):
@@ -204,7 +192,6 @@ class TestFileMatchesRegexCriterion:
             pattern=r"[invalid(regex",  # Invalid pattern
         )
 
-        # Execute check
         checker = SuccessChecker(sandbox)
         result = checker.check(criterion)
 
@@ -212,5 +199,4 @@ class TestFileMatchesRegexCriterion:
         assert result.score == 0.0
         assert "Invalid regex pattern" in result.error
 
-        # Cleanup
         sandbox.cleanup(preserve=False)

@@ -1,24 +1,10 @@
 """CE038: in an async context manager, the acquire must sit INSIDE the try.
 
-An ``@contextlib.asynccontextmanager`` whose shape is::
+Fires only when all four hold: the function is decorated ``asynccontextmanager``;
+a name is bound by ``<name> = await ...`` in the statement immediately before a
+``try``; that ``try`` has a ``finally``; the ``finally`` references the name.
 
-    held = await acquire()          # <-- outside
-    try:
-        yield
-    finally:
-        release(held)
-
-leaks whenever a cancellation lands on that ``await``. This is not hypothetical
-and ``asyncio.shield`` does not fix it: shield protects the *inner* task, so the
-awaiting coroutine still receives ``CancelledError``, propagates it out of
-``__aenter__``, and never reaches the ``finally`` — while the shielded work goes
-right on completing. The motivating bug held a reference directory at mode 000
-with no matching restore: unreadable for the rest of the run, plus a stale
-registry entry that poisoned the next window on the same path. The comment above
-it claimed shielding prevented exactly that.
-
-The fix is mechanical — move the acquire inside the ``try`` and initialise the
-name to an empty value before it::
+Fix: initialise the name to an empty value and move the acquire inside::
 
     held = []
     try:
@@ -27,11 +13,13 @@ name to an empty value before it::
     finally:
         release(held)
 
-Fires only when all four conditions hold, so it stays specific: the function is
-an async context manager, a name is bound by an ``await`` in the statement
-immediately preceding a ``try``, that ``try`` has a ``finally``, and the
-``finally`` references the bound name. ``# noqa: CE038`` if the acquire genuinely
-cannot fail partway.
+HAZARD: ``asyncio.shield`` does not fix it. It protects the inner task, not the
+await, so ``CancelledError`` still leaves ``__aenter__`` before the ``finally``
+while the acquire completes.
+
+``# noqa: CE038`` if the acquire genuinely cannot fail partway.
+
+Rationale: .claude/notes/lint-rules.md § CE038
 """
 
 import ast

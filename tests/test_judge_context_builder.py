@@ -394,18 +394,14 @@ def test_scrub_reference_skips_secrets_below_min_length() -> None:
 
 
 def test_scrub_runs_before_clip_so_partial_secrets_dont_survive() -> None:
-    """SECURITY regression for bug_001: scrub must run BEFORE clipping, not after.
+    """SECURITY: scrub must run BEFORE clipping, not after.
 
-    scrub_reference uses str.replace which only matches the secret as a contiguous
-    whole string. If the budget clips the prompt mid-secret, the surviving prefix
-    no longer matches the full secret string — replace finds nothing — and a
-    partial reference fragment is persisted unsanitized.
+    Pins: a multi-KB reference inlined by ``include_reference=True`` and clipped
+    by the transcript budget leaves no portion of the secret in the persisted
+    prompt. Clipping first leaves a prefix that exact-substring ``scrub_reference``
+    cannot match.
 
-    Concrete trigger: a multi-KB reference is inlined into the prompt envelope
-    by ``include_reference=True``. The transcript budget forces clipping. The
-    surviving prefix of the prompt contains the leading portion of the reference
-    content. Scrub-before-clip ensures the secret is redacted while still
-    present in full, so the post-clip prompt cannot leak any portion.
+    Rationale: .claude/notes/contracts.md § Scrub before truncate
     """
     from coder_eval.evaluation.judge_context import build_judge_transcript
 

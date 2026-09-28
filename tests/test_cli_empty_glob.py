@@ -135,7 +135,7 @@ success_criteria:
         patch("coder_eval.orchestration.batch.run_batch", return_value=(mock_summary, [])) as mock_batch,
         patch("coder_eval.cli.console.console.print"),
         patch("coder_eval.logging_config.aggregate_task_logs"),
-        patch("coder_eval.reports_experiment.ExperimentReportGenerator.write_reports"),
+        patch("coder_eval.reports.ExperimentReportGenerator.write_reports"),
     ):
         # Should not raise error - file exists
         asyncio.run(
@@ -200,7 +200,7 @@ success_criteria:
         patch("coder_eval.orchestration.batch.run_batch", return_value=(mock_summary, [])) as mock_batch,
         patch("coder_eval.cli.console.console.print"),
         patch("coder_eval.logging_config.aggregate_task_logs"),
-        patch("coder_eval.reports_experiment.ExperimentReportGenerator.write_reports"),
+        patch("coder_eval.reports.ExperimentReportGenerator.write_reports"),
     ):
         asyncio.run(
             _run_all_tasks(

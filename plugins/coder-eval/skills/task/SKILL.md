@@ -120,6 +120,10 @@ Rules that matter:
   filename — a criterion matching that literal is a **smoke check**, not evidence: it
   only proves the agent typed back what it was told. Keep it if you like, at a low
   weight, and put the weight on a criterion that checks the resulting *behaviour*.
+- Set `read_only: true` on a `run_command` grader that only inspects artifacts: a run
+  whose agent crashed or timed out then still records what the artifacts were worth,
+  instead of scoring nothing. Never set it on a command that writes state or calls a
+  live service — nothing verifies the claim, and the command runs unchanged.
 - `weight` reflects importance: `0.5` nice-to-have, `1.0` standard, `1.5`–`2.0` critical.
   `weight: 0` makes a criterion informational (reported, but excluded from the score and
   the pass/fail gate).

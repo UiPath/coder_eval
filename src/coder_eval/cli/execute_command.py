@@ -1,28 +1,20 @@
 """Execute command - run evaluation tasks WITHOUT grading them.
 
 ``coder-eval execute`` is ``coder-eval run`` with the grading half removed: the
-sandbox is built, the agent runs, and the full trajectory is captured into the
-usual ``task.json`` / ``run.json`` layout — but no success criterion is checked,
+sandbox is built, the agent runs, and the full trajectory is captured into the usual
+``task.json`` / ``run.json`` layout -- but no success criterion is checked,
 ``weighted_score`` stays ``None``, and each row finalizes as
 ``FinalStatus.NOT_GRADED``.
 
-It exists so an *external* harness can own the verdict. The motivating case is
-Harbor (Terminal-Bench 2.0), which builds its own container, calls coder-eval as
-the agent, and grades with its own ``tests/test.sh``. Grading twice there would
-be worse than not grading at all: coder-eval's verdict would be reported
-alongside Harbor's without being the one that counts.
-
-Every flag on ``run`` is available here except ``--junit-xml``, which is a report
-of verdicts and there are none.
-
-``--resume`` IS supported, because ``partition_for_resume`` now takes the
-resuming command into account: a ``NOT_GRADED`` row owes ``execute`` nothing (it
-finished executing) but owes ``run`` a grade, so ``run --resume`` grades those
-rows in place rather than skipping them as "already complete".
+Every flag on ``run`` is available here except ``--junit-xml``, which is a report of
+verdicts and there are none. ``--resume`` IS supported: a ``NOT_GRADED`` row owes
+``execute`` nothing but owes ``run`` a grade.
 
 The command shares ``run``'s entire body (``run_command.run_pipeline``); only the
 Typer signature is restated, because Typer builds its parser from the signature.
 ``tests/test_execute_command.py`` asserts the two signatures stay in step.
+
+Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
 """
 
 from pathlib import Path
@@ -197,11 +189,36 @@ def execute_command(
         "--workspace-dir",
         help=(
             "Run the single resolved task's agent in-place at this absolute path instead of the "
-            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "standard artifacts workspace named by --artifacts-dir (copied out there at "
             "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
             "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
             "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
             "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
+    logging_dir: str | None = typer.Option(
+        None,
+        "--logging-dir",
+        help=(
+            "Where task.json/task.log go, as a path template. Placeholders: ${run_dir}, "
+            "${variant}, ${task}, ${repeat}. Default reproduces <run_dir>/<variant>/<task>/<NN>. "
+            "A static path (e.g. /logs/agent) resolves every task to itself, so it is only for a "
+            "single-task run (e.g. Harbor); refused for sandbox.driver: docker and for more than "
+            "one resolved task."
+        ),
+    ),
+    artifacts_dir: str | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help=(
+            "Where the agent's artifacts go -- the FINAL directory, same placeholders as "
+            "--logging-dir, and independent of it (Harbor puts logs at /logs/agent and "
+            "artifacts at the container's WORKDIR). When it already holds the workspace "
+            "there is nothing to copy. Default reproduces <run_dir>/<variant>/<task>/<NN>/"
+            "artifacts/<task>. A static path is only for a single-task run; refused for "
+            "sandbox.driver: docker (the in-container Orchestrator has no way to receive it) "
+            "and for more than one resolved task, and refused together with --resume (it would "
+            "clear an operator-supplied tree the harness did not create)."
         ),
     ),
 ) -> None:
@@ -258,4 +275,6 @@ def execute_command(
         set_overrides=set_overrides,
         format=format,
         workspace_dir=workspace_dir,
+        logging_dir=logging_dir,
+        artifacts_dir=artifacts_dir,
     )

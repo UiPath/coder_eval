@@ -4,7 +4,6 @@ import typer
 
 from coder_eval.telemetry import track_command
 
-from .aggregate_command import aggregate_command
 from .console import console
 from .evaluate_command import evaluate_command
 from .execute_command import execute_command
@@ -54,7 +53,6 @@ def main(
     - plan: Validate task files (dry-run)
     - evaluate: Grade a directory against a task, or re-grade a finished run
     - report: Display or export evaluation reports
-    - aggregate: Rebuild run.json/run.md from finalized task.json files
     """
     # Discover and register agents (built-in + third-party plugins) before any
     # subcommand resolves a task or builds an agent.
@@ -75,15 +73,14 @@ def main(
         raise typer.Exit(0)
 
 
-# Register core commands. Each public command is wrapped with track_command so it
-# emits a CoderEval.Cli.<name> event (Status/DurationMs/ErrorType) on completion;
-# functools.wraps preserves the signature so Typer still parses each command's flags.
+# Each public command is wrapped with track_command so it emits a
+# CoderEval.Cli.<name> event; functools.wraps preserves the signature so Typer
+# still parses each command's flags.
 app.command(name="run")(track_command("run")(run_command))
 app.command(name="execute")(track_command("execute")(execute_command))
 app.command(name="plan")(track_command("plan")(plan_command))
 app.command(name="evaluate")(track_command("evaluate")(evaluate_command))
 app.command(name="report")(track_command("report")(report_command))
-app.command(name="aggregate")(track_command("aggregate")(aggregate_command))
 app.command(name="export")(track_command("export")(export_command))
 harbor_app.command(name="reward")(track_command("harbor-reward")(reward_command))
 app.add_typer(harbor_app, name="harbor")

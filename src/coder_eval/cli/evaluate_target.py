@@ -88,20 +88,12 @@ def resolve_evaluate_target(first: Path, second: Path | None) -> EvaluateTarget:
             )
         return EvaluateTarget(mode=EvaluateMode.RUN_DIR, target=first, task_file=None)
 
-    # Two arguments. The second is the place; the first is the task file. When
-    # that place turns out to be a run directory the caller is re-grading it with
-    # a DIFFERENT task file than the one it ran with — the "iterate on my
-    # criteria against an expensive run I already paid for" case, which is the
-    # main reason to keep `execute` and `evaluate` separate at all. Allow it, and
-    # let the caller be told which config won.
-    #
-    # This probe is a filename test, so a plain work directory that merely
-    # happens to contain a file called `task.json` is read as a run directory —
-    # and the pre-existing two-argument form would abort on a pydantic wall with
-    # no way to override it. It is not repaired here (this function is pure and
-    # cannot tell a real record from a namesake); the caller re-reads the record
-    # and falls back to WORK_DIR when it does not parse. See
+    # The second argument is the place; the first is the task file. A run directory
+    # there means re-grading with a DIFFERENT task file, which is allowed. This
+    # probe is a filename test, and this function is pure, so the caller re-reads
+    # the record and falls back to WORK_DIR when it does not parse -- see
     # ``evaluate_command._resolve_run_dir_or_work_dir``.
+    # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     mode = EvaluateMode.RUN_DIR if second.is_dir() and is_run_dir(second) else EvaluateMode.WORK_DIR
     return EvaluateTarget(mode=mode, target=second, task_file=first)
 

@@ -267,6 +267,114 @@ function fmtMs(ms: number | null): string {
     return `${sign}${Math.round(abs)}ms`;
 }
 
+const SWATCH = {
+    startup: "bg-indigo-300",
+    generation: "bg-studio-blue",
+    tool: "bg-sky-300",
+    teardown: "bg-indigo-200",
+    unaccounted: "bg-amber-300",
+    setup: "bg-gray-400",
+    grading: "bg-gray-300",
+    other: "bg-gray-200",
+};
+
+function StripCell({
+    label,
+    title,
+    swatch,
+    strong = false,
+    valueClass,
+    children,
+}: {
+    label: string;
+    title?: string;
+    swatch?: string;
+    strong?: boolean;
+    valueClass?: string;
+    children: ReactNode;
+}) {
+    return (
+        <div title={title} className="flex items-baseline gap-1.5 whitespace-nowrap">
+            <div
+                className={`flex items-center gap-1 ${strong ? "text-gray-700 font-semibold" : "text-gray-500"}`}
+            >
+                {swatch && (
+                    <span aria-hidden="true" className={`inline-block h-2 w-2 rounded-sm ${swatch}`} />
+                )}
+                {label}
+            </div>
+            <div className={valueClass ?? (strong ? "text-gray-900 font-semibold" : "text-gray-900 font-medium")}>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function SplitCell({
+    label,
+    ms,
+    totalMs,
+    valueClass = "text-gray-800 font-medium",
+}: {
+    label: string;
+    ms: number;
+    totalMs: number;
+    valueClass?: string;
+}) {
+    return (
+        <div className="flex items-baseline gap-1 whitespace-nowrap">
+            <div className="text-gray-500">{label}</div>
+            <div className={valueClass}>
+                {fmtMs(ms)}
+                {totalMs > 0 && <ShareOf share={ms / totalMs} />}
+            </div>
+        </div>
+    );
+}
+
+// Widths are flex-grow weights, so negative residuals (overlap) and unmeasured
+// buckets simply drop out instead of skewing the rest.
+function TimeBar({
+    groups,
+}: {
+    groups: { label: string; ms: number | null; swatch: string }[][];
+}) {
+    const shown = groups
+        .map((g) => g.filter((s): s is { label: string; ms: number; swatch: string } => s.ms != null && s.ms > 0))
+        .filter((g) => g.length > 0);
+    if (shown.length === 0) return null;
+    return (
+        <div aria-hidden="true" className="flex h-2.5 w-full gap-0.5">
+            {shown.map((g, i) => (
+                <div
+                    key={i}
+                    className="flex overflow-hidden rounded-sm"
+                    style={{ flex: `${g.reduce((a, s) => a + s.ms, 0)} 1 0` }}
+                >
+                    {g.map((s) => (
+                        <div
+                            key={s.label}
+                            title={`${s.label} ${fmtMs(s.ms)}`}
+                            className={s.swatch}
+                            style={{ flex: `${s.ms} 1 0` }}
+                        />
+                    ))}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function ShareOf({ share }: { share: number | null }) {
+    if (share == null) return null;
+    return (
+        <span className="text-gray-400">
+            {" "}
+            ({Math.round(share * 100)}%)
+        </span>
+    );
+}
+
 function fmtTokens(n: number | null): string {
     if (n == null) return "—";
     if (n === 0) return "0";
@@ -318,6 +426,7 @@ export function MessageTimelineSection({
     subAgentUsageByToolId = {},
     impactByIndex,
     taskDurationSeconds,
+    agentSeconds,
     harnessStartupMs,
     harnessTeardownMs,
     storedToolMs,
@@ -337,6 +446,9 @@ export function MessageTimelineSection({
     // tool execution do NOT account for. Null/absent on a run predating
     // duration capture — the cell then renders "—" rather than a fake residual.
     taskDurationSeconds?: number | null;
+    // The agent's turns, summed. Absent on a run without per-turn durations,
+    // and the strip then falls back to one task-wide residual.
+    agentSeconds?: number | null;
     // The turn-level head and tail, summed over the task's turns: wall clock
     // before the first generation window opened and after the last one closed.
     // Turn-scoped, so they cannot be derived from the per-message stream the
@@ -438,29 +550,41 @@ export function MessageTimelineSection({
     const attributableGenMs = totalGenMs - mixedMs;
     const thinkingShare = attributableGenMs > 0 ? thinkingMs / attributableGenMs : 0;
 
-    // Wall clock the agent stream does not explain, AFTER every named bucket.
-    // Startup and teardown are subtracted because they are measured intervals,
-    // not residual — leaving them in reported a harness's CLI boot as
-    // unexplained time. `?? 0` subtracts only what was actually measured, so an
-    // older run with neither field keeps exactly its previous number.
-    // Negative means generation and tool execution overlapped, which is a real
-    // signal — never clamped.
+    // With per-turn durations the strip splits into Agent time and Eval
+    // overhead, and each group's cells sum to its header. Without them, one
+    // residual over the whole task, exactly as older runs published it.
+    // Negative residuals mean buckets overlapped and are never clamped.
     const taskMs =
         taskDurationSeconds != null ? taskDurationSeconds * 1000 : null;
+    const agentMs = agentSeconds != null ? agentSeconds * 1000 : null;
+    const overheadMs =
+        taskMs != null && agentMs != null ? taskMs - agentMs : null;
+    const agentBucketsMs =
+        totalGenMs +
+        (toolExecMs ?? 0) +
+        (harnessStartupMs ?? 0) +
+        (harnessTeardownMs ?? 0);
+    const phaseMs = (setupMs ?? 0) + (gradingMs ?? 0);
     const unaccountedMs =
-        taskMs != null
-            ? taskMs -
-              totalGenMs -
-              (toolExecMs ?? 0) -
-              (harnessStartupMs ?? 0) -
-              (harnessTeardownMs ?? 0) -
-              (setupMs ?? 0) -
-              (gradingMs ?? 0)
-            : null;
+        agentMs != null
+            ? agentMs - agentBucketsMs
+            : taskMs != null
+              ? taskMs - agentBucketsMs - phaseMs
+              : null;
+    const unaccountedBase = agentMs ?? taskMs;
     const unaccountedShare =
-        taskMs != null && taskMs > 0 && unaccountedMs != null
-            ? unaccountedMs / taskMs
+        unaccountedBase != null && unaccountedBase > 0 && unaccountedMs != null
+            ? unaccountedMs / unaccountedBase
             : null;
+    // In the split, the four buckets tile each turn, so a residual that rounds
+    // to 0% is the expected case and only noise.
+    const showUnaccounted =
+        agentMs == null ||
+        unaccountedShare == null ||
+        Math.round(unaccountedShare * 100) !== 0;
+    const otherOverheadMs = overheadMs != null ? overheadMs - phaseMs : null;
+    const shareOfTask = (ms: number | null) =>
+        taskMs != null && taskMs > 0 && ms != null ? ms / taskMs : null;
 
     return (
         <section className="space-y-2">
@@ -473,189 +597,150 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            {/* TWO LEVELS, two rows. The top row's five time cells — Startup,
-                Generation, Tool exec, Teardown, Unaccounted — sum to the task's
-                wall clock; the bottom row splits Generation alone and sums to
-                IT. Rendering the split as a sub-cell of one top-row cell put
-                both sums on one line, where nothing said which total each part
-                belonged to. The time cells are ordered as the turn runs. */}
-            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-3">
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9 gap-3 text-xs">
-                    <div>
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Messages
-                        </div>
-                        <div className="text-gray-900 font-medium">{messageCount}</div>
-                    </div>
-                    <div title="sandbox provisioning, agent start() and pre_run — everything before the first turn begins. TASK-scoped, so it is NOT one of the turn's four buckets: those tile a single turn and their identity is asserted to the millisecond, while this happens once for a task that may run many turns. It is the orchestrator's own cost, not the harness's — measured at ~1.9s for claude-code and pi alike. Blank on runs recorded before the field existed.">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Setup
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(setupMs ?? null)}
-                        </div>
-                    </div>
-                    <div title="wall clock from the turn starting until the harness first observed model output — a latency that INCLUDES time-to-first-token, and the same instant its first generation window opens. Named for the interval it measures, not for what it contains. Deliberately NOT decomposed further: a harness with a CLI to boot fuses CLI boot, provider resolution, dispatch and TTFT here, and no stream carries a marker between them. See docs/agents/HARNESS_PARITY.md.">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Startup
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(harnessStartupMs ?? null)}
-                        </div>
-                    </div>
-                    <div title="model-generation time, split per block kind on the row below">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Generation
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(totalGenMs)}
-                        </div>
-                    </div>
-                    <div title="wall clock the tools occupied — overlapping calls counted once, not twice">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Tool exec
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(toolExecMs ?? null)}
-                        </div>
-                    </div>
-                    <div title="wall clock after the last generation window closed: SDK/CLI finalization, result assembly and process teardown">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Teardown
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(harnessTeardownMs ?? null)}
-                        </div>
-                    </div>
-                    <div title="every success-criteria check this row made, summed — the single-shot check, each dialog turn's check, and the post-failure diagnostic pass. Blank when nothing was graded (coder-eval execute) or on runs recorded before the field existed.">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Grading
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                            {fmtMs(gradingMs ?? null)}
-                        </div>
-                    </div>
-                    <div title="task wall clock minus every named bucket above. A TRUE residual now that setup and grading are measured: it used to hold the ~1.9s setup phase, a known constant reading as unexplained time. What is left is post_run, sandbox cleanup, simulator calls and any interval the harness did not report.">
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Unaccounted
+            {/* Task total splits into Agent time and Eval overhead, each
+                group's items sum to its header, and the Generation split sums
+                to Generation. */}
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-2 text-xs">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                    <StripCell
+                        label="Task total"
+                        title="the task's full wall clock: agent time plus eval overhead"
+                        strong
+                    >
+                        {fmtMs(taskMs)}
+                    </StripCell>
+                    <StripCell
+                        label="Slow events"
+                        valueClass={
+                            slowGen + slowTool > 0
+                                ? "text-red-700 font-medium"
+                                : "text-gray-900 font-medium"
+                        }
+                    >
+                        {slowGen} gen · {slowTool} tool
+                    </StripCell>
+                </div>
+                {taskMs != null && taskMs > 0 && (
+                    <TimeBar
+                        groups={[
+                            [
+                                { label: "Startup", ms: harnessStartupMs ?? null, swatch: SWATCH.startup },
+                                { label: "Generation", ms: totalGenMs, swatch: SWATCH.generation },
+                                { label: "Tool exec", ms: toolExecMs ?? null, swatch: SWATCH.tool },
+                                { label: "Teardown", ms: harnessTeardownMs ?? null, swatch: SWATCH.teardown },
+                                { label: "Unaccounted", ms: unaccountedMs, swatch: SWATCH.unaccounted },
+                            ],
+                            [
+                                { label: "Setup", ms: setupMs ?? null, swatch: SWATCH.setup },
+                                { label: "Grading", ms: gradingMs ?? null, swatch: SWATCH.grading },
+                                { label: "Other", ms: otherOverheadMs, swatch: SWATCH.other },
+                            ],
+                        ]}
+                    />
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-x-6 gap-y-2">
+                    <div className="space-y-1">
+                        <StripCell
+                            label="Agent time"
+                            title="the agent's turns, summed: the time the Agent time headline and run card count"
+                            strong
+                        >
+                            {fmtMs(agentMs)}
+                            <ShareOf share={shareOfTask(agentMs)} />
+                        </StripCell>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                            <StripCell label="Startup" swatch={SWATCH.startup} title="wall clock from the turn starting until the harness first observed model output — a latency that INCLUDES time-to-first-token, and the same instant its first generation window opens. Named for the interval it measures, not for what it contains. Deliberately NOT decomposed further: a harness with a CLI to boot fuses CLI boot, provider resolution, dispatch and TTFT here, and no stream carries a marker between them. See docs/agents/HARNESS_PARITY.md.">
+                                {fmtMs(harnessStartupMs ?? null)}
+                            </StripCell>
+                            <StripCell label="Generation" swatch={SWATCH.generation} title="model-generation time, split per block kind on the line below">
+                                {fmtMs(totalGenMs)}
+                            </StripCell>
+                            <StripCell label="Tool exec" swatch={SWATCH.tool} title="wall clock the tools occupied — overlapping calls counted once, not twice">
+                                {fmtMs(toolExecMs ?? null)}
+                            </StripCell>
+                            <StripCell label="Teardown" swatch={SWATCH.teardown} title="wall clock after the last generation window closed: SDK/CLI finalization, result assembly and process teardown">
+                                {fmtMs(harnessTeardownMs ?? null)}
+                            </StripCell>
+                            {showUnaccounted && (
+                                <StripCell
+                                    label="Unaccounted"
+                                    swatch={SWATCH.unaccounted}
+                                    title={
+                                        agentMs != null
+                                            ? "agent time minus Startup, Generation, Tool exec and Teardown: intervals inside a turn the harness did not report. Negative means buckets overlapped. Hidden when it rounds to 0%."
+                                            : "task wall clock minus every named bucket above. A TRUE residual now that setup and grading are measured: it used to hold the ~1.9s setup phase, a known constant reading as unexplained time. What is left is post_run, sandbox cleanup, simulator calls and any interval the harness did not report."
+                                    }
+                                    valueClass={
+                                        unaccountedMs != null && unaccountedMs < 0
+                                            ? "text-amber-700 font-medium"
+                                            : unaccountedShare != null && unaccountedShare >= 0.25
+                                              ? "text-red-700 font-medium"
+                                              : "text-gray-900 font-medium"
+                                    }
+                                >
+                                    {fmtMs(unaccountedMs)}
+                                    <ShareOf share={unaccountedShare} />
+                                </StripCell>
+                            )}
                         </div>
                         <div
-                            className={
-                                unaccountedMs != null && unaccountedMs < 0
-                                    ? // Overlap or unreported overrun, not
-                                      // unexplained time — a different fact
-                                      // from a large positive residual, so a
-                                      // different colour rather than the same
-                                      // grey a healthy row gets.
-                                      "text-amber-700 font-medium"
-                                    : unaccountedShare != null && unaccountedShare >= 0.25
-                                      ? "text-red-700 font-medium"
-                                      : "text-gray-900 font-medium"
-                            }
+                            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-l-2 border-gray-200 pl-2 text-[10px]"
+                            title="how the Generation figure above divides across block kinds. Within an emission that mixed kinds the split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
                         >
-                            {fmtMs(unaccountedMs)}
-                            {unaccountedShare != null && (
-                                <span className="text-gray-400">
-                                    {" "}
-                                    ({Math.round(unaccountedShare * 100)}%)
-                                </span>
+                            <div className="text-gray-500">Generation split</div>
+                            <SplitCell
+                                label="thinking"
+                                ms={thinkingMs}
+                                totalMs={totalGenMs}
+                                valueClass={
+                                    thinkingShare >= 0.4
+                                        ? "text-red-700 font-medium"
+                                        : "text-gray-800 font-medium"
+                                }
+                            />
+                            {/* "tool args", never "tool": this is time the model
+                                spent WRITING a tool call, and the Tool exec item
+                                above is time the tool spent RUNNING. */}
+                            <SplitCell label="tool args" ms={toolGenMs} totalMs={totalGenMs} />
+                            <SplitCell label="text" ms={textMs} totalMs={totalGenMs} />
+                            {/* NOT "mixed": the legend above already uses MIXED
+                                for a message carrying multiple block types. This
+                                is the leftover no kind claimed. Backed by
+                                MessageEvent.mixedGenMs. */}
+                            {mixedMs > 0 && (
+                                <SplitCell label="unsplit" ms={mixedMs} totalMs={totalGenMs} />
                             )}
                         </div>
                     </div>
-                    <div>
-                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                            Slow events
-                        </div>
-                        <div
-                            className={
-                                slowGen + slowTool > 0
-                                    ? "text-red-700 font-medium"
-                                    : "text-gray-900 font-medium"
-                            }
+                    <div className="space-y-1">
+                        <StripCell
+                            label="Eval overhead"
+                            title="task wall clock outside the agent's turns: sandbox setup, pre_run, grading, post_run and cleanup. No skill can change it."
+                            strong
                         >
-                            {slowGen} gen · {slowTool} tool
-                        </div>
-                    </div>
-                </div>
-                <div
-                    className="border-t border-gray-200 pt-2 text-[10px]"
-                    title="how the Generation figure above divides across block kinds. Within an emission that mixed kinds the split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
-                >
-                    <div className="text-gray-500 uppercase tracking-wide">
-                        Generation split
-                    </div>
-                    <div
-                        className={
-                            "mt-1 grid gap-2 " +
-                            (mixedMs > 0 ? "grid-cols-4" : "grid-cols-3")
-                        }
-                    >
-                        <div>
-                            <div className="text-gray-500">thinking</div>
-                            <div
-                                className={
-                                    thinkingShare >= 0.4
-                                        ? "text-red-700 font-medium tabular-nums"
-                                        : "text-gray-800 font-medium tabular-nums"
+                            {fmtMs(overheadMs)}
+                            <ShareOf share={shareOfTask(overheadMs)} />
+                        </StripCell>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                            <StripCell label="Setup" swatch={SWATCH.setup} title="sandbox provisioning, agent start() and pre_run — everything before the first turn begins. TASK-scoped, so it is NOT one of the turn's four buckets: those tile a single turn and their identity is asserted to the millisecond, while this happens once for a task that may run many turns. It is the orchestrator's own cost, not the harness's — measured at ~1.9s for claude-code and pi alike. Blank on runs recorded before the field existed.">
+                                {fmtMs(setupMs ?? null)}
+                            </StripCell>
+                            <StripCell label="Grading" swatch={SWATCH.grading} title="every success-criteria check this row made, summed — the single-shot check, each dialog turn's check, and the post-failure diagnostic pass. Blank when nothing was graded (coder-eval execute) or on runs recorded before the field existed.">
+                                {fmtMs(gradingMs ?? null)}
+                            </StripCell>
+                            <StripCell
+                                label="Other"
+                                swatch={SWATCH.other}
+                                title="eval overhead minus Setup and Grading: post_run, sandbox cleanup and simulator calls"
+                                valueClass={
+                                    otherOverheadMs != null && otherOverheadMs < 0
+                                        ? "text-amber-700 font-medium"
+                                        : "text-gray-900 font-medium"
                                 }
                             >
-                                {fmtMs(thinkingMs)}
-                                {totalGenMs > 0 && (
-                                    <span className="text-gray-400">
-                                        {" "}
-                                        ({Math.round((thinkingMs / totalGenMs) * 100)}%)
-                                    </span>
-                                )}
-                            </div>
+                                {fmtMs(otherOverheadMs)}
+                            </StripCell>
                         </div>
-                        <div>
-                            {/* "tool args", never "tool": this is time the model
-                                spent WRITING a tool call, and the Tool exec cell
-                                one row up is time the tool spent RUNNING. The
-                                bare word named both. */}
-                            <div className="text-gray-500">tool args</div>
-                            <div className="text-gray-800 font-medium tabular-nums">
-                                {fmtMs(toolGenMs)}
-                                {totalGenMs > 0 && (
-                                    <span className="text-gray-400">
-                                        {" "}
-                                        ({Math.round((toolGenMs / totalGenMs) * 100)}%)
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-                        <div>
-                            <div className="text-gray-500">text</div>
-                            <div className="text-gray-800 font-medium tabular-nums">
-                                {fmtMs(textMs)}
-                                {totalGenMs > 0 && (
-                                    <span className="text-gray-400">
-                                        {" "}
-                                        ({Math.round((textMs / totalGenMs) * 100)}%)
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-                        {mixedMs > 0 && (
-                            <div>
-                                {/* NOT "mixed": the legend above already uses
-                                    MIXED for a message carrying multiple block
-                                    types, which is ~93% of Delegate's rows and
-                                    the very case this cell is usually EMPTY
-                                    for. This is the leftover no kind claimed.
-                                    Backed by MessageEvent.mixedGenMs. */}
-                                <div className="text-gray-500">unsplit</div>
-                                <div className="text-gray-800 font-medium tabular-nums">
-                                    {fmtMs(mixedMs)}
-                                    {totalGenMs > 0 && (
-                                        <span className="text-gray-400">
-                                            {" "}
-                                            ({Math.round((mixedMs / totalGenMs) * 100)}%)
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>
@@ -858,6 +943,7 @@ export function CostExplorerSection({
     tokens,
     recordedCostUsd,
     taskDurationSeconds,
+    agentSeconds,
     harnessStartupMs,
     harnessTeardownMs,
     storedToolMs,
@@ -870,6 +956,7 @@ export function CostExplorerSection({
     recordedCostUsd: number | null;
     // Forwarded verbatim to the timeline's Unaccounted cell.
     taskDurationSeconds?: number | null;
+    agentSeconds?: number | null;
     // Forwarded verbatim to the timeline's Startup/Teardown cells.
     harnessStartupMs?: number | null;
     harnessTeardownMs?: number | null;
@@ -916,6 +1003,7 @@ export function CostExplorerSection({
                 subAgentUsageByToolId={subAgentUsageByToolId}
                 impactByIndex={impactByIndex}
                 taskDurationSeconds={taskDurationSeconds}
+                agentSeconds={agentSeconds}
                 harnessStartupMs={harnessStartupMs}
                 harnessTeardownMs={harnessTeardownMs}
                 storedToolMs={storedToolMs}

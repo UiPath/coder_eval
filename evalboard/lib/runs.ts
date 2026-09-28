@@ -102,6 +102,9 @@ export interface TaskResultSummary {
     status: string | null;
     weightedScore: number | null;
     durationSeconds: number | null;
+    // The agent's turns alone, without setup and grading. Optional so test
+    // factories that predate it stay valid.
+    agentSeconds?: number | null;
     totalCostUsd: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
@@ -118,7 +121,7 @@ export interface TaskResultSummary {
     // Per-task token totals from run.json. Null on legacy runs that
     // don't record per-task token counts. `inputTokens` is the disjoint
     // uncached slice (run.json `input_tokens` is serialized from
-    // TokenUsage.uncached_input_tokens — see reports_experiment.py), so it
+    // TokenUsage.uncached_input_tokens — see run_record.py), so it
     // sits alongside the cache columns without overlap.
     inputTokens: number | null;
     outputTokens: number | null;
@@ -431,8 +434,8 @@ function sumMeasured(values: (number | null | undefined)[]): number | null {
 // Three of the task's four wall-clock buckets, summed over its turns. The
 // per-turn values are measured by `coder_eval/timing.py` — head and tail by
 // `decompose_turn`, the tool union at the collector seam — and the summation is
-// evalboard-only, mirroring `reports_stats.turn_time_buckets` the way
-// `pricing.ts` mirrors `pricing.py`. The arithmetic that consumes it, the
+// evalboard-only, a hand-written mirror of `result_metrics.turn_time_buckets`
+// (unlike the rate table, which is generated). The arithmetic that consumes it, the
 // Unaccounted residual in `_sections.tsx`, is the deliberate second
 // implementation `decompose_turn`'s docstring names.
 //
@@ -493,7 +496,7 @@ export function aggregateSubAgentUsage(
 export interface RawTaskResult {
     task_id?: string;
     // Experiment arm that produced this row (the <variant> sub-dir). Written by
-    // reports_experiment.py on every run; absent on runs that predate it, which
+    // run_record.py on every run; absent on runs that predate it, which
     // read as DEFAULT_VARIANT_ID.
     variant_id?: string | null;
     // Replicate index of this row (the <variant>/<task>/<NN> sub-dir). Repeated
@@ -503,6 +506,7 @@ export interface RawTaskResult {
     status?: string;
     weighted_score?: number;
     duration?: number;
+    iterations?: { duration_seconds?: number | null }[] | null;
     total_cost_usd?: number;
     input_tokens?: number | null;
     output_tokens?: number | null;
@@ -891,6 +895,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         status: t.status ?? null,
         weightedScore: t.weighted_score ?? null,
         durationSeconds: t.duration ?? null,
+        agentSeconds: agentSecondsFromRaw(t),
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
@@ -1141,6 +1146,9 @@ export interface RunOverviewTask {
     skill: string | null;
     totalCostUsd: number | null;
     durationSeconds: number | null;
+    // The agent's turns alone: `durationSeconds` minus sandbox setup, pre_run,
+    // grading and cleanup. Optional so test factories that predate it stay valid.
+    agentSeconds?: number | null;
     weightedScore: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
@@ -1257,6 +1265,13 @@ function mostCommonAgentType(rows: RawTaskResult[]): string | null {
     return best;
 }
 
+export function agentSecondsFromRaw(t: RawTaskResult): number | null {
+    const seconds = (t.iterations ?? [])
+        .map((i) => i.duration_seconds)
+        .filter((d): d is number => typeof d === "number" && d > 0);
+    return seconds.length ? seconds.reduce((a, d) => a + d, 0) : null;
+}
+
 export async function readRunOverview(
     id: string,
     source: Source = DEFAULT_SOURCE,
@@ -1275,6 +1290,7 @@ export async function readRunOverview(
                 skill: deriveSkill(t.task_path, tags),
                 totalCostUsd: t.total_cost_usd ?? null,
                 durationSeconds: t.duration ?? null,
+                agentSeconds: agentSecondsFromRaw(t),
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,

@@ -11,7 +11,7 @@ Coder Eval writes machine-readable JSON alongside every markdown/HTML report. Th
 page is the field-level reference for consumers (dashboards, CI parsers, evalboard
 forks). For the on-disk directory tree see
 [User Guide → Output Structure](USER_GUIDE.md#output-structure); for how to
-re-generate these files see [`coder-eval report` / `aggregate`](USER_GUIDE.md#cli-commands).
+re-generate these files see [`coder-eval report`](USER_GUIDE.md#cli-commands) (`--rebuild` for `run.json`).
 
 All JSON is Pydantic `model_dump_json` output — keys are the model field names
 verbatim (no aliases, except `iterations` also accepts the legacy key `turns` on
@@ -21,7 +21,7 @@ read). Times are ISO-8601.
 
 | File | Model | When |
 | --- | --- | --- |
-| `run.json` / `run.md` | `RunSummary` | Every run (and rebuildable via `coder-eval aggregate`) |
+| `run.json` / `run.md` | `RunSummary` | Every run; refreshed by `coder-eval evaluate <run_dir>` and rebuildable via `coder-eval report <run_dir> --rebuild` |
 | `<variant>/<task_id>/<NN>/task.json` | `EvaluationResult` | One per replicate |
 | `<variant>/<task_id>/<NN>/task.execute.json` | `EvaluationResult` | Pre-grade snapshot, written once by a detached grade (`evaluate <run_dir>` / `run --resume`). Deliberately **not** matched by `rglob("task.json")`, so it never enters an aggregation. |
 | `<variant>/<suite_id>/suite.json` / `.md` | `SuiteRollup` | Dataset-backed suites only |
@@ -184,18 +184,21 @@ fields so subclass keys round-trip.
   `transcript_path` (a sibling `judge-N.yaml`, or `post-failure-judge-N.yaml` for
   diagnostic records). The full `transcript` is **stripped
   from `task.json`** — read it from the referenced file. Emitted by `llm_judge`,
-  `agent_judge`.
+  `agent_judge`, `system_one_judge`.
 
 ### Post-failure criterion evidence
 
-When an agent crashes or its turn times out, coder-eval runs only deterministic,
-read-only artifact criteria while the sandbox is still live: `file_exists`,
+When an agent crashes or its turn times out on a graded run, coder-eval runs only
+deterministic, read-only artifact criteria while the sandbox is still live: `file_exists`,
 `file_contains`, `file_matches_regex`, `file_check`, `json_check`,
-`reference_comparison`, and `classification_match`. Judges, trajectory checks,
-`run_command`, and `uipath_eval` are recorded with
-`evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
+`reference_comparison`, and `classification_match`. A `run_command` criterion joins them
+only when the task author sets [`read_only: true`](TASK_DEFINITION_GUIDE.md#run_command)
+on it. Judges, trajectory checks, plain `run_command`, and `uipath_eval` are recorded
+with `evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
 The diagnostic list is additive evidence. An `ERROR` run remains `ERROR`, and its
-canonical score remains 0.0.
+canonical score remains 0.0. The list stays empty under `coder-eval execute`, and on a
+token/cost budget breach, which fires only after every criterion is already scored in
+`success_criteria_results`.
 
 ### TurnRecord
 
@@ -361,6 +364,6 @@ respectively), checked after each completed agent turn — see
 ## See also
 
 - [User Guide → Output Structure](USER_GUIDE.md#output-structure) and the
-  [`aggregate`](USER_GUIDE.md#cli-commands) command
+  [`report --rebuild`](USER_GUIDE.md#cli-commands) command
 - [A/B Experiments → Reading the Report](AB_EXPERIMENTS.md#reading-the-report)
 - [Task Definition Guide](TASK_DEFINITION_GUIDE.md)

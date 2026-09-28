@@ -39,10 +39,9 @@ from coder_eval.models import (
 
 
 # --- Status codes -----------------------------------------------------------
-#
-# One enum per End-event level. Every End event carries the appropriate one so
-# success, tool error, permission denial, crash, timeout and orphaned tool calls
-# are a single mechanism (no ToolErrorEvent subclass + string scans).
+# One enum per End-event level, so success, tool error, permission denial, crash,
+# timeout and orphaned calls are ONE mechanism rather than a subclass plus string
+# scans.
 
 
 class ToolEndStatus(StrEnum):
@@ -74,9 +73,8 @@ class AgentEndStatus(StrEnum):
     STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
-# Reuse the canonical TranscriptMessage union (defined once in telemetry.py) so
-# AgentEndEvent carries per-message telemetry losslessly and stays in lock-step
-# with TurnRecord.messages (the deferred token path rides here, not on granular events).
+# The canonical TranscriptMessage union, so AgentEndEvent carries per-message
+# telemetry losslessly and stays in lock-step with TurnRecord.messages.
 _MessageList = list[TranscriptMessage]
 
 

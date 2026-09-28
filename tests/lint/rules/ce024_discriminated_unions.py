@@ -1,27 +1,19 @@
 """CE024: unions of ``type: Literal``-tagged models in ``coder_eval/models/`` must
 declare a discriminator.
 
-A bare ``A | B | C`` union of tagged Pydantic models validates via smart-union:
-input missing its ``type`` tag (or carrying a typo'd one) silently coerces to
-whichever variant happens to fit, instead of raising a crisp discriminator
-error. That is exactly how the ``SuccessCriterion`` union shipped — tag-less
-criterion dicts coerced to the structurally-nearest variant — until it was
-wrapped in ``Annotated[..., Field(discriminator="type")]``
-(``models/mutations.py:48`` is the canonical compliant shape).
+Flagged: a module-level assignment (plain, PEP 695 ``type X = ...``, or annotated)
+whose value is a ``|``-chain or a ``Union[...]`` of two or more names that ALL refer
+to same-file classes with a ``type: Literal[...]`` field. The union is flagged bare
+or inside an ``Annotated[...]`` with no discriminator metadata.
 
-Flagged: a module-level assignment (plain, PEP 695 ``type X = ...``, or
-annotated) whose value is a ``|``-chain (or a ``Union[...]`` subscript) of
-two or more names that ALL refer to classes
-defined in the same file with a ``type: Literal[...]`` field — including such
-a union inside an ``Annotated[...]`` that carries no discriminator metadata.
+Compliant: the union as the first element of ``Annotated[...]`` whose metadata holds
+``Field(discriminator=...)`` or a ``Discriminator(...)`` call; ``models/mutations.py``
+has the canonical shape. A union with any untagged or imported member is out of
+scope (same-file conservatism, as in CE009).
 
-Compliant (not flagged): the union as the first element of ``Annotated[...]``
-whose metadata contains ``Field(discriminator=...)`` or a ``Discriminator(...)``
-call (the callable form used by ``CriterionResultUnion`` in
-``models/results.py``). Unions with any untagged or imported member are out of
-scope (same-file conservatism, mirroring CE009's documented trade).
+``# noqa: CE024`` on the assignment line for a deliberate exception.
 
-Add ``# noqa: CE024`` on the assignment line for a deliberate exception.
+Rationale: .claude/notes/lint-rules.md § CE024
 """
 
 import ast

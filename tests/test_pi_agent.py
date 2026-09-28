@@ -382,7 +382,7 @@ class TestUnsupportedConfigIsAnnounced:
         with caplog.at_level("WARNING"):
             await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
         assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
-        # plugins is no longer named in the "NOT enforced" warning.
+        # plugins is not named in the "NOT enforced" warning.
         assert "plugins" not in "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
 
     async def test_unenforced_fields_warn_but_system_prompt_does_not(self, patch_exec, tmp_path, caplog):
@@ -1106,13 +1106,13 @@ class _FixedClock:
 
 
 class TestGenerationWindowExcludesToolExecution:
-    """A tool running inside a turn is not model time — asserted where it is now DECIDED.
+    """A tool running inside a turn is not model time — asserted where it is DECIDED.
 
-    The reducer no longer subtracts anything. It publishes the RAW window, and
+    The reducer does not subtract anything. It publishes the RAW window, and
     `timing.subtract_tool_time` takes the tool union back out of it
     once, for all five harnesses. So these cases drive the reducer and then a
     real collector, and assert the PUBLISHED number — the one that reaches
-    `task.json` — rather than an intermediate the reducer used to own.
+    `task.json`.
 
     They are not duplicates of
     `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
@@ -1127,12 +1127,10 @@ class TestGenerationWindowExcludesToolExecution:
         """Drive the reducer, then publish through a real collector.
 
         `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
-        never returned. An unresolved call now contributes NO span — it has no
+        never returned. An unresolved call contributes NO span — it has no
         `execution_completed_at`, and inventing one is what `None` exists to
-        prevent — where the reducer used to bound it at the window's end. That
-        is a real change and a better one: the collector sees every span at
-        once, so a call straddling a boundary is clipped to each window it
-        actually overlapped instead of approximated at the boundary.
+        prevent. The collector sees every span at once, so a call straddling a
+        boundary is clipped to each window it actually overlapped.
         """
         state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m", clock=_FixedClock(self.WINDOW_END))
         state.turn_started_at = self.WINDOW_START
@@ -1201,12 +1199,11 @@ class TestGenerationWindowExcludesToolExecution:
         assert message.generation_duration_ms == 0.0
 
     def test_a_tool_still_open_at_the_boundary_contributes_no_span(self):
-        """The behaviour that CHANGED with the move, stated rather than implied.
+        """A call still open at the boundary takes nothing out of the window.
 
-        The reducer used to bound a still-open call at the window's end and
-        subtract that slice. The collector cannot: a call with no
-        `execution_completed_at` was never timed. Its time is subtracted when it
-        RESOLVES, from whichever windows its real interval overlaps.
+        A call with no `execution_completed_at` was never timed, so the collector
+        cannot bound it. Its time is subtracted when it RESOLVES, from whichever
+        windows its real interval overlaps.
         """
         message = self._finish_turn([], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
         assert message.generation_duration_ms == pytest.approx(1000.0)
@@ -1243,9 +1240,9 @@ class _SteppedClock:
     """A `TurnClock` stand-in the test moves by hand, in ms from `_SPAN_BASE`.
 
     INJECTED, never monkeypatched onto the module. Pi derives every wall stamp
-    from its turn clock now, so patching `agent_module.datetime` would no
-    longer reach it: the tests would quietly start measuring the real clock and
-    pass by accident instead of failing. Injection also puts the "one clock per
+    from its turn clock, so patching `agent_module.datetime` does not reach it:
+    the tests would quietly measure the real clock and pass by accident instead
+    of failing. Injection also puts the "one clock per
     turn" lifetime in the constructor signature where it can be read.
     """
 
@@ -1263,15 +1260,11 @@ def _turn_end_payload():
 class TestGenerationWindowsTileTheTurn:
     """Each window runs from the PREVIOUS `turn_end`, not from its own `turn_start`.
 
-    Pi was the only harness measuring from its own turn start, so the wall
-    clock between one `turn_end` and the next `turn_start` — the model time
-    that PRODUCED the next turn — fell into no bucket at all. The four-bucket
-    identity is asserted only as an upper bound, so nothing failed.
+    Pins: the wall clock between one `turn_end` and the next `turn_start` — the
+    model time that PRODUCED the next turn — lands inside a window. The tool-span
+    half is TestToolSpansSurviveTheTurnBoundary.
 
-    The gap is small in practice (measured across 25 real window pairs: median
-    0.25 ms, max 0.75 ms). The value here is that it closes, and that the tool
-    spans keep working once it does — see TestToolSpansSurviveTheTurnBoundary,
-    which is the half that carries the weight.
+    Rationale: .claude/notes/agents.md § Per-harness generation marks
     """
 
     def _two_turns(self):
@@ -1294,23 +1287,17 @@ class TestGenerationWindowsTileTheTurn:
     def test_the_inter_turn_gap_is_inside_a_window_rather_than_unaccounted(self):
         messages = self._two_turns()
         # 1000 -> 2000, which includes the 600ms between `turn_end` and the
-        # next `turn_start`. Untiled this reported 400ms and lost the 600.
+        # next `turn_start`. Untiled, this reads 400ms and loses the 600.
         assert messages[1].generation_duration_ms == pytest.approx(1000.0)
 
 
 class TestToolSpansSurviveTheTurnBoundary:
     """A tool that closes BETWEEN two turns still belongs to the next window.
 
-    This used to be a bookkeeping problem: a per-turn span list, cleared at
-    `turn_start` — after the window it feeds had already opened at the mark —
-    so a call closing in the gap had its span wiped before the flush could
-    subtract it. That list is gone. `timing.subtract_tool_time` sees
-    every span at once and clips each to the windows it overlaps, so the
-    property now holds by construction rather than by a reset rule.
-
-    Kept, and re-pointed at the collector, because the property itself is what
-    matters and a future reducer change could still break it — by moving a
-    mark, or by failing to emit the ToolEnd the collector reduces.
+    `timing.subtract_tool_time` sees every span at once and clips each to the
+    windows it overlaps, so the property holds by construction. Hazard: a
+    reducer change can still break it — by moving a mark, or by failing to emit
+    the ToolEnd the collector reduces.
     """
 
     def _run(self):
@@ -1371,7 +1358,7 @@ class TestToolSpansSurviveTheTurnBoundary:
         `generation_duration_ms` and both bounds to a placeholder, so a
         snapshot records that a window was measured and never what it measured.
         Its identity check (`_scrub.py`) is an upper bound besides, so
-        under-accounting — the defect this phase fixes — passes it silently.
+        under-accounting passes it silently.
         `scripts/timing/decompose_run.py --max-residual-pct` is the two-sided
         check on live runs; this is the committed one.
         """
@@ -1388,15 +1375,13 @@ class TestToolSpansSurviveTheTurnBoundary:
     def test_a_duplicate_turn_end_does_not_republish_the_previous_window(self):
         """A spent `turn_started_at` must not seed the next window.
 
-        `close_window`'s `min(mark, item_start)` pulls the window open to cover
-        the item's own start. That is the backwards-clock defence, but a start
-        stamp left in place after its turn was published is not a backwards
-        clock — it is a stale value BEFORE the mark, so the guard reopens the
-        next window at the previous turn's start and publishes that whole span
-        again. Reproduced before the fix: 3000 ms of generation for a 2000 ms
-        turn. This reducer promises to survive a malformed stream, and Pi's CLI
-        retries internally, so a duplicate or replayed `turn_end` is a transport
-        hiccup rather than a hypothetical.
+        Pins: a second `turn_end` with no intervening `turn_start` opens its
+        window at the first turn's end, and the two windows sum to the 2000 ms
+        wall clock. Hazard: `close_window`'s `min(mark, item_start)` reopens a
+        window at any start stamp left before the mark, so the reducer must
+        clear its start once the turn is published.
+
+        Rationale: .claude/notes/agents.md § Per-harness generation marks
         """
         clock = _SteppedClock()
         state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)

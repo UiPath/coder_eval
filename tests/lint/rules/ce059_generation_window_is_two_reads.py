@@ -1,39 +1,19 @@
 """CE059: one clock read cannot measure a window.
 
-An ``AssistantMessage`` that receives the SAME name for both ``started_at`` and
-``completed_at`` records a zero-length generation window — whatever
-``generation_duration_ms`` happens to say beside it. The Antigravity reducer
-read ``datetime.now()`` once and passed it as both bounds, so
-``started_at == completed_at`` on 368 of 368 sampled messages and every
-consumer that derives a window from the two stamps saw nothing at all. A window
-needs two reads at two moments.
+In ``src/coder_eval/agents/``, an ``AssistantMessage`` (or
+``AssistantMessageTelemetry``) call may not pass the same name for both ``started_at``
+and ``completed_at``: that records a zero-length window, whatever
+``generation_duration_ms`` says. The check is skipped unless BOTH bounds are a bare
+``ast.Name``; attribute and call expressions are not compared.
 
-Separate id from CE058 deliberately: this is a different invariant (a
-zero-length window, regardless of what the duration field says), and one
-invariant per id is what makes a ``# noqa`` mean one thing.
+It does NOT fire when the same call passes ``generation_duration_ms=None``. That call
+states that no window was measurable, so it claims none. Keep this exemption; do not
+replace it with ``# noqa`` lines at those sites.
 
-WHAT IT DOES NOT FIRE ON, and why that is the rule rather than a stack of
-suppressions: a call that passes ``generation_duration_ms=None`` in the same
-breath is not claiming a window — it is saying, in the field built to say it,
-that none was measurable. Three sites are legitimately like that (Codex's
-rollout rebuild, and both sub-agent syntheses on Codex and Claude: the
-generation arrives as a tool result and is never streamed), and collapsing
-their bounds to one ``now()`` is then a formatting choice, not a false
-measurement. Exempting them here — rather than through four permanent
-``# noqa`` lines — keeps the rule pointed at the case that actually misleads:
-a duration asserted beside two stamps that cannot support it.
+BLIND SPOT: two DIFFERENT names that hold the same instant at runtime. No AST rule can
+see it; the replay-based ``assert_timing_captured`` golden invariant catches it.
 
-Scoped to ``src/coder_eval/agents/``, the layer that measures. The check is
-skipped unless BOTH bounds are a bare ``ast.Name`` — comparing attribute or
-call expressions (``self.a`` vs ``self.b``) would be guesswork.
-
-BLIND SPOT: two DIFFERENT names that hold the same instant at runtime. Codex
-already produces that shape — ``started = _ms_to_dt(self.open_start_ms)`` and
-``completed = _ms_to_dt(self.open_end_ms if ... is not None else
-self.open_start_ms)`` collapse to one instant whenever ``open_end_ms`` is
-None. No AST rule can see it. The catch for that case is the replay-based
-``assert_timing_captured`` golden invariant, which runs the real reducer and
-asserts a non-zero window actually came out.
+Rationale: .claude/notes/lint-rules.md § CE059
 """
 
 import ast

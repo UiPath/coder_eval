@@ -357,6 +357,58 @@ class TestWriteTrajectoryJson:
         assert not path.exists()
 
 
+class TestEmitTrajectoriesForRun:
+    def test_writes_trajectory_for_dirs_outside_run_dir(self, tmp_path):
+        """task_dirs need not live under a common run_dir -- an overridden
+        logging_dir_template (Harbor's own agent logs dir) is exactly the case this
+        exists for."""
+        result = _result([_turn(messages=[_assistant()])])
+        dir_a = tmp_path / "elsewhere" / "a"
+        dir_b = tmp_path / "somewhere_else" / "b"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        (dir_a / "task.json").write_text(result.model_dump_json(), encoding="utf-8")
+        (dir_b / "task.json").write_text(result.model_dump_json(), encoding="utf-8")
+
+        written = atif_emit.emit_trajectories_for_run([dir_a, dir_b])
+
+        assert sorted(written) == sorted([dir_a / "trajectory.json", dir_b / "trajectory.json"])
+        for d in (dir_a, dir_b):
+            parsed = Trajectory.model_validate(json.loads((d / "trajectory.json").read_text(encoding="utf-8")))
+            assert parsed.session_id == "atif_emit_test/default"
+
+    def test_dedupes_repeated_task_dirs(self, tmp_path):
+        result = _result([_turn(messages=[_assistant()])])
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        (task_dir / "task.json").write_text(result.model_dump_json(), encoding="utf-8")
+
+        written = atif_emit.emit_trajectories_for_run([task_dir, task_dir, task_dir])
+
+        assert written == [task_dir / "trajectory.json"]
+
+    def test_missing_task_json_is_skipped_and_logged(self, tmp_path, caplog):
+        missing_dir = tmp_path / "never_wrote"
+        missing_dir.mkdir()
+
+        with caplog.at_level("WARNING"):
+            written = atif_emit.emit_trajectories_for_run([missing_dir])
+
+        assert written == []
+        assert "No task.json" in caplog.text
+
+    def test_unreadable_task_json_is_skipped_and_logged(self, tmp_path, caplog):
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        (bad_dir / "task.json").write_text("not valid json", encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            written = atif_emit.emit_trajectories_for_run([bad_dir])
+
+        assert written == []
+        assert "Could not read" in caplog.text
+
+
 class TestAtomicWriteText:
     def test_writes_and_leaves_no_tmp(self, tmp_path):
         path = tmp_path / "out.json"

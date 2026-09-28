@@ -129,3 +129,177 @@ def test_create_latest_symlink_updates_existing(tmp_path):
     if platform.system() != "Windows":
         assert latest.is_symlink()
         assert latest.resolve() == run_dir2  # Should point to newer run
+
+
+class TestDirTemplates:
+    """``resolve_dir_template`` — the run layout as data, resolved late.
+
+    Rationale: the logging and artifacts directories are independent, so a caller
+    (Harbor) can put them in unrelated parts of the filesystem and no copy is
+    needed between them.
+    """
+
+    def test_defaults_reproduce_the_historical_layout(self):
+        """The whole backward-compatibility claim: an unspecified run must write to
+        byte-identical paths, so the defaults are pinned against the literal layout
+        rather than against build_task_run_dir (which now calls the resolver)."""
+        from coder_eval.path_utils import (
+            DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+            DEFAULT_LOGGING_DIR_TEMPLATE,
+            resolve_dir_template,
+        )
+
+        kwargs = {"run_dir": Path("/runs/2026"), "variant_id": "default", "task_id": "greet"}
+        assert resolve_dir_template(DEFAULT_LOGGING_DIR_TEMPLATE, **kwargs) == Path("/runs/2026/default/greet/00")
+        assert resolve_dir_template(DEFAULT_ARTIFACTS_DIR_TEMPLATE, **kwargs) == Path(
+            "/runs/2026/default/greet/00/artifacts/greet"
+        )
+
+    def test_build_task_run_dir_agrees_with_the_default_logging_template(self):
+        from coder_eval.path_utils import DEFAULT_LOGGING_DIR_TEMPLATE, build_task_run_dir, resolve_dir_template
+
+        for task_id in ("greet", "suite/row-7"):
+            for rep in (0, 3):
+                assert build_task_run_dir(Path("/r"), "v", task_id, replicate_index=rep) == resolve_dir_template(
+                    DEFAULT_LOGGING_DIR_TEMPLATE,
+                    run_dir=Path("/r"),
+                    variant_id="v",
+                    task_id=task_id,
+                    replicate_index=rep,
+                )
+
+    def test_dataset_task_id_containing_a_separator_nests(self):
+        """A dataset-expanded task_id is "<task>/<row>" (task_loader.expand_dataset),
+        and those row ids are validated precisely because they become directories."""
+        from coder_eval.path_utils import DEFAULT_ARTIFACTS_DIR_TEMPLATE, resolve_dir_template
+
+        assert resolve_dir_template(
+            DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+            run_dir=Path("/runs/2026"),
+            variant_id="default",
+            task_id="suite/row-7",
+            replicate_index=3,
+        ) == Path("/runs/2026/default/suite/row-7/03/artifacts/suite/row-7")
+
+    @pytest.mark.parametrize("static", ["/work", "/work/output", "/logs/agent"])
+    def test_a_static_template_is_the_identity_function(self, static):
+        """The load-bearing property: an override with no placeholders resolves to
+        itself down the SAME code path as the default, so nothing anywhere needs an
+        "is this overridden?" branch."""
+        from coder_eval.path_utils import resolve_dir_template
+
+        assert resolve_dir_template(
+            static, run_dir=Path("/runs/2026"), variant_id="v", task_id="t", replicate_index=5
+        ) == Path(static)
+
+    def test_a_windows_run_dir_is_not_mangled_by_backslash_escapes(self):
+        """HAZARD: ``re.sub`` interprets backslashes in the REPLACEMENT, which would
+        corrupt a Windows run_dir (``C:\\runs\\2026`` -> ``\\r`` etc.). This is why the
+        implementation uses ``string.Template``, which inserts values verbatim."""
+        from coder_eval.path_utils import resolve_dir_template
+
+        resolved = resolve_dir_template(
+            "${run_dir}/${task}", run_dir=Path(r"C:\runs\2026"), variant_id="v", task_id="t"
+        )
+        assert "runs" in str(resolved) and "2026" in str(resolved)
+        assert resolved == Path(r"C:\runs\2026") / "t"
+
+    def test_unknown_placeholder_names_the_valid_ones(self):
+        from coder_eval.path_utils import resolve_dir_template
+
+        with pytest.raises(ValueError, match=r"unknown placeholder 'nope'"):
+            resolve_dir_template("${nope}/x", run_dir=Path("/r"), variant_id="v", task_id="t")
+
+    def test_malformed_template_is_a_clean_error(self):
+        from coder_eval.path_utils import resolve_dir_template
+
+        with pytest.raises(ValueError, match="malformed"):
+            resolve_dir_template("${run_dir", run_dir=Path("/r"), variant_id="v", task_id="t")
+
+
+def _prior_result(sandbox_path: str):
+    """A minimal finished-run record, for default_workspace's containment checks."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+
+    return EvaluationResult(
+        task_id="t",
+        task_description="d",
+        variant_id="default",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+        sandbox_path=sandbox_path,
+    )
+
+
+class TestDecoupledLayoutConsumers:
+    """Regressions from decoupling the artifacts dir from run_dir.
+
+    Each of these silently degraded rather than failing loudly, which is why they
+    are pinned here.
+    """
+
+    def test_default_workspace_trusts_an_operator_supplied_artifacts_dir(self, tmp_path):
+        """`_contained` rejects a recorded sandbox_path outside run_dir -- a real
+        security guard, since criteria execute with cwd there. An artifacts dir the
+        OPERATOR resolved from their own template is trusted, so widening the roots
+        (never relaxing the check) is what makes a decoupled layout regradeable."""
+        from coder_eval.orchestration.regrade import default_workspace
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        artifacts = tmp_path / "elsewhere" / "work"
+        artifacts.mkdir(parents=True)
+        prior = _prior_result(str(artifacts))
+
+        assert default_workspace(run_dir, prior, artifacts_dir=artifacts) == artifacts
+
+    def test_default_workspace_still_refuses_an_untrusted_outside_path(self, tmp_path):
+        """The guard must not have been weakened: a recorded sandbox_path outside
+        BOTH roots is still refused.
+
+        The artifacts dir deliberately does NOT exist here, so resolution falls
+        through to the untrusted sandbox_path -- the path the guard protects. (When
+        the artifacts dir DOES exist it is returned directly, since an
+        operator-supplied directory outranks anything the record claims.)"""
+        from coder_eval.orchestration.regrade import RegradeError, default_workspace
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        artifacts = tmp_path / "elsewhere"  # never created
+        rogue = tmp_path / "rogue"
+        rogue.mkdir()
+        prior = _prior_result(str(rogue))
+
+        with pytest.raises(RegradeError, match="resolves outside"):
+            default_workspace(run_dir, prior, artifacts_dir=artifacts)
+
+    def test_aggregate_task_logs_reads_logging_dirs_outside_run_dir(self, tmp_path):
+        """The run_dir glob found nothing when the logging dir was elsewhere, writing
+        an empty experiment.log with no error."""
+        from coder_eval.logging_config import aggregate_task_logs
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        logs = tmp_path / "logs" / "agent"
+        logs.mkdir(parents=True)
+        (logs / "task.log").write_text("hello from the task\n", encoding="utf-8")
+
+        aggregate_task_logs(run_dir, task_dirs=[logs])
+
+        aggregated = (run_dir / "experiment.log").read_text(encoding="utf-8")
+        assert "hello from the task" in aggregated
+        assert "No task logs found" not in aggregated
+
+    def test_config_resolvers_are_the_single_chokepoint(self, tmp_path):
+        """Orchestrator capture target, --resume clearing, and the regrade lookup all
+        go through these, so they cannot disagree about where artifacts live."""
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        cfg = BatchRunConfig(run_dir=tmp_path, artifacts_dir_template="/work")
+        assert cfg.resolve_artifacts_dir("default", "t") == Path("/work")
+        assert cfg.resolve_logging_dir("default", "t") == tmp_path / "default" / "t" / "00"

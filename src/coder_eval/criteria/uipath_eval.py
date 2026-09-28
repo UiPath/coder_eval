@@ -11,10 +11,9 @@ from coder_eval.criteria.base import BaseCriterion, CheckContext, register_crite
 from coder_eval.models import CriterionResult, UiPathEvalCriterion
 
 
-# Detector for "the `uipath` CLI is not available in the sandbox". Sandboxes run
-# on Linux (/bin/sh — dash on Ubuntu), so exit code 127 + "command not found" is
-# the only shell signal we need to recognize. The regex also matches the python
-# ModuleNotFoundError format for tasks that run `python -m uipath`.
+# Detects "the `uipath` CLI is not available in the sandbox". Sandboxes run on
+# Linux, so exit 127 + "command not found" is the only shell signal needed; the
+# regex also matches ModuleNotFoundError for `python -m uipath`.
 _UIPATH_MISSING_PATTERN = re.compile(
     r"\buipath\b.*command not found|no module named ['\"]?uipath['\"]?(?:\s|$)",
     re.IGNORECASE,
@@ -72,15 +71,12 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
 
         if exit_code != 0:
             stderr_text = stderr or ""
-            # Exit code 127 is the POSIX "command not found" signal; the regex
-            # also catches `ModuleNotFoundError` for tasks that invoke
-            # `python -m uipath` instead of the CLI.
+            # 127 is the POSIX "command not found" signal.
             cli_missing = exit_code == 127 or bool(_UIPATH_MISSING_PATTERN.search(stderr_text))
             hint = ""
             if cli_missing:
-                # The host's `[uipath]` extra installs `uipath` into the host
-                # venv; the sandbox runs in its own `uv` environment and must
-                # resolve `uipath` from the task's own deps.
+                # The host extra installs into the HOST venv; the sandbox runs in
+                # its own environment and resolves from the task's own deps.
                 hint = (
                     " — the sandbox could not resolve the `uipath` CLI. "
                     "Ensure the task's Python deps include `uipath` (the in-sandbox "

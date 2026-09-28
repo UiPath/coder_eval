@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 
-# Imports kept TYPE_CHECKING-only (with future annotations) so this module imports
-# nothing from coder_eval at runtime. That keeps the dependency one-way — the
-# plugin loader and models layer import the registry, never the reverse — so there
-# is no import cycle (CodeQL py/cyclic-import).
+# TYPE_CHECKING-only imports, so this module imports nothing from coder_eval at
+# runtime and the dependency edge stays one-way (CodeQL py/cyclic-import).
+# Rationale: .claude/notes/agents.md § Why the registry rejects a re-registration
 if TYPE_CHECKING:
     from coder_eval.agent import Agent
     from coder_eval.models import AgentKind, ApiRoute, BaseAgentConfig
@@ -36,11 +35,9 @@ class AgentRegistration[ConfigT: BaseAgentConfig]:
 class AgentRegistry:
     """Global registry for custom agents.
 
-    Provides a decorator-based registration pattern that decouples agent
-    implementations from the orchestrator factory. Keyed by the agent *kind
-    string* so a built-in :class:`AgentKind` member and a plugin-supplied raw
-    string collide on the same key (``AgentKind`` is a ``StrEnum``): an external
-    plugin can register a brand-new kind that is not an enum member.
+    Keyed by the agent *kind string*, so a built-in :class:`AgentKind` member and
+    a plugin-supplied raw string collide on one key — which is what lets a plugin
+    register a brand-new kind that is not an enum member.
     """
 
     _registry: ClassVar[dict[str, AgentRegistration[Any]]] = {}
@@ -68,11 +65,10 @@ class AgentRegistry:
         def decorator(agent_cls: type[AgentClassT]) -> type[AgentClassT]:
             kind = str(agent_kind)
             existing = cls._registry.get(kind)
-            # Re-registering the SAME classes is legitimate (idempotent built-in
-            # reload via load_plugins(force=True)). Re-registering a kind with a
-            # DIFFERENT implementation is a silent shadow: which agent runs would
-            # depend on entry-point discovery order, which isn't stable across
-            # environments — a reproducibility hole. Reject it loudly.
+            # Re-registering the SAME classes is legitimate (an idempotent
+            # built-in reload); a DIFFERENT implementation for the same kind is a
+            # silent shadow, so it is rejected loudly.
+            # Rationale: .claude/notes/agents.md § Why the registry rejects a re-registration
             if existing is not None and (existing.agent_class, existing.config_class) != (agent_cls, config_class):
                 raise ValueError(
                     f"Agent kind {kind!r} is already registered to "
@@ -136,11 +132,9 @@ def create_agent(
     Returns:
         An instance of the requested agent type
 
-    Plugins must already be loaded: callers reach a config object through
-    ``parse_agent_config`` (which loads plugins), and the orchestrator / CLI also
-    load them up-front. ``create_agent`` deliberately does NOT import
-    ``coder_eval.plugins`` itself, so ``plugins`` -> ``agents.registry`` stays a
-    one-way edge (no import cycle).
+    Plugins must ALREADY be loaded: this deliberately does not import
+    ``coder_eval.plugins`` itself, so the edge stays one-way. Callers reach a
+    config through ``parse_agent_config``, which loads them.
 
     Raises:
         ValueError: If the agent_kind is not registered

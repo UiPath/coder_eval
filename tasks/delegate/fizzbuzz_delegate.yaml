@@ -1,0 +1,24 @@
+task_id: "fizzbuzz_delegate"
+description: "Classic FizzBuzz implementation, run through the Delegate agent."
+initial_prompt: "Write a Python script named fizzbuzz.py that prints the numbers from 1 to 30, one per line. For multiples of 3 print 'Fizz' instead of the number, for multiples of 5 print 'Buzz', and for multiples of both print 'FizzBuzz'. Then run it with: python fizzbuzz.py"
+tags: [smoke, basic, pure-python, delegate]
+
+run_limits:
+  expected_turns: 5
+  task_timeout: 600
+
+agent:
+  type: "delegate"
+  model: "virtuoso-1-5"
+  enable_computer_use: false
+
+success_criteria:
+  - type: "file_exists"
+    path: "fizzbuzz.py"
+    description: "The file fizzbuzz.py must be created."
+  - type: "run_command"
+    command: "python fizzbuzz.py"
+    timeout: 10
+    expected_stdout: "FizzBuzz"
+    stdout_match: "contains"
+    description: "Output must contain FizzBuzz for multiples of 15."

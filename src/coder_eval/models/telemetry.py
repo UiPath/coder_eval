@@ -325,19 +325,12 @@ class ReconciliationMessage(BaseModel):
     """A synthetic transcript entry carrying tokens the agent billed but never
     surfaced as a streamed generation.
 
-    The authoritative turn total (Claude's ``ResultMessage.model_usage``, Codex's
-    thread total + folded sub-agent tokens) is consistently LARGER than the sum
-    of the per-``AssistantMessage`` token buckets, for reasons that are
-    architectural, not bugs: a fixed prompt slice (~512 input tokens on Claude)
-    is billed but rides on no SDK-emitted message, and sub-agent input/cache is
-    only partially bubbled into the parent stream. Rather than fabricate
-    per-generation numbers (which would match no real call), the residual is
-    booked once, explicitly, as this entry — so that summing the transcript's
-    token buckets EXACTLY reproduces the authoritative ``token_usage`` for the
-    turn. Consumers that sum the stream (the evalboard) therefore reconcile to
-    the bill without a separate aggregate; this entry is the visible "missing
-    tokens" line. Carries no cost (cost stays on the authoritative aggregate) and
-    is never an LLM generation — it is excluded from generation/turn counts.
+    Booking the residual once, explicitly, is what makes summing the transcript's
+    token buckets EXACTLY reproduce the authoritative ``token_usage`` for the turn.
+    Carries no cost and is never an LLM generation, so it is excluded from
+    generation and turn counts.
+
+    Rationale: .claude/notes/agents.md § Token accounting and the reconciliation message
     """
 
     role: Literal["reconciliation"] = "reconciliation"
@@ -380,11 +373,9 @@ class CommandTelemetry(BaseModel):
         ),
     )
 
-    # Timing: generation_completed_at is when Claude finished emitting the
-    # tool_use block; execution_* bracket the actual tool run. `timestamp`
-    # equals generation_completed_at and `duration_ms` equals
-    # execution_completed_at - execution_started_at; both are retained for
-    # downstream consumers that index on the original field names.
+    # generation_completed_at is when the tool_use block finished emitting;
+    # execution_* bracket the run. `timestamp` and `duration_ms` are retained for
+    # consumers that index on the original field names.
     timestamp: datetime = Field(description="Equal to generation_completed_at; when the tool_use block arrived.")
     duration_ms: float | None = Field(
         default=None,
@@ -439,34 +430,24 @@ class CommandTelemetry(BaseModel):
     def result_tokens(self) -> int:
         """Approximate token size of the tool result the model received.
 
-        Derived from the untruncated ``result_summary`` content (≈4 chars/token,
-        matching the evalboard heuristic), so it is a DIRECT, cache-independent
-        measure of "tool output size" — available identically whether prompt
-        caching was on or off. The cost simulator uses this instead of inferring
-        result size from prompt-cache growth (which is unavailable when caching is
-        disabled). Approximate, not the API's exact tokenizer count, but
-        deterministic and always present. 0 when the tool returned no content.
+        Derived from the UNTRUNCATED ``result_summary`` (~4 chars/token), so it is a
+        direct, cache-independent measure of tool output size. Approximate, but
+        deterministic and always present; 0 when the tool returned no content.
 
-        This measure is only meaningful while ``result_summary`` stays whole: an
-        agent that truncates a command's output before recording it (as the Codex
-        agent once did with ``output[:100]``) silently under-reports that command's
-        result. Lint rule CE043 forbids truncating captured command output
-        (stdout/stderr) in the agents, so the "untruncated" contract holds for
-        command results across agents. (One-line summaries of non-command tool
-        items — e.g. collab/MCP status lines built by ``_summarize_tool_item`` —
-        are intentionally brief and out of scope.) Trim for DISPLAY in the
-        renderers/reports instead.
+        Only meaningful while ``result_summary`` stays whole -- lint rule CE043
+        forbids truncating captured command output. Trim for DISPLAY in the
+        renderers instead.
+
+        Rationale: .claude/notes/agents.md § The result_tokens measure and CE043
         """
         if not self.result_summary:
             return 0
         return -(-len(self.result_summary) // 4)  # ceil(len / 4)
 
 
-#: One entry in a turn's per-message transcript, discriminated on ``role``.
-#: ``ReconciliationMessage`` is the synthetic "missing tokens" line that makes the
-#: transcript's token buckets sum to the authoritative turn total. Defined once
-#: here and reused by ``TurnRecord.messages`` and ``AgentEndEvent.messages`` so the
-#: list element type is identical everywhere (avoids list-invariance friction).
+#: One entry in a turn's per-message transcript, discriminated on ``role``. Defined
+#: once here and reused by ``TurnRecord.messages`` and ``AgentEndEvent.messages`` so
+#: the element type is identical everywhere (avoids list-invariance friction).
 TranscriptMessage = Annotated[UserMessage | AssistantMessage | ReconciliationMessage, Discriminator("role")]
 
 

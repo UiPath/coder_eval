@@ -59,10 +59,9 @@ def append_order_of(field_info: FieldInfo) -> AppendOrder:
     extra = field_info.json_schema_extra
     if isinstance(extra, dict) and APPEND_ORDER_KEY in extra:
         order = extra[APPEND_ORDER_KEY]
-        # The value is written only by MergeField (its `append_order` param is
-        # typed AppendOrder), but guard a hand-written
-        # `Field(json_schema_extra={...})` with a bogus value so it fails loud
-        # here instead of silently mis-ordering an append.
+        # Written only by MergeField, but guard a hand-written
+        # `Field(json_schema_extra={...})` so a bogus value fails loud here rather
+        # than silently mis-ordering an append.
         if order not in get_args(AppendOrder):
             raise ValueError(f"invalid append order {order!r}; expected one of {get_args(AppendOrder)}")
         return order  # type: ignore[return-value]  # validated against AppendOrder above
@@ -74,11 +73,9 @@ def merge_strategy_of(field_info: FieldInfo) -> MergeStrategy:
     extra = field_info.json_schema_extra
     if isinstance(extra, dict) and MERGE_STRATEGY_KEY in extra:
         strategy = extra[MERGE_STRATEGY_KEY]
-        # The value is written only by MergeField (its `strategy` param is typed
-        # MergeStrategy) and CE014 enforces that every list field declares one,
-        # but guard a hand-written `Field(json_schema_extra={...})` with a bogus
-        # value so it fails loud here instead of silently falling through to
-        # "replace" in the merge engine.
+        # Written only by MergeField, and CE014 enforces that every list field
+        # declares one -- but guard a hand-written value so it fails loud here
+        # rather than falling through to "replace" in the merge engine.
         if strategy not in get_args(MergeStrategy):
             raise ValueError(f"invalid merge strategy {strategy!r}; expected one of {get_args(MergeStrategy)}")
         return strategy  # type: ignore[return-value]  # validated against MergeStrategy above

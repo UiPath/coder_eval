@@ -500,11 +500,10 @@ class TestRenderedSource:
 
     @pytest.mark.parametrize("module", SIDECAR_MODULES)
     def test_the_sidecar_does_not_execute_anything_either(self, module):
-        """Restores coverage the sidecar refactor silently dropped.
+        """The sidecar modules reach no subprocess either.
 
-        While `argv_match.py` was SPLICED into the shim,
-        `test_rendered_shim_does_not_execute_anything` scanned its body too. As a
-        separate file it is no longer in that scan, and CE057 cannot stand in:
+        `test_rendered_shim_does_not_execute_anything` scans only the rendered
+        shim, not the sidecar files, and CE057 cannot stand in:
         `os` is on its STDLIB_ALLOWED (the matcher genuinely needs it), so
         `os.system(...)` in the sidecar would pass lint, typecheck, and ship into
         every sandbox. "It stubs a tool; it does not proxy one" is a documented
@@ -864,13 +863,12 @@ class TestSidecarModule:
             sandbox.cleanup(preserve=False)
 
     def test_an_unevaluable_response_rule_is_rejected_at_load(self, monkeypatch):
-        """The authoring fault that `rule_error` used to escalate for, caught where
-        the agent cannot participate.
+        """An unevaluable response rule is rejected at load, where the agent cannot participate.
 
-        `cli_called` can only score a `rule_error` 0.0 -- the log is agent-writable,
-        so a fault there cannot be attributed to the task author. Attribution has to
-        happen before a sandbox exists, so `RecordedCli` runs the real matcher over
-        every rule at load time.
+        Pins: `RecordedCli` runs the real matcher over every rule at load time, so an
+        authoring fault is a validation error before a sandbox exists.
+
+        Rationale: .claude/notes/contracts.md § The five refuse-to-score paths are uniform at a gating 0.0
         """
         from coder_eval.models import cli_match
 

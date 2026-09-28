@@ -1179,7 +1179,7 @@ def test_aggregate_command_statistics_nested_layout(tmp_path):
 
 
 def test_report_generator_private_methods_used_by_experiment_reports():
-    """Verify all private methods called by reports_experiment.py exist on ReportGenerator."""
+    """Verify all private methods called by reports/experiment.py exist on ReportGenerator."""
     required_methods = [
         "_generate_generation_metrics_section",
         "_generate_token_usage_section",
@@ -1386,9 +1386,9 @@ class TestAnUnmeasuredRunPublishesNoRate:
 class TestTheGenerationMetricsBuckets:
     """The markdown table's four bucket columns, READ off the row projection.
 
-    `reports.py` neither sums nor validates anything here: the numbers are
-    computed once by `reports_stats.turn_time_buckets` and carried as
-    task-level keys by `reports_experiment.eval_result_to_task_dict`. The rows
+    `reports/markdown.py` neither sums nor validates anything here: the numbers are
+    computed once by `result_metrics.turn_time_buckets` and carried as
+    task-level keys by `run_record.eval_result_to_task_dict`. The rows
     below are that projection's shape, not a `TurnRecord`.
     """
 
@@ -1476,3 +1476,62 @@ class TestThePerformanceSectionRendersAMeasuredZero:
     def test_an_ordinary_average_is_unchanged(self):
         lines = self._section(150.0, total=450.0)
         assert any("**Average Command Time**: 150.0ms" in line for line in lines)
+
+
+class TestSlowestCommandsTruncation:
+    """The markdown renderer truncates `parameters` at SLOW_PARAMS_PREVIEW_CHARS.
+
+    Asserted against the CONSTANT, not the literal 50 it used to hardcode, so the
+    test still pins the behaviour if the constant moves. reports/html.py already
+    read the constant; reports/markdown.py — the module that DEFINES it — did not.
+    """
+
+    @staticmethod
+    def _rows(param_len: int) -> list[str]:
+        from coder_eval.models import CommandStatistics, SlowestCommandInfo
+        from coder_eval.reports import ReportGenerator
+
+        # `parameters` renders via str(dict), so pad the VALUE until the rendered
+        # string reaches the wanted length rather than guessing the dict overhead.
+        overhead = len(str({"cmd": ""}))
+        stats = CommandStatistics(
+            total_commands=1,
+            successful_commands=1,
+            slowest_commands=[
+                SlowestCommandInfo(tool="Bash", duration_ms=1234.0, parameters={"cmd": "x" * (param_len - overhead)})
+            ],
+        )
+        return ReportGenerator._generate_command_statistics_section(stats)
+
+    def test_longer_than_the_cap_is_truncated_with_an_ellipsis(self):
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        row = next(line for line in self._rows(SLOW_PARAMS_PREVIEW_CHARS + 40) if line.startswith("| Bash |"))
+        assert "..." in row
+        params_cell = row.split("|")[3].strip()
+        assert len(params_cell) == SLOW_PARAMS_PREVIEW_CHARS + len("...")
+
+    def test_exactly_the_cap_is_not_truncated(self):
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        row = next(line for line in self._rows(SLOW_PARAMS_PREVIEW_CHARS) if line.startswith("| Bash |"))
+        assert "..." not in row
+        assert len(row.split("|")[3].strip()) == SLOW_PARAMS_PREVIEW_CHARS
+
+
+class TestReportsDoesNotImportCriteria:
+    """`reports/markdown.py`'s `criteria` import must stay function-local.
+
+    `coder_eval/criteria/__init__.py` runs pkgutil auto-discovery with registry
+    side effects; hoisting it would put full criterion discovery on the import
+    path of every `import coder_eval.reports`. Phase 2 hoisted 18 other locals
+    and deliberately left this one — this test is what keeps that decision true.
+    """
+
+    def test_importing_reports_does_not_pull_in_criteria(self):
+        import subprocess
+        import sys
+
+        code = "import coder_eval.reports, sys; print('coder_eval.criteria' in sys.modules)"
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        assert out.stdout.strip() == "False", "coder_eval.reports must not import coder_eval.criteria at module level"

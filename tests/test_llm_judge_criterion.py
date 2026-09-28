@@ -807,8 +807,8 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
 def test_judge_empty_rationale_returns_judge_result_with_error(sandbox: Sandbox) -> None:
     """A model that emits whitespace-only rationale → JudgeCriterionResult(error=...).
 
-    Locks in the ValidationError → JudgeCriterionResult(score=0.0) chain —
-    the pre-fix code would silently emit ``rationale: `` (blank) in details.
+    Pins the ValidationError → JudgeCriterionResult(score=0.0) chain, so a
+    blank ``rationale: `` never reaches details silently.
     """
     from coder_eval.models import JudgeCriterionResult
 

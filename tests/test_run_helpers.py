@@ -30,8 +30,8 @@ def _names(paths):
 
 
 class TestRecursiveGlob:
-    # The published snippets all use `**`, and the lint rule that used to ban it
-    # was removed in favour of this promise. A switch to `glob.glob`, which is
+    # The published snippets all use `**`, and this test is the promise that it
+    # recurses. A switch to `glob.glob`, which is
     # non-recursive by default, would silently drop the top-level task.
     def test_double_star_matches_both_depths(self, tasks_tree):
         assert _names(expand_task_files([Path("tasks/**/*.yaml")])) == [

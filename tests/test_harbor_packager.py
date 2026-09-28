@@ -17,29 +17,11 @@ import yaml
 
 from coder_eval.harbor import packager
 from coder_eval.harbor.packager import (
-    DEFAULT_WORKDIR,
     CriteriaNotExportableError,
     TaskNotExportableError,
     export_task,
 )
 from coder_eval.models import TaskDefinition
-
-
-_REAL_INSPECT_IMAGE_WORKDIR = packager._inspect_image_workdir
-
-
-@pytest.fixture(autouse=True)
-def _no_real_docker_inspection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep this module hermetic: never let ``export_task`` shell out to a real
-    ``docker image inspect``, whose answer depends on what happens to be
-    cached on the machine running the tests (an image literally named
-    ``byod-custom-image:0.1.0`` -- this file's own placeholder BYOD image
-    name -- built by an unrelated docker-integration test elsewhere in the
-    suite answered ``/work`` here once, silently flipping this file's
-    DEFAULT_WORKDIR assertions). Tests that care about the inspection path
-    itself override this via monkeypatch locally.
-    """
-    monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: None)
 
 
 _BASE_TASK: dict[str, object] = {
@@ -78,7 +60,7 @@ class TestStructuralRefusals:
             tmp_path,
             {
                 "success_criteria": [
-                    {"type": "skill_triggered", "expected_skill": "s", "skill_name": "s", "description": "d"},
+                    {"type": "cli_called", "verb": "v", "description": "d"},
                 ]
             },
         )
@@ -87,12 +69,27 @@ class TestStructuralRefusals:
             export_task(task_file, out_dir)
         assert not out_dir.exists(), "a refused export must not leave a partial directory behind"
 
-    def test_credentials_criteria_can_be_allowed_explicitly(self, tmp_path: Path) -> None:
+    def test_trajectory_criteria_now_export_cleanly(self, tmp_path: Path) -> None:
+        """NEEDS_TRAJECTORY is no longer blocking -- test.sh always wires /logs/agent/trajectory.json."""
+        task_file = _write_task(
+            tmp_path,
+            {
+                "success_criteria": [
+                    {"type": "skill_triggered", "expected_skill": "s", "skill_name": "s", "description": "d"},
+                ]
+            },
+        )
+        result = export_task(task_file, tmp_path / "out")
+        assert result.out_dir.exists()
+
+    def test_credentials_criteria_export_cleanly(self, tmp_path: Path) -> None:
+        """NEEDS_CREDENTIALS never blocks -- the operator is assumed to provision
+        model access inside the verifier container themselves."""
         task_file = _write_task(
             tmp_path,
             {"success_criteria": [{"type": "llm_judge", "prompt": "grade it", "description": "d"}]},
         )
-        result = export_task(task_file, tmp_path / "out", allow_credentials=True)
+        result = export_task(task_file, tmp_path / "out")
         assert result.out_dir.exists()
 
 
@@ -123,17 +120,27 @@ class TestEmittedDirectoryStructure:
         emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
         assert emitted["initial_prompt"] == "Write 'hello' to greeting.txt."  # the real prompt lives here instead
 
-    def test_test_sh_is_executable_and_references_the_resolved_workdir(self, tmp_path: Path) -> None:
+    def test_test_sh_is_executable_and_grades_the_run_directory(self, tmp_path: Path) -> None:
+        """test.sh must be workdir-agnostic: it grades `/logs/agent` as a run
+        directory with `--workspace "$(pwd)"` naming the actual workspace --
+        CoderEvalAgent's `--artifacts-dir "$(pwd)"` (harbor/agent.py) makes the
+        workspace IS the artifacts dir, so capture_as's self-referential guard
+        never copies it under /logs/agent/artifacts/, so `--workspace` must
+        point there explicitly (see packager.py's `_write_environment`)."""
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
-        result = export_task(task_file, out_dir)
+        export_task(task_file, out_dir)
 
         test_sh = out_dir / "tests" / "test.sh"
         if os.name != "nt":  # NTFS has no chmod executable bit
             assert test_sh.stat().st_mode & 0o111, "test.sh must be executable"
         content = test_sh.read_text(encoding="utf-8")
-        assert f'coder-eval evaluate /tests/task.yaml "{result.workdir}"' in content
+        assert (
+            'coder-eval evaluate /tests/task.yaml /logs/agent --workspace "$(pwd)" --in-place '
+            + "--run-dir /logs/verifier"
+            in content
+        )
         assert "coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json" in content
 
     def test_task_toml_parses_and_carries_the_mapped_fields(self, tmp_path: Path) -> None:
@@ -145,11 +152,17 @@ class TestEmittedDirectoryStructure:
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
         assert doc["task"]["name"] == "coder-eval/greet"
         assert doc["task"]["keywords"] == ["smoke"]
-        assert "docker_image" not in doc["environment"]  # always built from environment/Dockerfile now
+        # No dockerfile_path -- no environment/Dockerfile at all; task.toml points Harbor
+        # straight at the pre-built image instead (see _write_environment).
+        assert not (out_dir / "environment" / "Dockerfile").exists()
+        assert doc["environment"]["docker_image"] == "byod-custom-image:0.1.0"
         assert doc["environment"]["memory_mb"] == 2048
         assert doc["environment"]["cpus"] == 2
         assert doc["environment"]["network_mode"] == "no-network"
-        assert doc["environment"]["workdir"] == DEFAULT_WORKDIR
+        # No sandbox.docker.working_dir override and no docker inspection at export
+        # time (removed -- see packager.py's _write_environment) -- `workdir` is
+        # omitted entirely so Harbor's `docker exec` uses the image's own WORKDIR.
+        assert "workdir" not in doc["environment"]
 
     def test_network_bridge_maps_to_public(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"network": "bridge"}}})
@@ -160,7 +173,10 @@ class TestEmittedDirectoryStructure:
 
 
 class TestVerifierTaskYaml:
-    """tests/task.yaml must never set agent: {type: none} — see packager.py's module docstring."""
+    """tests/task.yaml must never set agent: {type: none}.
+
+    Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+    """
 
     def test_never_sets_agent_type_none(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
@@ -181,10 +197,12 @@ class TestVerifierTaskYaml:
         assert len(reloaded.success_criteria) == 2
 
     def test_reference_comparison_survives_the_none_agent_trap(self, tmp_path: Path) -> None:
-        """The corrected design: a placeholder real agent type unblocks reference_comparison.
+        """A placeholder real agent type unblocks reference_comparison.
 
         If tests/task.yaml set agent: {type: none} instead, this would raise at
-        TaskDefinition.model_validate — see the module docstring for why.
+        TaskDefinition.model_validate.
+
+        Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
         """
         task_file = _write_task(
             tmp_path,
@@ -228,8 +246,9 @@ class TestAgentPhaseTaskYaml:
         export_task(task_file, out_dir)
 
         assert (out_dir / "environment" / "task.yaml").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
 
     def test_carries_the_real_agent_config_but_no_real_criteria(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path, {"agent": {"type": "claude-code", "model": "claude-opus-5"}})
@@ -263,7 +282,7 @@ class TestAgentPhaseTaskYaml:
         reloaded = TaskDefinition.model_validate(emitted)  # must not raise
         assert reloaded.task_id == "greet"
 
-    def test_prebuilt_image_with_no_dockerfile_path_gets_one_synthesized(self, tmp_path: Path) -> None:
+    def test_prebuilt_image_with_no_dockerfile_path_gets_no_dockerfile_at_all(self, tmp_path: Path) -> None:
         task_file = _write_task(
             tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "byod-custom-image:0.1.0"}}}
         )
@@ -272,17 +291,27 @@ class TestAgentPhaseTaskYaml:
         result = export_task(task_file, out_dir)
 
         assert (out_dir / "environment" / "task.yaml").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert dockerfile_text.startswith("FROM byod-custom-image:0.1.0\n")
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        # No dockerfile_path -- no environment/Dockerfile written at all; task.toml's
+        # [environment].docker_image points Harbor at the image directly instead.
+        assert not (out_dir / "environment" / "Dockerfile").exists()
+        doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
+        assert doc["environment"]["docker_image"] == "byod-custom-image:0.1.0"
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
         assert not any("No Dockerfile to bake" in w for w in result.warnings)
 
 
 class TestDockerfileWorkdirResolution:
-    def test_dockerfile_with_no_workdir_gets_one_appended_and_warned(self, tmp_path: Path) -> None:
+    def test_dockerfile_with_no_workdir_is_left_unset_and_untouched(self, tmp_path: Path) -> None:
+        """No WORKDIR line is fabricated and appended anymore: the built image simply
+        inherits its base image's own default. CoderEvalAgent's own `--workspace-dir
+        "$(pwd)"` finds the real cwd at run time regardless (see packager.py's
+        `_write_environment`); the verifier phase doesn't depend on it at all."""
+        original = "FROM ubuntu:24.04\nRUN apt-get update\n"
         env_dir = tmp_path / "environment"
         env_dir.mkdir()
-        (env_dir / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN apt-get update\n", encoding="utf-8")
+        (env_dir / "Dockerfile").write_text(original, encoding="utf-8")
         task_file = _write_task(
             tmp_path,
             {"sandbox": {"driver": "docker", "docker": {"dockerfile_path": "environment/Dockerfile"}}},
@@ -291,10 +320,17 @@ class TestDockerfileWorkdirResolution:
 
         result = export_task(task_file, out_dir)
 
-        assert result.workdir == DEFAULT_WORKDIR
+        assert result.workdir is None
         dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert f"WORKDIR {DEFAULT_WORKDIR}" in dockerfile_text
-        assert any("declared no WORKDIR" in w for w in result.warnings)
+        assert dockerfile_text == original
+        assert not any("declared no WORKDIR" in w for w in result.warnings)
+        doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
+        assert "workdir" not in doc["environment"]
+        # `[environment].workdir` stays unset (the image's own WORKDIR drives
+        # `docker exec -w`), but the artifacts source still falls back to /work
+        # so Harbor has something to snapshot -- a wrong source there is only a
+        # best-effort collection miss, never an exit 127.
+        assert doc["artifacts"] == ["/work"]
 
     def test_dockerfile_with_an_existing_workdir_is_respected_and_not_touched(self, tmp_path: Path) -> None:
         env_dir = tmp_path / "environment"
@@ -311,15 +347,30 @@ class TestDockerfileWorkdirResolution:
 
         assert result.workdir == "/workspace"
         dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        # The WORKDIR-bearing content is untouched; only the task.yaml COPY
-        # line (baked in for a CoderEvalAgent embed, see agent_paths.py) is appended.
+        # The WORKDIR-bearing content is untouched -- task.yaml is bind-mounted in via
+        # docker-compose.yaml (see agent_paths.py), not COPY'd, so the Dockerfile gets
+        # no new lines here at all.
         assert dockerfile_text.startswith(original)
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
         assert not any("declared no WORKDIR" in w for w in result.warnings)
-        # test.sh and task.toml must agree with the same resolved workdir.
-        assert '"/workspace"' in (out_dir / "tests" / "test.sh").read_text(encoding="utf-8")
+        # test.sh no longer needs to agree on a literal value -- it grades
+        # /logs/agent as a run directory -- but task.toml still surfaces the
+        # Dockerfile's own explicit WORKDIR so the AGENT phase's `docker exec
+        # -w` (and CoderEvalAgent's own `--workspace-dir "$(pwd)"`) pin the
+        # same path deliberately.
+        assert "coder-eval evaluate /tests/task.yaml /logs/agent" in (out_dir / "tests" / "test.sh").read_text(
+            encoding="utf-8"
+        )
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
         assert doc["environment"]["workdir"] == "/workspace"
+        # Declared as a top-level Harbor artifact so its own collection pass
+        # (SingleStepTrial._collect_artifacts, before the verifier runs and
+        # before the container is torn down) snapshots the agent's in-place
+        # workspace to <trial>/artifacts/workspace/ on the host -- otherwise
+        # nothing the agent wrote is ever visible once the container is gone.
+        assert doc["artifacts"] == ["/workspace"]
 
     def test_docker_working_dir_override_wins_over_the_dockerfile(self, tmp_path: Path) -> None:
         env_dir = tmp_path / "environment"
@@ -375,14 +426,7 @@ class TestCoderEvalAgentBaseImageWarning:
         result = export_task(task_file, tmp_path / "out")
         assert any("coder-eval-agent" in w for w in result.warnings)
 
-    def test_no_warning_when_prebuilt_image_names_coder_eval_agent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Give inspection a real-looking answer -- a None here would ALSO warn
-        # ("Could not determine ...'s own WORKDIR"), whose text incidentally
-        # contains "coder-eval-agent" (the image name), which is not the
-        # warning this test is checking for.
-        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/work")
+    def test_no_warning_when_prebuilt_image_names_coder_eval_agent(self, tmp_path: Path) -> None:
         task_file = _write_task(
             tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "coder-eval-agent:0.12.0"}}}
         )
@@ -391,20 +435,32 @@ class TestCoderEvalAgentBaseImageWarning:
 
 
 class TestPrePostRunWarnings:
-    def test_pre_run_and_post_run_are_warned_not_silently_dropped(self, tmp_path: Path) -> None:
-        task_file = _write_task(
-            tmp_path,
-            {
-                "pre_run": [{"command": "echo setup"}],
-                "post_run": [{"command": "echo cleanup"}],
-            },
-        )
+    def test_pre_run_is_translated_into_the_agent_phase_task_yaml(self, tmp_path: Path) -> None:
+        """`pre_run` runs inside the sandbox before the agent starts (PreRunCommand's own
+        docstring) -- exactly the phase `coder-eval execute` still performs for the
+        CoderEvalAgent embed (it shares `run`'s pipeline minus grading), so unlike
+        `post_run` this is a real translation, not a dropped/warned-about field."""
+        task_file = _write_task(tmp_path, {"pre_run": [{"command": "echo setup", "timeout": 15}]})
         out_dir = tmp_path / "out"
 
         result = export_task(task_file, out_dir)
 
-        assert any("pre_run" in w for w in result.warnings)
+        assert not any("pre_run" in w for w in result.warnings)
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        assert emitted["pre_run"] == [{"command": "echo setup", "timeout": 15, "fail_on_error": True}]
+
+    def test_post_run_is_warned_not_silently_dropped(self, tmp_path: Path) -> None:
+        """`post_run` belongs to the GRADING phase (orchestrator.py's own comment),
+        which `coder-eval execute` never runs at all -- there is no phase left for it
+        to execute in, so (unlike `pre_run`) it stays untranslated and warned."""
+        task_file = _write_task(tmp_path, {"post_run": [{"command": "echo cleanup"}]})
+        out_dir = tmp_path / "out"
+
+        result = export_task(task_file, out_dir)
+
         assert any("post_run" in w for w in result.warnings)
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        assert "post_run" not in emitted
 
     def test_no_pre_or_post_run_produces_no_such_warnings(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
@@ -412,76 +468,66 @@ class TestPrePostRunWarnings:
         assert not any("pre_run" in w or "post_run" in w for w in result.warnings)
 
 
-class TestPrebuiltImageWorkdirInspection:
+class TestPrebuiltImageWorkdir:
     """A pre-built (no ``dockerfile_path``) image has no Dockerfile ``WORKDIR`` line
-    to read, so the packager shells out to ``docker image inspect`` for it -- a
-    real bug this closes: defaulting to ``/app`` unconditionally exported a task
-    that failed at Harbor verify time with exit 127, because Harbor's
-    ``docker exec -w`` (unlike ``docker run -w``) refuses to chdir into a path
-    that doesn't already exist in the image (confirmed live against
-    ``coder-eval-agent:latest``, whose real WORKDIR is ``/work``).
+    to read, and v1 no longer shells out to ``docker image inspect`` to guess one
+    either -- a real bug that closed: an export-time snapshot (or its failure mode,
+    defaulting to a fabricated ``/app``) could go stale against whatever image the
+    trial actually ran under, and Harbor's ``docker exec -w`` (unlike ``docker run
+    -w``) refuses to chdir into a path that doesn't already exist in the image
+    (confirmed live). Leaving ``workdir`` unset unless the task pins one lets
+    Harbor's ``docker exec`` run with no ``-w`` at all, so the container's OWN
+    current ``WORKDIR`` always decides -- see packager.py's ``_write_environment``.
     """
 
-    def test_uses_the_inspected_workdir_when_docker_reports_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/work")
+    def test_no_working_dir_override_leaves_workdir_unset(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)  # _BASE_TASK's image is byod-custom-image:0.1.0
 
         result = export_task(task_file, tmp_path / "out")
 
-        assert result.workdir == "/work"
-        assert not any("Could not determine" in w for w in result.warnings)
+        assert result.workdir is None
+        assert not any("WORKDIR" in w or "workdir" in w for w in result.warnings)
 
-    def test_falls_back_to_default_and_warns_when_inspection_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: None)
-        task_file = _write_task(tmp_path)
-
-        result = export_task(task_file, tmp_path / "out")
-
-        assert result.workdir == DEFAULT_WORKDIR
-        assert any("Could not determine" in w and "byod-custom-image:0.1.0" in w for w in result.warnings)
-
-    def test_explicit_working_dir_wins_over_inspection(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/from-inspection")
+    def test_explicit_working_dir_is_used_verbatim(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/explicit"}}})
 
         result = export_task(task_file, tmp_path / "out")
 
         assert result.workdir == "/explicit"
+        doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
+        assert doc["environment"]["workdir"] == "/explicit"
 
-    def test_inspect_image_workdir_parses_real_subprocess_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Exercise the real (un-mocked) helper against a stubbed ``subprocess.run``.
+    def test_working_dir_rejects_the_mount_root(self, tmp_path: Path) -> None:
+        """/work is the framework's mount ROOT (input/output/references/task_dir all
+        live under it) -- it stays reserved even though it's also
+        coder-eval-agent:latest's declared image WORKDIR, so a task can't put the
+        agent's graded workspace there and inherit the reference solution."""
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/work"}}})
+        with pytest.raises(ValueError, match="framework-reserved container path"):
+            export_task(task_file, tmp_path / "out")
 
-        The module-wide autouse fixture stubs out ``_inspect_image_workdir``
-        itself for hermeticity, so this restores the real function first --
-        it is the one thing here under test.
-        """
-        monkeypatch.setattr(packager, "_inspect_image_workdir", _REAL_INSPECT_IMAGE_WORKDIR)
+    def test_artifacts_defaults_to_container_work_dir(self, tmp_path: Path) -> None:
+        """No task should have to restate /work: it is the WORKDIR coder-eval's own
+        image bakes, so the artifacts source defaults to it. `[environment].workdir`
+        stays UNSET though -- that one drives `docker exec -w` and a wrong guess is
+        a hard exit 127, whereas a wrong artifacts source is only a collection miss."""
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {}}})
 
-        class _FakeResult:
-            returncode = 0
-            stdout = "/work\n"
+        result = export_task(task_file, tmp_path / "out")
 
-        def _fake_run(cmd, **kwargs):
-            assert cmd[:3] == ["docker", "image", "inspect"]
-            return _FakeResult()
+        assert result.workdir is None
+        doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
+        assert doc["artifacts"] == ["/work"]
+        assert "workdir" not in doc["environment"]
 
-        monkeypatch.setattr(packager.subprocess, "run", _fake_run)
-        assert packager._inspect_image_workdir("some-image:tag") == "/work"
+    def test_working_dir_overrides_the_default_artifacts_source(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/app"}}})
 
-    def test_inspect_image_workdir_returns_none_when_docker_binary_is_missing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(packager, "_inspect_image_workdir", _REAL_INSPECT_IMAGE_WORKDIR)
+        out_dir = export_task(task_file, tmp_path / "out").out_dir
+        doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
 
-        def _raise(cmd, **kwargs):
-            raise FileNotFoundError("docker not found")
-
-        monkeypatch.setattr(packager.subprocess, "run", _raise)
-        assert packager._inspect_image_workdir("some-image:tag") is None
+        assert doc["artifacts"] == ["/app"]
+        assert doc["environment"]["workdir"] == "/app"
 
 
 class TestEnvPassthroughSections:
@@ -541,8 +587,8 @@ class TestEnvPassthroughSections:
 
 
 class TestTemplateSourcesCopy:
-    """``TemplateDirSource`` directories must be copied into the export -- otherwise
-    ``environment/task.yaml`` would name an absolute HOST path (see
+    """``TemplateDirSource`` directories must be bind-mounted into the export --
+    otherwise ``environment/task.yaml`` would name an absolute HOST path (see
     ``task_loader.resolve_template_source_paths``) that does not exist inside the
     container the ``CoderEvalAgent`` embed actually runs in.
     """
@@ -553,7 +599,7 @@ class TestTemplateSourcesCopy:
         (template_dir / "main.py").write_text("def stub(): ...\n", encoding="utf-8")
         return template_dir
 
-    def test_template_dir_is_copied_and_path_rewritten(self, tmp_path: Path) -> None:
+    def test_template_dir_is_mounted_read_only_at_its_own_path(self, tmp_path: Path) -> None:
         template_dir = self._write_template_dir(tmp_path)
         task_file = _write_task(
             tmp_path,
@@ -569,14 +615,18 @@ class TestTemplateSourcesCopy:
 
         export_task(task_file, out_dir)
 
-        copied = out_dir / "environment" / "templates" / "00-starter" / "main.py"
-        assert copied.read_text(encoding="utf-8") == "def stub(): ...\n"
+        # No copy on the export side -- the template dir stays exactly where it was.
+        assert not (out_dir / "environment" / "templates").exists()
 
         emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
-        assert emitted["sandbox"]["template_sources"][0]["path"] == "/opt/coder-eval-task/templates/00-starter"
+        # Path carried over verbatim -- mounted at its own host path, not rewritten.
+        assert emitted["sandbox"]["template_sources"][0]["path"] == str(template_dir)
 
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "COPY templates/ /opt/coder-eval-task/templates/" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        # Compose volume specs are always POSIX-style, regardless of host OS.
+        template_posix = template_dir.as_posix()
+        assert f"{template_posix}:{template_posix}:ro" in volumes
 
     def test_agent_phase_sandbox_preserves_python_and_limits(self, tmp_path: Path) -> None:
         task_file = _write_task(
@@ -598,15 +648,58 @@ class TestTemplateSourcesCopy:
         assert emitted["sandbox"]["python"]["env_packages"] == ["pytest"]
         assert "docker" not in emitted["sandbox"]
 
-    def test_no_templates_dir_or_copy_line_when_the_task_has_no_template_sources(self, tmp_path: Path) -> None:
+    def test_verifier_phase_carries_env_packages_for_adopt_reprovisioning(self, tmp_path: Path) -> None:
+        """The verifier's tests/task.yaml must name the same env_packages the
+        agent phase installed, so Sandbox.adopt can re-provision a workspace
+        whose .venv/node_modules were stripped by capture_to or WORKDIR
+        alignment -- see .claude/notes/isolation.md § Why the venv gets system
+        site packages."""
+        task_file = _write_task(
+            tmp_path,
+            {
+                "sandbox": {
+                    "driver": "docker",
+                    "docker": {"image": "byod-custom-image:0.1.0", "network": "none"},
+                    "python": {"env_packages": ["pytest"]},
+                    "node": {"env_packages": ["left-pad"]},
+                    "template_sources": [{"type": "template_dir", "path": str(tmp_path / "starter")}],
+                }
+            },
+        )
+        (tmp_path / "starter").mkdir()
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "tests" / "task.yaml").read_text(encoding="utf-8"))
+        assert emitted["sandbox"]["python"]["env_packages"] == ["pytest"]
+        assert emitted["sandbox"]["node"]["env_packages"] == ["left-pad"]
+        # Agent-phase-only concerns stay out of the verifier's sandbox block.
+        assert "driver" not in emitted["sandbox"]
+        assert "docker" not in emitted["sandbox"]
+        assert "template_sources" not in emitted["sandbox"]
+
+    def test_verifier_phase_omits_sandbox_when_no_env_packages_are_declared(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "tests" / "task.yaml").read_text(encoding="utf-8"))
+        assert "sandbox" not in emitted
+
+    def test_no_templates_dir_or_mount_when_the_task_has_no_template_sources(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
         export_task(task_file, out_dir)
 
         assert not (out_dir / "environment" / "templates").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "templates" not in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        # Only the always-present task.yaml mount -- no template_sources, so nothing else to mount.
+        assert len(volumes) == 1
+        assert volumes[0].endswith(":/opt/coder-eval-task/task.yaml:ro")
 
     def test_nonexistent_template_dir_is_a_hard_export_failure(self, tmp_path: Path) -> None:
         """A missing template dir is NOT downgraded to a warning: the agent-phase

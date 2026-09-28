@@ -1,31 +1,22 @@
 """CE037: a module-level private helper in ``src/`` must have a caller.
 
-A ``def _helper(...)`` that nothing in ``src/`` references is not merely dead
-weight — it actively misleads. The bug that motivated this rule shipped an
-``_rmtree_restrictive`` whose docstring explained, correctly and in detail, why
-``rmtree(..., ignore_errors=True)`` orphans a mode-000 reference tree… while
-both live cleanup sites went on calling exactly that. A reader auditing the
-cleanup path found a function asserting the shipped code was broken, and a test
-that called the helper directly made the real path read as covered.
+Fires when the name of such a helper occurs only once (its definition) in the
+concatenated text of ``src/coder_eval``. Any other occurrence counts as a caller.
+Scope:
 
-The rule turns "helper written, never wired" into a ``make lint`` failure at the
-commit that introduces it, which is the only moment anyone knows where it was
-supposed to be called from.
+* module-level ``def`` / ``async def`` only (not methods, not closures),
+* a single leading underscore only (not public names, not dunders),
+* undecorated only (a decorator is a registration),
+* not re-exported in ``__all__``.
 
-Scope is deliberately narrow so it stays a bug detector rather than a style
-nag:
-
-* module-level ``def`` / ``async def`` only (methods are found via ``self``,
-  which this cannot see),
-* names starting with a single underscore only (public API has out-of-tree
-  callers, dunders are protocol),
-* decorated functions are skipped (a decorator is a registration —
-  ``@register_criterion``, ``@field_validator``, ``@app.command`` — so the
-  reference is the decorator, not a call),
-* a name re-exported in ``__all__`` is skipped.
+Motivating case: ``_rmtree_restrictive`` documented why
+``rmtree(..., ignore_errors=True)`` orphans a mode-000 reference tree, while both
+live cleanup sites still called exactly that.
 
 Use ``# noqa: CE037`` for a deliberate SPI hook that genuinely has no in-tree
 caller, with a comment naming who calls it.
+
+Rationale: .claude/notes/lint-rules.md § CE037
 """
 
 import ast

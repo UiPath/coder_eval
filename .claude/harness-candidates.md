@@ -450,7 +450,7 @@ with the two `action.yml` items above — one considered change to the action's 
   `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
   `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.
   These are string keys in shell/YAML that no test or type-checker binds to
-  `eval_result_to_task_dict` (`reports_experiment.py`), so renaming a key there
+  `eval_result_to_task_dict` (`run_record.py`), so renaming a key there
   silently turns an external gate into a no-op — a reviewer here proposed
   `final_status`, which does not exist in `run.json` and would have made a new
   assertion dead on arrival. Guard: assert the key set that non-Python consumers
@@ -859,7 +859,7 @@ re-derive from scratch.
   an existing form. Caught in: the turn-timing consolidation, Phase 5 review.
 
 - [ ] **Pre-existing, surfaced by the turn-timing final review:
-  `reports_stats.regularized_incomplete_beta` clamps an out-of-domain `x`
+  `stats.regularized_incomplete_beta` clamps an out-of-domain `x`
   instead of raising.** Its docstring says "Raises ValueError outside that
   domain — returning NaN would let a bad input render as a real-looking
   statistic downstream", and it does raise for a non-finite `a`/`b`/`x` and for
@@ -874,11 +874,161 @@ re-derive from scratch.
   candidate — a small real bug needing its own change. Caught in: the
   turn-timing consolidation final review (gpt-5.6-sol).
 
-## docker anti-cheat auto-mount allowlist (fix/docker-anti-cheat-leaks) — RESOLVED in-branch
+- [ ] **A comment line that opens mid-sentence directly after one that ended.**
+  The residue of a block replacement whose anchor matched the wrong line: the
+  tail of the replaced prose survives as a severed fragment. The exact-form half
+  of this — a `Rationale:` pointer that is not the last line of its block — was
+  PROMOTED in the prose-mass-reduction run and now ships as
+  `prose_budget.check_pointer_placement`. What remains is the general case,
+  where no pointer is involved, and it is heuristic: a legitimately wrapped
+  sentence looks identical to a severed one, so it needs an allowlist (a
+  continuation opening with a backtick, a quote, or a list marker is usually
+  fine). ~30 min plus the false-positive triage. Caught in: prose mass
+  reduction, Phases 4-7 review.
 
-Surfaced by the code review of the Fix A/B/C branch. The Critical (context.json source_yaml
-leak) was fixed in commit dc71add6; the three Low follow-ups (L1 loose task_id file at plugin
-root, L2 CE065-vs-runtime path-resolution divergence, L3 manifest `skills: "."` collapsing the
-keep-set) and the multi-model review's M1/M2/M3 (test coverage for `_resolve_mount_path`, nested-
-plugin duplicate-mount crash, silent mask stand-down) were all fixed in the same branch. Nothing
-deferred. Left here only as a pointer to the branch history.
+- [ ] **Two `.claude/notes/` sections covering ONE topic under different
+  headings.** The single-home rule is the load-bearing invariant of the notes
+  tree and nothing enforces it. `check_pointers` proves a pointer resolves;
+  nothing proves the topic is not also argued three files away. It bit every
+  phase of the prose-mass-reduction run, including once against a file the
+  phase never opened (`reporting.md` vs `orchestration.md` on
+  `nothing_was_measured`). Needs a similarity measure over section bodies —
+  shared rare tokens, or a shared symbol name appearing as the subject of two
+  headings — so it is real work rather than a regex. Deferred on cost, not on
+  value: this is the highest-value unbuilt guard in the notes design. Caught
+  in: prose mass reduction, all phases.
+
+- [ ] **A `Rationale:` pointer that resolves to a heading which does not hold
+  the rationale that left the site.** The weaker sibling of the above and the
+  same shape of miss: the gate goes green while the reader arrives somewhere
+  unhelpful. Five instances in Phase 5 alone, all fixed by hand. Probably not
+  mechanizable without a semantic check, but worth recording as a known blind
+  spot of `check_pointers` so nobody reads its green as "the pointers are
+  good". Caught in: prose mass reduction, Phases 5-6 review.
+
+- [ ] **A criterion-class first docstring line changing without
+  `make plugin-reference` in the same commit.** CE033 already diffs the
+  generated `plugins/coder-eval/reference/criteria.md`, so drift IS caught —
+  but only for classes that reach the generated file, and only as "the
+  generated file is stale" rather than "you edited a generated surface". A
+  commit-scoped guard would name the cause. Deferred because the lint harness
+  has no access to a commit-scoped diff today; the ad-hoc version
+  (AST-comparing every `ClassDef` first line against a base ref) was written
+  and used throughout Phase 6 and is the thing to promote if that access
+  appears. Caught in: prose mass reduction, Phase 6.
+
+- [ ] A generated surface (`*.generated.*`) has no mechanical guard against being hand-edited
+  — CE065/CE033/CE028 all catch *drift* (source changed, output not regenerated) but an edit
+  to BOTH passes cleanly. Guarding it needs a checksum or a git-attribute gate, not a diff,
+  so it is a different shape of sensor. — caught during the reports consolidation (CE065).
+- [ ] No rule resolves file paths named in PROSE (comments, docstrings, Markdown) across
+  `src/`, `evalboard/`, `litellm/` and `.github/`. That consolidation hand-fixed ~25 stale
+  module references across five phases, and two reviewers each found more the greps missed.
+  The plan's Open Questions measured and declined the CLAUDE.md-only variant (its stale refs
+  live in an ASCII tree, not backticks); a wider variant has the same parsing problem plus
+  legitimate non-resolving refs (container paths, plugin-relative paths). Recorded because
+  the recurrence is now the argument, not the idea. — caught during the reports consolidation.
+- [ ] The anchored package regex `(?:^|[/\\])src[/\\]coder_eval[/\\]` is compiled
+  independently across the rule tree — `ce050_no_union_getattr_probe.py:101`,
+  `ce051_no_driver_override.py:60`, `ce052_process_lethal_must_be_container_gated.py:78`,
+  `ce053_run_record_filename_literal.py:65`, `ce054_env_info_key_round_trip.py:66`,
+  `ce056_no_container_env_literal.py:51` and `ce058_no_timing_literal.py:116` — seven
+  rule modules, to which `_layers.py` adds one more (its `_CLI` and `_REPORTS` derive from it), with the
+  `agents/`-suffixed variant of the same idiom in
+  `_model_ctor.py:28` and `ce059_generation_window_is_two_reads.py:45`, plus a near-variant
+  in `ce037_no_dead_private_helper.py:61` and a `cli/`-suffixed one in
+  `ce048_no_in_process_typer_command_call.py:68`. `_layers.py` is the designated shared rule-helper
+  module, though `_model_ctor.py` is an equal peer and a generic src-path regex arguably
+  belongs in a neutrally named helper rather than one named `_layers`. Not hoisted here
+  because retargeting seven unrelated rules needs a per-rule verification that its scope
+  did not shift — a second refactor inside a review-fix plan. The new copies were written
+  in the established *spelling* deliberately: the defect being fixed was a regex that
+  disagreed with its siblings, so a new variant would be that defect again. — caught during the reports-consolidation review fixes, Phase 1.
+- [x] ~~**CE004 inherits CE066's `reports/` exemption because the two rules share one
+  predicate.**~~ **DONE.** `_layers.py` now shares the package anchor and the `cli/`
+  boundary (`is_package_path`, `is_cli_path`) rather than one exemption set. CE066 keeps
+  `is_core_path` (`{cli, reports}` exempt); CE004's scope is the package minus `cli/`.
+  Widening CE004 to `reports/` found 0 violations. `test_the_reports_package_is_in_scope`
+  and `TestCoreLayerMembership.test_ce004_scope_is_every_module_outside_cli` both fail if
+  CE004 goes back to the core predicate; `test_the_reports_package_itself_stays_exempt`
+  pins that CE066's scope did not widen with it. — caught in the reports-consolidation
+  review fixes, Phase 1 quality review.
+
+- [ ] **A CLAUDE.md Directory Structure bullet naming a path that no longer exists.**
+  Shipped briefly as CE067 over the fenced `coder_eval/` tree, then removed when that
+  tree was replaced by `ls` plus selective bullets — the exhaustive half of the rule
+  became false by design. The surviving half is still real: the bullets name modules
+  (`result_metrics.py`, `reports/html.py`, `models/container_paths.py`) and a rename
+  leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
+  one section, which is the narrow case of the prose-path candidate above. — caught
+  during the reports consolidation rebase.
+
+- [ ] **A prose "see X's docstring" citation whose target no longer holds the
+  claim.** Moving rationale out of a docstring leaves every citation of that
+  docstring pointing at text that is gone, and `check_pointers` cannot see it
+  because the citation is prose, not a `Rationale:` pointer. Not mechanised: the
+  match is heuristic ("see the module docstring", "see CE063's docstring",
+  "see that class's docstring" all read differently), and most citations are
+  in-file and still valid, so a rule would need per-site triage rather than a
+  regex. Instances found (line numbers at 946ca968):
+  `src/coder_eval/harbor/packager.py:382` and `:386`,
+  `tests/test_harbor_packager.py:163` and `:187`,
+  `tests/lint/rules/ce064_turn_bracket_on_the_clock.py:40`. Caught in: tests
+  prose slimming, Phases 3 and 7.
+
+- [ ] **Narrative after a docstring's `Args:`/`Returns:` block that follows a
+  `Rationale:` pointer.** `check_pointer_placement` accepts any tail that STARTS
+  with a trailing section, so pointer → `Args:` → an indented entry → a new
+  base-indented paragraph passes although the pointer is no longer the last prose
+  line. Guarding it means walking section blocks by indentation (the shape
+  `prose_words` already uses), plus false-positive triage over every src/ and
+  tests/ docstring that ends in a section — more than a quick add. Caught in:
+  tests prose slimming, final review (gpt-5.6-sol).
+
+- [ ] **A `Rationale:` pointer whose target is not under `.claude/notes/`.**
+  `check_pointers` joins the captured path onto the repo root, so an absolute
+  path, a `..` segment or any other Markdown file resolves, while CLAUDE.md and
+  `.claude/notes/README.md` define the pointer as a repo-relative notes path. No
+  such pointer exists today. Deferred because restricting the target is a design
+  decision (a `docs/` guide heading is a plausible SSOT target) rather than a
+  mechanical guard. Caught in: tests prose slimming, final review (gpt-5.6-sol).
+
+## From container-contract-and-command-surface (2026-09-15)
+
+- [ ] **A field-name assertion against CLI output can pass vacuously through `tmp_path`.**
+  `assert "variant_id" in result.output` matched the echoed `context.json` path, because
+  pytest names each `tmp_path` after the test (`test_a_non_string_variant_id_i…`). Nothing
+  guards it today; the fix was to assert the pydantic `loc` line (`"\nvariant_id\n"`).
+  Deferred because telling a vacuous substring from a real one needs to know the test's
+  own name and what the command echoes — a convention for reviewers, not an AST pattern.
+  Caught in: Phase 1 quality review.
+- [ ] **A path interpolated into Rich markup without `escape()`.** A run directory name is
+  untrusted, and `[/y]` in it raised `rich.errors.MarkupError` (not an `OSError`) inside
+  `evaluate`'s best-effort refresh, after the verdict printed. Nothing guards it; the fix
+  escaped every new console line. Deferred because the rule needs type information (which
+  f-string placeholders are `Path`s) that an AST-only rule does not have, and the existing
+  CLI has many pre-existing unescaped lines a literal rule would flag at once. Caught in:
+  Phase 5 quality review.
+- [ ] **A subprocess-driven agent must force-kill before dropping its process handle on
+  EVERY dead-or-dying exit path, not just the obvious ones.** `DelegateAgent`'s
+  `_drain_stdout` signals EOF (posts `None`) on a genuine pipe close AND on a buffer-limit
+  overrun AND on its own unexpected exception — only the first guarantees the host already
+  exited. Two review passes (independently) caught `communicate()`'s EOF/`fatal` branches
+  and `_read_until`'s EOF branch clearing `self._process = None` without confirming the host
+  was dead first, which orphans a still-alive Node host (and its interop child) rather than
+  respawning cleanly. Fixed in all three sites; `kill_sync()` also now clears the handle.
+  Deferred as a lint rule because the pattern ("this branch sets `self._X = None`; was a kill
+  awaited on this path first?") needs control-flow reasoning an AST-only CE0xx rule doesn't
+  have, and it is a recurring class ONLY within one file so far — worth promoting to a rule
+  if a second subprocess-driven agent repeats it. Caught in: final cross-phase review,
+  delegate agent port.
+
+## From 2026-09-26 Antigravity SDK 0.1.18 usage regression
+
+- [ ] Runtime guard: fail an Antigravity turn that ran MODEL steps but booked zero
+  tokens, as OpenCode's `require_token_telemetry` does. SDK 0.1.18 deprecated
+  `Step.usage_metadata` (usage moved to `conversation.total_usage`), so every
+  Antigravity turn from `3aa2db30` on reported no tokens and no cost, and `api_calls`
+  stayed at 1 so `max_turns` never tripped — all silently, with `make verify` green.
+  A static rule cannot see an SDK field go dead; a live-telemetry smoke (one real turn,
+  assert `token_usage` is non-empty) in the harness-bump checklist would have.

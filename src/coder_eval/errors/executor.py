@@ -22,31 +22,27 @@ async def execute_with_retry(
 ) -> Any:
     """Execute an operation with automatic retry on transient errors.
 
-    This is the core retry mechanism. It wraps any async operation and:
-    1. Executes the operation
-    2. Catches exceptions
-    3. Categorizes the error
-    4. Retries if eligible (with exponential backoff + jitter)
-    5. Re-raises after exhausting retries
+    Retries only what ``errors/categorization.py`` classifies as retryable;
+    everything else raises on the first attempt.
+
+    Rationale: .claude/notes/agents.md § Shared turn lifecycle
 
     Args:
-        operation: Async callable to execute (no arguments, use closures/lambdas)
-        operation_name: Human-readable operation name for logging
-        context: Context dict with:
-            - task_id: Task identifier (required)
-            - component: Component name (optional but recommended)
-            - agent_name: Agent name (optional)
-        max_attempts: Override max attempts (defaults to 10 as safety limit)
-        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` callback
-            invoked after every failed attempt (including the final non-retryable one),
-            for draining ``agent.pending_turn`` and calling ``agent.discard_pending_turn()``.
-            Callback exceptions are logged and swallowed so they cannot mask the original.
+        operation: Async callable taking no arguments -- pass state by closure.
+        operation_name: Human-readable name, for logging only.
+        context: Requires ``task_id``; ``component`` and ``agent_name`` are optional.
+        max_attempts: Overrides the safety limit of 10.
+        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` invoked
+            after every failed attempt, including the final non-retryable one, and
+            before the backoff. Its own exceptions are logged and swallowed so they
+            cannot mask the original. The orchestrator uses it to drain
+            ``agent.pending_turn`` and call ``agent.discard_pending_turn()``.
 
     Returns:
-        Result from operation
+        Whatever ``operation`` returned.
 
     Raises:
-        Last exception if all retries exhausted
+        The last exception, once the retries are exhausted.
 
     Example:
         >>> async def flaky_api_call():

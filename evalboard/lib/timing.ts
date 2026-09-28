@@ -192,7 +192,7 @@ export function busyMs(
 // bare duration is the out-of-tree `delegate-sdk`; see
 // docs/agents/HARNESS_PARITY.md.
 // The same union, but `null` when NOTHING bounded was recorded — the direct
-// twin of `reports_stats._turn_tool_union_ms`, and the one a display cell wants.
+// twin of `result_metrics._turn_tool_union_ms`, and the one a display cell wants.
 //
 // `toolExecutionMs` above returns `0` for an empty span list because that is
 // what a UNION of nothing is, and what `coder_eval.timing.union_ms` returns;

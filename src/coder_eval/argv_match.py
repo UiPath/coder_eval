@@ -1,25 +1,18 @@
 """Structured argv matching: the one engine both CLI surfaces share.
 
-Two places ask the same question about one invocation. The ``cli_called``
-criterion reads a recorded ``argv`` back afterwards and asks *did this happen*;
-a ``record_cli`` response rule asks it live, inside the sandbox, to choose which
-canned response to serve. An author who writes ``verb: "ixp projects get"`` in a
-rule and again in the criterion that grades it must get one semantic, not two
-that drift.
+The ``cli_called`` criterion reads a recorded ``argv`` back afterwards and asks *did
+this happen*; a ``record_cli`` response rule asks it live, inside the sandbox, to
+choose which canned response to serve. An author who writes the same ``verb:`` in a
+rule and in the criterion that grades it must get one semantic, not two that drift.
 
-Everything here takes PLAIN DICTS rather than pydantic models, and imports
-nothing beyond the standard library: ``Sandbox._generate_cli_recorders`` copies
-this file into the recorder directory as a SIDECAR beside every shim that
-declares response rules, and that shim imports it as a sibling while running
-inside the sandbox, where ``coder_eval`` is not installed. Lint rule CE057 keeps
-the imports stdlib-only.
+HAZARD: everything here takes PLAIN DICTS and imports NOTHING beyond the standard
+library. ``Sandbox._generate_cli_recorders`` copies this file into the recorder
+directory as a SIDECAR beside every shim that declares response rules, and that shim
+imports it as a sibling while running inside the sandbox, where ``coder_eval`` is not
+installed. Lint rule CE057 enforces the imports; this comment is the only thing that
+explains WHY before someone adds one.
 
-:class:`MatchSpec` is what ``CliMatch.match_spec`` emits. It is a ``TypedDict``
-rather than a bare dict on purpose: it is the seam where every guarantee the
-pydantic models establish would otherwise be erased, and the fallback for a key
-the reader failed to find is always "unconstrained" -- the direction that makes a
-rule match everything, or a criterion score 1.0 against any log. TypedDict is
-closed, so a key renamed on either side is a pyright error on both.
+Rationale: .claude/notes/contracts.md § Recording a CLI invocation
 """
 
 import re
@@ -113,17 +106,15 @@ def split_flags(
         name = token.lstrip("-")
         known = name in value_flags or name in known_names
 
-        # A bare negative number is a value, not a flag. Reading `-1` as a flag
-        # named `1` drops it from the positionals -- the same silent-disappearance
-        # that let `--yes proj-1` slip a delete past a guard.
+        # HAZARD: a bare negative number is a value, not a flag. Reading `-1` as a
+        # flag named `1` drops it from the positionals.
         if not known and is_number(name):
             positional.append(token)
             continue
 
         # Clustered short flags: `-rf` is `-r -f`. Declared names win, so a real
-        # multi-char short flag still matches, and `-fvalue` binds when `f` takes
-        # a value; otherwise each character is its own switch, which is what stops
-        # `-yf` escaping an `aliases: [y]` predicate.
+        # multi-char short flag still matches; otherwise each character is its own
+        # switch, which is what stops `-yf` escaping an `aliases: [y]` predicate.
         if not known and not token.startswith("--") and len(name) > 1:
             head, rest = name[0], name[1:]
             if head in value_flags:
@@ -205,10 +196,9 @@ def argv_matches(spec: MatchSpec, argv: list[str]) -> bool:
     def names_of(flag: str, predicate: FlagPredicate) -> tuple[str, ...]:
         return (flag, *predicate["aliases"])
 
-    # Declarations only. Folding `ignore_flags` into value_flags made ignored
-    # SWITCHES value-bearing, which swallowed the next positional and reopened a
-    # guard false-PASS; an ignored flag that takes a value declares it in
-    # value_flags.
+    # HAZARD: declarations only. Folding `ignore_flags` into value_flags made
+    # ignored SWITCHES value-bearing, swallowing the next positional and reopening
+    # a guard false-PASS. An ignored flag that takes a value declares it there too.
     ignore = frozenset(spec["ignore_flags"])
     value_flags = frozenset(
         name
@@ -225,10 +215,9 @@ def argv_matches(spec: MatchSpec, argv: list[str]) -> bool:
     offset = 0
     spellings = spec["verb_spellings"]
     if spellings:
-        # Token-wise, not a subset and not a string startswith: `labellings confirm`
-        # must never be satisfied by `labellings unconfirm`. Taking the first match is
-        # safe because validation rejects one spelling prefixing another, so no argv
-        # can match two.
+        # HAZARD: token-wise, not a subset and not a startswith -- `labellings
+        # confirm` must never be satisfied by `labellings unconfirm`. First match is
+        # safe because validation rejects one spelling prefixing another.
         matched = next((tokens for tokens in spellings if positional[: len(tokens)] == list(tokens)), None)
         if matched is None:
             return False

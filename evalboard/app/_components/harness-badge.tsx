@@ -33,6 +33,15 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         label: "Delegate · UiPath",
         short: "Delegate",
     },
+    // coder_eval's own built-in Delegate agent (`agent.type: delegate`) — a
+    // distinct `AgentKind` from the coder_eval_uipath plugin's `delegate-sdk`
+    // above, so it needs its own key or it falls through to raw gray text
+    // (same fallback treatment pi gets below, matching that precedent).
+    delegate: {
+        src: "/uipath.png",
+        label: "Delegate · UiPath",
+        short: "Delegate",
+    },
 };
 
 // Short human label for a harness id ("Claude Code"), for selectors and prose.

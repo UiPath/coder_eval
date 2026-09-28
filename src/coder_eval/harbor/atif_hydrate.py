@@ -1,31 +1,16 @@
 """ATIF Trajectory -> coder-eval ``TurnRecord`` list (the hydrate direction).
 
-The reverse of ``atif_emit``: given a trajectory that was produced OUTSIDE this
-process (a Harbor agent ran ``coder-eval execute --format harbor``, which wrote
-``trajectory.json`` next to ``task.json``), reconstruct enough of coder-eval's
-own trajectory shape to let the criteria checkers that read it
-(``command_executed``, ``cli_called``, ``commands_efficiency``,
-``skill_triggered``, ``llm_judge``'s transcript) work against it during a
-separate ``coder-eval evaluate --format harbor`` invocation.
+The reverse of ``atif_emit``: reconstructs enough of coder-eval's trajectory shape to
+let the criteria that read it work during a separate ``coder-eval evaluate --format
+harbor`` invocation. Those checkers read only ``TurnRecord.commands`` and
+``TurnRecord.messages``, which is exactly what this rebuilds.
 
-Every criterion checker receives ``turn_records: list[TurnRecord] | None`` —
-in a normal run this is ``EvaluationResult.iterations`` — and reads only
-``TurnRecord.commands`` (tool calls) and ``TurnRecord.messages`` (for judge
-transcripts); see ``criteria/command_executed.py``, ``criteria/skill_triggered.py``,
-``criteria/commands_efficiency.py``. Those two fields are what this module
-reconstructs. It does NOT attempt a lossless round-trip of ``atif_emit``'s
-mapping:
+Deliberately NOT a lossless round trip: per-generation token buckets are not
+recovered (``token_usage`` is left unset, so cost reporting for a hydrated result is
+incomplete), sub-agent nesting is flattened, and turn boundaries are recovered by
+splitting on ``source="user"`` steps.
 
-- Per-generation token buckets (``AssistantMessage.input_tokens`` etc.) are
-  NOT recovered from ``Step.metrics`` — ``TurnRecord.token_usage`` is left
-  unset. Cost/token reporting for a hydrated result is therefore incomplete;
-  only trajectory-shaped criteria are the target here.
-- Sub-agent nesting is flattened: ``subagent_trajectories`` steps are appended
-  to the parent turn's commands (via their tool_calls) rather than
-  reconstructing a nested ``parent_tool_use_id`` relationship.
-- Turn boundaries are recovered by splitting on ``source="user"`` steps
-  (mirroring ``atif_emit``'s "one synthetic user step per turn" convention),
-  not by any explicit iteration marker ATIF carries.
+Rationale: .claude/notes/reporting.md § Hydrating
 """
 
 from __future__ import annotations

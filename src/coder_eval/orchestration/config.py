@@ -1,11 +1,34 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
+from string import Template
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models import PreservationMode
+from coder_eval.path_utils import (
+    DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+    DEFAULT_LOGGING_DIR_TEMPLATE,
+    resolve_dir_template,
+)
+
+
+_VALID_DIR_TEMPLATE_PLACEHOLDERS = frozenset({"run_dir", "variant", "task", "repeat"})
+
+
+def _check_dir_template(v: str) -> str:
+    """Reject an unknown ``${...}`` placeholder at config-construction time.
+
+    ``resolve_dir_template`` catches this too, but only when a task is actually
+    resolved against it -- late enough that a typo becomes N mislabelled ERROR
+    rows instead of one clean ``typer.BadParameter`` at CLI parse time.
+    """
+    unknown = set(Template(v).get_identifiers()) - _VALID_DIR_TEMPLATE_PLACEHOLDERS
+    if unknown:
+        valid = ", ".join(f"${{{p}}}" for p in sorted(_VALID_DIR_TEMPLATE_PLACEHOLDERS))
+        raise ValueError(f"{v!r} references unknown placeholder(s) {sorted(unknown)}. Valid placeholders: {valid}.")
+    return v
 
 
 def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
@@ -55,14 +78,12 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Agent type override stays a dedicated field: it requires re-parsing the
-    # discriminated union (not a simple field-merge), so it is injected into the
-    # generic agent patch by apply_overrides rather than living in `overrides`.
+    # A dedicated field because it requires re-parsing the discriminated union,
+    # not a simple field-merge; apply_overrides injects it into the agent patch.
     agent_type: str | None = Field(default=None, description="Override agent type for all tasks (e.g., 'claude-code')")
 
-    # Generic layer-5 task-config overrides. Built from -D/--set and the surviving
-    # flag aliases (--model, --driver) in run_command, then applied to the resolved
-    # TaskDefinition by orchestration.overrides.
+    # Layer-5 overrides, built from -D/--set plus the surviving flag aliases.
+    # Rationale: .claude/notes/orchestration.md § Config merging and CLI overrides
     overrides: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -71,7 +92,6 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
     max_rows: int | None = Field(
         default=None,
         ge=1,
@@ -87,19 +107,16 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Replicate count override
     repeats: int | None = Field(
         default=None,
         ge=1,
         description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
     )
 
-    # Grading switch: `coder-eval run` (True) vs `coder-eval execute` (False).
-    # It lives HERE and nowhere else on purpose — it is deliberately NOT part of
-    # the 5-layer task merge, so there is no `-D grade=...` path and no
-    # MergeField (CE014 does not apply to a scalar bool outside the merged
-    # roots). A task YAML must never be able to declare itself ungraded; only
-    # the invoking command decides.
+    # HERE and nowhere else on purpose: deliberately NOT part of the 5-layer task
+    # merge, so there is no `-D grade=...` path. A task YAML must never be able to
+    # declare itself ungraded; only the invoking command decides.
+    # Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
     grade: bool = Field(
         default=True,
         description=(
@@ -108,36 +125,76 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 
-    # Docker WORKDIR alignment for the non-docker-driver dispatch path (host
-    # process, or already inside a container someone else built — e.g. a Harbor
-    # trial container running `coder-eval execute` as its agent). Mirrors what
-    # `DockerRunner`/`_run-task-internal` already do for `sandbox.driver: docker`
-    # (see `Orchestrator.workspace_dir`'s docstring); this is the same mechanism,
-    # exposed publicly for the case where coder-eval's OWN docker driver isn't
-    # the one building the container. Only meaningful for a single resolved task
-    # — `run_batch` raises if more than one task would collide on it.
+    # Docker WORKDIR alignment for the NON-docker-driver dispatch path — a host
+    # process, or a container someone else built. The same mechanism the docker
+    # driver already uses, exposed for when coder-eval's own driver is not the one
+    # building the container. Only meaningful for a single resolved task.
     workspace_dir: Path | None = Field(
         default=None,
         description=(
             "Run the agent in-place at this absolute path instead of the standard "
-            "run_dir/artifacts workspace, copying it out to run_dir/artifacts/<task> at "
+            "artifacts workspace named by artifacts_dir_template, copying it out there at "
             "cleanup. For a single task only. Not for sandbox.driver: docker tasks — "
             "the docker driver already aligns automatically via sandbox.docker.working_dir."
         ),
     )
 
-    # TODO(container-death-diagnostics): consider a run-level default resource
-    # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
-    # max_cpus,max_pids} default to None -> _build_argv emits no --memory/
-    # --cpus/--pids-limit), so at --max-parallel=20 a single runaway task can
-    # pressure the whole host. An opt-in default cap is already expressible
-    # via the EXISTING layered sandbox config -- defaults.sandbox.limits.
-    # max_memory_mb in the experiment YAML, or `-D sandbox.limits.
-    # max_memory_mb=N` on `coder-eval run` -- both flow through
-    # resolve_all_tasks and are overridden by per-task limits. If a dedicated
-    # CLI knob is ever wanted, add it as the FIRST (lowest-priority) layer in
-    # _build_sandbox_layers so per-task limits win, and do NOT default it to
-    # a non-None value (would change behavior for existing configs).
+    # The run's on-disk layout, as two independent templates resolved LATE (per
+    # task, where ${variant}/${task}/${repeat} first exist). Defaults reproduce
+    # today's layout byte-for-byte; a static override needs no special-casing
+    # because substituting a string with no placeholders is the identity function.
+    logging_dir_template: str = Field(
+        default=DEFAULT_LOGGING_DIR_TEMPLATE,
+        description=(
+            "Where task.json/task.log go. Placeholders: ${run_dir}, ${variant}, ${task}, "
+            "${repeat}. A static path (e.g. /logs/agent) resolves to itself."
+        ),
+    )
+    artifacts_dir_template: str = Field(
+        default=DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+        description=(
+            "Where the agent's artifacts go -- the FINAL directory, not a parent. Same "
+            "placeholders as logging_dir_template, and independent of it: the two may live in "
+            "unrelated parts of the filesystem (Harbor puts logs at /logs/agent and artifacts "
+            "at the container's WORKDIR). When it already holds the workspace there is nothing "
+            "to copy."
+        ),
+    )
+
+    @field_validator("logging_dir_template", "artifacts_dir_template")
+    @classmethod
+    def _validate_dir_template(cls, v: str) -> str:
+        return _check_dir_template(v)
+
+    def resolve_logging_dir(self, variant_id: str, task_id: str, replicate_index: int = 0) -> Path:
+        """This task's logging directory, per ``logging_dir_template``."""
+        return resolve_dir_template(
+            self.logging_dir_template,
+            run_dir=self.run_dir,
+            variant_id=variant_id,
+            task_id=task_id,
+            replicate_index=replicate_index,
+        )
+
+    def resolve_artifacts_dir(self, variant_id: str, task_id: str, replicate_index: int = 0) -> Path:
+        """This task's FINAL artifacts directory, per ``artifacts_dir_template``.
+
+        One chokepoint for every consumer -- the orchestrator's capture/direct-write
+        target, ``--resume``'s stale-artifact clearing, and the regrade workspace
+        lookup -- so they cannot disagree about where a task's artifacts live.
+        """
+        return resolve_dir_template(
+            self.artifacts_dir_template,
+            run_dir=self.run_dir,
+            variant_id=variant_id,
+            task_id=task_id,
+            replicate_index=replicate_index,
+        )
+
+    # TODO(container-death-diagnostics): containers run uncapped today, so at a
+    # high --max-parallel one runaway task can pressure the host. An opt-in
+    # default is already expressible through the layered sandbox config; a
+    # dedicated CLI knob would go in as the LOWEST-priority layer, never
+    # defaulted to a value (that would change existing configs).

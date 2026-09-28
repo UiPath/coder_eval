@@ -4,10 +4,12 @@ import os
 import sys
 
 import pytest
+from pydantic import ValidationError
 
-from coder_eval.models import PreservationMode, SandboxConfig
+from coder_eval.models import ContainerContext, PreservationMode, SandboxConfig
 from coder_eval.orchestration.config import resolve_preservation_mode
 from coder_eval.sandbox import Sandbox
+from tests._container_contract import contract_payload
 
 
 class TestResolvePreservationMode:
@@ -88,30 +90,29 @@ def test_setup_failure_clears_self_created_tempdir(monkeypatch):
     assert sandbox.sandbox_dir is None
 
 
-def test_docker_runner_forwards_mode_and_container_reads_it_back():
-    """The host serializes preservation_mode.value; the container re-parses it (round-trip)."""
-    # Host side: DockerRunner stamps the resolved mode's .value into context.json.
-    value = PreservationMode.DIRECT_WRITE.value
-    assert value == "DIRECT_WRITE"
-    # Container side: run_task_internal parses it back, and falls back to DIRECT_WRITE
-    # (the docker default) when the key is absent (no host plumbed it).
-    assert (
-        PreservationMode({"preservation_mode": value}.get("preservation_mode", value)) is PreservationMode.DIRECT_WRITE
-    )
-    assert (
-        PreservationMode({}.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
-        is PreservationMode.DIRECT_WRITE
-    )
-    assert (
-        PreservationMode({"preservation_mode": "MOVE_ON_WRITE"}.get("preservation_mode", value))
-        is PreservationMode.MOVE_ON_WRITE
-    )
+@pytest.mark.parametrize("mode", list(PreservationMode))
+def test_docker_runner_forwards_mode_and_container_reads_it_back(mode):
+    """The host resolves the mode; the container parses back exactly that mode from the contract."""
+    staged = ContainerContext.model_validate(contract_payload(preservation_mode=mode)).model_dump_json()
+    assert ContainerContext.model_validate_json(staged).preservation_mode is mode
+
+
+def test_the_container_has_no_preservation_mode_fallback():
+    """An absent key is a host/image skew, not a request for the docker default."""
+    with pytest.raises(ValidationError, match="preservation_mode"):
+        ContainerContext.model_validate(contract_payload(omit=("preservation_mode",)))
 
 
 def test_clear_rerun_artifacts_removes_only_existing(tmp_path):
-    """clear_rerun_artifacts wipes a stale artifacts/<task_id> for each re-run task."""
+    """clear_rerun_artifacts wipes a stale artifacts dir for each re-run task.
+
+    Paths come from BatchRunConfig's own resolver, so this also pins that clearing
+    targets the SAME directory the run writes to -- a hand-built
+    run_dir/artifacts/<task_id> would silently miss an overridden template.
+    """
     from coder_eval.models import ResolvedTask, TaskDefinition
     from coder_eval.orchestration.batch import clear_rerun_artifacts
+    from coder_eval.orchestration.config import BatchRunConfig
 
     def _rt(task_id: str) -> ResolvedTask:
         task = TaskDefinition(
@@ -125,20 +126,22 @@ def test_clear_rerun_artifacts_removes_only_existing(tmp_path):
         return ResolvedTask(
             task=task,
             task_file=tmp_path / "t.yaml",
-            run_dir=tmp_path / task_id / "00",
+            run_dir=tmp_path / "default" / task_id / "00",
             variant_id="default",
             original_task_id=task_id,
         )
 
+    config = BatchRunConfig(run_dir=tmp_path)
     stale = _rt("stale")
-    (stale.run_dir / "artifacts" / "stale").mkdir(parents=True)
-    (stale.run_dir / "artifacts" / "stale" / "leftover.txt").write_text("from killed run")
+    stale_artifacts = config.resolve_artifacts_dir("default", "stale")
+    stale_artifacts.mkdir(parents=True)
+    (stale_artifacts / "leftover.txt").write_text("from killed run")
     fresh = _rt("fresh")  # no artifacts dir
 
-    cleared = clear_rerun_artifacts([stale, fresh])
+    cleared = clear_rerun_artifacts([stale, fresh], config=config)
 
     assert cleared == 1
-    assert not (stale.run_dir / "artifacts" / "stale").exists()
+    assert not stale_artifacts.exists()
 
 
 @pytest.mark.asyncio

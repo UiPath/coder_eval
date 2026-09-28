@@ -10,33 +10,33 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 ## The table
 
-| Limit | claude-code | codex | antigravity | opencode | pi |
-|---|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
+| Limit | claude-code | codex | antigravity | opencode | pi | delegate |
+|---|---|---|---|---|---|---|
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
 
 ## Timing capture
 
 What each harness records about *when* things happened, and how much of a task's
 wall clock its numbers account for.
 
-| Field | claude-code | codex | antigravity | opencode | pi |
-|---|---|---|---|---|---|
-| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
-| tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
-| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
-| `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
-| `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
-| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
-| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
-| `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
-| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
-| window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
+| Field | claude-code | codex | antigravity | opencode | pi | delegate |
+|---|---|---|---|---|---|---|
+| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one | harness clock: turn start → the turn's single flush (see below) |
+| tool time subtracted from it | centrally | centrally | centrally | centrally | centrally | centrally |
+| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it | the WHOLE turn — there is only one window per turn (see below) |
+| `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT | ~0 — the single window's mark IS the turn start, so there is no head left to measure |
+| `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms | ~0 — the window closes at the same flush the turn ends on |
+| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event | measured around the `tool_result` event |
+| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured | measured |
+| `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` | set |
+| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent | synthetic `<turn_id>-msg-0` (exactly one per turn) |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes, trivially — one window IS the turn |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn | raw `datetime.now()` (no `TurnClock` — CE064 does not require one, since there is only one window and no inter-window drift it could correct) |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its own single-window bounds |
+| window built by `timing.py::close_window` | yes | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
 something the others cannot.
@@ -67,8 +67,8 @@ All five harnesses can have tool execution inside a generation window, and it is
 subtracted out of every one of them — **once, centrally**, by
 `timing.py::subtract_tool_time`. No reducer does it itself; each
 publishes the raw window (see the two sections below). Every harness has the
-problem: Antigravity reports a `Step` for the tool and only a later
-`usage_metadata` `Step` cuts the message; Codex's message window is seeded from
+problem: Antigravity reports a `Step` for the tool and only a later rise in
+the conversation's billed usage cuts the message; Codex's message window is seeded from
 the first item's start and extended to the last item's completion; OpenCode, Pi
 and claude-code tile, each window opening where the previous one closed and
 running to the next, with every tool call in between running inside. In each the
@@ -498,6 +498,13 @@ needed to drive it.
 
 ### Known divergences
 
+- **This page's `delegate` column is a DIFFERENT agent** from the one described
+  in the bullet immediately below. `delegate` (this repo, `AgentKind.DELEGATE`)
+  drives the now-public `@uipath/delegate-sdk` through a first-party Node host;
+  `delegate-sdk` (the bullet below) is an older, UiPath-internal-only agent in
+  the separate `coder_eval_uipath` plugin, driving the non-public
+  `@uipath/delegate-stdio` package. They are not the same code and this page
+  does not claim their timing behavior matches.
 - **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
   execution bounds, so its tool calls cannot be placed on a timeline. Its
   coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
@@ -524,8 +531,7 @@ needed to drive it.
   when a generation begins. Nothing in the timing accounting reads it — the
   head and tail are measured from the first and last `AssistantMessage`
   instead, which is uniform across all five — so this is recorded rather than
-  fixed. It is NOT a `max_turns` hazard: `EventCollector.visible_turn_count` is
-  `len(self._commands)`, derived from `ToolEndEvent`, and `_turn_starts` feeds
+  fixed. It is NOT a `max_turns` hazard: no cap reads it, and `_turn_starts` feeds
   only `assistant_turn_count` on the no-`AgentEndEvent` fallback path. The real
   cost of normalizing it is that the event drives the live renderers, so moving
   it changes the turn boundaries users watch during a run.
@@ -533,50 +539,50 @@ needed to drive it.
 All three are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
 
-## `max_turns` counts visible turns on Codex and Antigravity
+## `max_turns` counts model API calls on every harness
 
-A "visible turn" is one entry in the run's timeline: one resolved tool call. It is
-the unit `reports_stats.visible_turn_count` reports and the unit that lands in
-`TurnRecord.commands`. Both backends count it live off the shared
-`EventCollector.visible_turn_count`, so one `max_turns` value means one thing on
-both.
+One turn is one main-thread model API call, the unit Claude Code's `--max-turns`
+counts. `max_turns: N` lets the agent make N calls and still runs the tools the Nth
+call asked for. The turn ends when call N+1 begins, so a reply that finishes within
+N calls completes normally. Sub-agent calls do not count. `TurnRecord.num_turns`
+reports the same count, and a turn the cap ended reads N+1, as the Claude Code CLI
+reports it.
 
-They need their own counter because a native one would be meaningless: Codex and
-Antigravity each deliver exactly **one SDK turn per `communicate()` call**, so an
-SDK-level cap would clamp at 1 no matter what the task asked for.
+Each harness finds the call boundary in its own stream (the table above):
 
-The cap is enforced on the same loop boundary as the cooperative early stop: the
-step or notification that reaches the cap is processed whole, and the next one is
-never pulled. The in-flight turn is then cancelled server-side (best effort) so
-the cap actually stops spend. A run cut this way finalizes cleanly as
-`max_turns_exhausted` — it is not a crash, and it is not retried.
+- **claude-code** applies the cap in the CLI, and the harness reads the CLI's
+  `error_max_turns` stop. The CLI does not apply it on every route, so the harness
+  also counts distinct main-thread `message_id`s and ends the turn itself when call
+  N+1 begins.
+- **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
+  tools finish. An item starts as its tool runs, so waiting for the next call's
+  first item would let one tool of call N+1 act. A call that ran tools therefore
+  opens the next call at its `tokenUsage`, since the results always go back to the
+  model, and the cap fires before call N+1 can run anything.
+- **Antigravity** bills each call on the conversation's cumulative usage, not on a
+  step, so a rise in that total closes the call, and the next call opens with a MODEL
+  step at a new `step_index`.
+- **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
+- **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
+  its tool call, with no text before it. So the next call opens when every tool the
+  previous call announced has returned, since those results go back to the model,
+  and the cap fires before call N+1 can run anything. A reply that announces
+  several tools before their results counts once. If a tool never returns, the
+  next call opens at the model's next text or new tool call instead.
 
-**claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
-left alone rather than reimplemented in a different unit. Its unit is the SDK's own
-agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so the
-same number bounds very different amounts of work: under a prompt that encourages
-batching, a cap of N here permits many more than N tool calls, where it buys exactly
-N on the other two.
+Every harness enforces the cap on the same loop boundary as the
+cooperative early stop, then kills or cancels the in-flight turn so the cap stops
+spend. A run cut this way finalizes cleanly as `max_turns_exhausted`. It is not a
+crash, and it is not retried.
 
-**OpenCode also keeps a native unit — its stream's own steps.** Unlike Codex and
-Antigravity, `opencode run` executes a real multi-step agent loop per invocation
-and streams it (`step_start` / `step_finish`), so the natural agent-loop unit
-exists and is honored: `max_turns: N` allows N complete steps and cuts the run
-when step N+1 begins, with the completed steps' tokens intact. A step is one
-assistant generation and may carry several tool calls — so, as with claude-code,
-the same number is a looser tool-call budget than on the visible-turn backends.
+One call can carry several parallel tool calls, so `max_turns` bounds model calls,
+not tool calls. A model that batches does more work per turn, on every harness
+alike.
 
-**Pi keeps a native unit too — its `turn_start` agent-loop steps.** Like OpenCode,
-`pi -p --mode json` runs a real multi-step agent loop per invocation and streams it
-(`turn_start` / `turn_end`), so `max_turns: N` allows N complete turns and cuts the
-run when turn N+1 begins, with the completed turns' tokens intact. Pi streams
-incrementally, so the cut genuinely stops spend mid-run. A Pi turn is one assistant
-generation and may carry several tool calls — the same looser budget as claude-code
-and OpenCode.
-
-**So holding `max_turns` constant across harnesses does not hold the budget
-constant.** If you are A/B-ing across backends and the cap is close to binding, that
-is the number to distrust.
+The count is per iteration: each retry and each dialog exchange starts at zero. A
+dialog whose agent hits the cap inside an exchange ends with `stop_reason:
+agent_max_turns`. That is distinct from `max_turns`, the simulator's cap on
+exchanges.
 
 ### What a capped run looks like
 
@@ -588,12 +594,12 @@ The signals a capped run leaves behind, on every backend:
   `MAX_TURNS_EXHAUSTED` (reporting category `failed`, icon `M`). Never `ERROR`,
   and never retried.
 - `max_turns_exhausted: true` on the task record.
-- On Codex and Antigravity, the count of *resolved* tool calls the model itself
-  issued equals the cap. Two things can add a further *recorded* command, and
-  neither means the cap leaked:
-    - A tool call already in flight when the cap fires is force-closed and recorded
-      with `result_status: unknown` rather than dropped, so the trajectory shows what
-      was interrupted.
+- `num_turns` is the cap plus one.
+- The calls under the cap are recorded whole. Two things can add a further
+  *recorded* command, and neither means the cap leaked:
+    - A tool call from call N+1 that the harness saw before it stopped is
+      force-closed and recorded with `result_status: unknown` rather than dropped,
+      so the trajectory shows what was interrupted.
     - On Codex, a sub-agent's inner tool calls are recovered from its rollout after
       the pump stops, so the child's work and its tokens still reach the record. The
       cap bounds what the model was allowed to do, not what the record may explain.
@@ -733,10 +739,10 @@ Full detail: [Pi](PI.md).
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
-`--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
-contract above.
+`--type antigravity` / `--type opencode` / `--type pi` / `--type delegate` to check a
+backend against the contract above.
 
 ## Related
 
-- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md) · [Pi](PI.md)
+- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md) · [Pi](PI.md) · [Delegate](DELEGATE.md)
 - [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema

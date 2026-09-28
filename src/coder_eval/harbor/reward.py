@@ -1,39 +1,17 @@
 """Translate a graded coder-eval run into Harbor's reward-file contract.
 
-Harbor's verifier (``harbor 0.22.0``, verified against source — see
-``tmp/harborframework.md`` § C0) reads ``/logs/verifier/reward.json`` (a flat
-``dict[str, float]``) or falls back to ``/logs/verifier/reward.txt`` (a bare
-float, synthesized into the single key ``"reward"``). It does NOT inspect the
-verifier script's exit code — only whether the reward file exists, is
-non-empty, and parses. A missing/empty/malformed file raises inside Harbor's
-own ``Verifier.verify()`` (``RewardFileNotFoundError`` /
-``RewardFileEmptyError`` / ``VerifierOutputParseError``), which Harbor's
-``Trial.run()`` catches: it records the exception on ``TrialResult`` and
-leaves ``TrialResult.verifier_result`` at its default ``None`` — never
-coalesced to a zero-reward object. That is Harbor's own infra-vs-policy split,
-already built.
+Harbor's verifier reads ``/logs/verifier/reward.json`` (a flat ``dict[str, float]``)
+or falls back to ``reward.txt`` (a bare float). It does NOT inspect the verifier
+script's exit code — only whether the file exists, is non-empty, and parses. A
+missing or malformed one raises inside Harbor's own verify step, which its trial
+runner records rather than coalescing to a zero-reward object.
 
-This module's whole job, therefore, is: **write the file, or don't.**
+This module's whole job is therefore: **write the file, or don't.** An unmeasured row
+must not become ``reward=0.0``, and a grading-time infrastructure failure (which
+finalizes as ERROR with a score of ``0.0``, not ``None``) is the same case in
+disguise.
 
-The "don't" case is not a degenerate corner — it is the load-bearing one. An
-unmeasured row (``weighted_score is None`` — an ungraded row, or a task.json
-that failed to load at all) must not become ``reward=0.0``: that would train
-"the agent's behaviour was bad" from a measurement that never happened. Not
-writing the file lets Harbor's own missing-reward path mask the trial
-instead — the same principle as CE049 (never coalesce a possibly-unmeasured
-score to a numeric literal), one level up, at the artifact-writing boundary
-rather than the in-process one.
-
-A grading-time INFRASTRUCTURE failure is the same case in disguise:
-``EvaluationResult.calculate_weighted_score`` (``models/results.py``)
-short-circuits an empty ``success_criteria_results`` list to a hard ``0.0``,
-not ``None`` -- so a checker that raises ``JudgeInfrastructureError`` /
-``CheckerMisuseError`` / ``ReferenceTamperedError`` (escalating exceptions
-that deliberately propagate out of grading rather than being captured into a
-scored-0.0 result) finalizes the row ``FinalStatus.ERROR`` with
-``weighted_score == 0.0``, not ``None``. That is not a measurement either, so
-it gets the same "write nothing" treatment via ``final_status.category ==
-"error"``.
+Rationale: .claude/notes/reporting.md § Write the reward file, or do not
 """
 
 from __future__ import annotations

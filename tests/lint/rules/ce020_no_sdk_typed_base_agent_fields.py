@@ -1,33 +1,25 @@
 """CE020: No ``BaseAgentConfig`` field may be typed against ``claude_agent_sdk``.
 
-``BaseAgentConfig`` is the vendor-neutral Pydantic base shared by every agent kind
-(Claude Code, Codex, NoOp, and third-party BYOA configs). A field on it whose
-annotation references a ``claude_agent_sdk`` type leaks a Claude-Code-specific type
-onto agents that have nothing to do with the Claude SDK — the leaky-abstraction this
-refactor removed (``plugins: list[SdkPluginConfig]`` → local ``LocalPluginConfig``;
-``setting_sources`` moved down to ``ClaudeCodeAgentConfig``).
+``BaseAgentConfig`` is shared by every agent kind, so an ``AnnAssign`` in its class
+body whose annotation references a name from ``claude_agent_sdk`` is flagged. Fix
+with a local vendor-neutral type (alias / TypedDict mirror), or move the field to
+the subclass that needs the SDK type.
 
-The boundary is mechanically detectable, so this rule guards it: any ``AnnAssign``
-field inside the ``BaseAgentConfig`` class body whose annotation references a name
-imported from ``claude_agent_sdk`` is flagged. Fix by defining a local vendor-neutral
-type (alias / TypedDict mirror) or moving the field down to the concrete subclass that
-actually needs the SDK type.
+Scope: only ``models/agent_config.py``. Module-level SDK uses and SDK-typed fields
+on subclasses (``ClaudeCodeAgentConfig`` etc.) are allowed.
 
-Scope: only ``models/agent_config.py`` is inspected. The rule is deliberately narrow:
-- A module-level use of an SDK type (e.g. ``dataclasses.fields(ClaudeAgentOptions)``)
-  is NOT flagged — only ``AnnAssign`` annotations inside ``BaseAgentConfig`` are.
-- SDK-typed fields on subclasses (``ClaudeCodeAgentConfig`` etc.) are allowed.
-
-Import forms caught (so the leak can't sneak back via a different import style):
+Import forms caught:
 - ``from claude_agent_sdk import SettingSource`` (and aliased ``... as SS``).
 - ``from claude_agent_sdk.types import SettingSource`` (submodule path).
-- ``import claude_agent_sdk`` / ``import claude_agent_sdk as sdk`` used in attribute
-  form (``list[sdk.SettingSource]``).
+- ``import claude_agent_sdk [as sdk]`` used in attribute form
+  (``list[sdk.SettingSource]``).
 
-Not caught: ``from claude_agent_sdk import *`` (a wildcard hides the names) — but
-ruff F403/F405 already bans star imports, so that hole is covered upstream.
+BLIND SPOT: ``from claude_agent_sdk import *`` hides the names; ruff F403/F405
+(``pyproject.toml``) bans star imports.
 
 Add ``# noqa: CE020`` on the offending field for a deliberate exception.
+
+Rationale: .claude/notes/lint-rules.md § CE020
 """
 
 import ast

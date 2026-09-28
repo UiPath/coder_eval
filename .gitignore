@@ -61,7 +61,9 @@ uipath.json
 .claude/settings.local.json
 c/
 runs/
-reports/
+# Anchored to the repo root: this is generated RUN OUTPUT, not the
+# `src/coder_eval/reports/` package, which a bare `reports/` also matched.
+/reports/
 /runs/**/artifacts/
 .DS_Store
 tmp/

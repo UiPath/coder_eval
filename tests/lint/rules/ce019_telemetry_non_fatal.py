@@ -1,22 +1,18 @@
 """CE019: telemetry public functions must wrap their body in try/except Exception.
 
-Telemetry is a side-channel that must NEVER raise into a run. Each public
-function in ``src/coder_eval/telemetry.py`` therefore has to guard its whole
-body with a broad ``try/except Exception`` (or a bare ``except``). This rule
-turns that design invariant into mechanical enforcement.
+Telemetry is a side-channel that must NEVER raise into a run.
 
-Scope: only files ending in ``telemetry.py`` under ``src/coder_eval/``, and only
-the four core public functions (the explicit allowlist below). Private helpers
-(``_coerce_props``) and the ``track_command`` decorator are out of scope — their
-only side-effecting call is ``track_event``, which is itself guarded.
+Scope: files ending in ``telemetry.py`` under ``src/coder_eval/``, and only the
+functions in ``_GUARDED_FUNCTIONS``. Excluding the rest is safe: ``_coerce_props``
+and the ``track_command`` decorator reach side effects only through ``track_event``,
+and the other private helpers run only inside ``init_telemetry``'s guard.
 
-A function body is "guarded" when, after skipping a leading docstring, ``global``
-declaration, and any leading no-op guard clauses (``if ...: return``/``pass``),
-the remaining body is a single ``try`` whose handlers include a broad
-``except Exception`` or a bare ``except``.
+A body is "guarded" when, after a leading docstring, ``global`` declaration and
+no-op guard clauses (``if ...: return``/``pass``), what remains is a single
+``try`` with a bare ``except`` or ``except Exception``.
 
-Allowlist caveat (mirrors CE002): the function-name set is explicit — extend it
-when a new public telemetry function is added.
+Allowlist caveat (mirrors CE002): extend ``_GUARDED_FUNCTIONS`` when a new public
+telemetry function is added.
 """
 
 import ast

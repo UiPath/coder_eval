@@ -1,84 +1,27 @@
 """CE058: an unknown timing value may not become a numeric literal.
 
-``duration_ms is None`` means *this was never timed*, and it is a different
-fact from ``duration_ms == 0.0``, which means *it was timed and took no
-measurable time*. Writing the literal publishes the second while meaning the
-first, and every consumer downstream — an average, a breakdown percentage, a
-timeline cell — then treats the invention as a measurement. Same reasoning as
-CE049 on the score side.
+In ``src/coder_eval/``, ``None`` means *never timed*; ``0.0`` means *timed,
+instant*. Timing fields match ``_TIMING_NAME`` (``duration_ms``, command-time
+pair, ``*_duration_ms``, ``*_startup_ms``/``*_teardown_ms``, ``*_union_ms``);
+constructors, ``_TIMING_CONSTRUCTORS``. Six forms:
 
-Two shipped defects motivate it. Antigravity constructed every
-``AssistantMessage`` with ``generation_duration_ms=0.0``, so the task page's
-Generation cell read ``0ms`` and its thinking/tool/text breakdown rendered
-``0%`` for months with nothing failing. And Codex published the SDK item's own
-``duration_ms`` straight through, so ``avg_command_time_ms`` divided real
-milliseconds by a command count of which 70 of 211 in one nightly had never
-been timed at all.
-
-A third field family joined the first two: ``TurnRecord.harness_startup_ms``
-and ``harness_teardown_ms``, the turn's head and tail buckets. They are the
-same invariant one level up — a turn whose stream carried no assistant message
-was never timed at either end, and a ``0.0`` there would claim the harness
-started instantly, which is exactly the reading that sends a real gap into the
-evalboard's ``Unaccounted`` cell while a named bucket says it was measured at
-zero. A measured ``0.0`` remains a legitimate answer — a window subtracted
-down to nothing by the tool execution inside it, or a clamped inversion where
-both ends really were observed — so the two values must stay distinguishable.
-
-Six syntactic forms, one invariant, one id — the shapes the codebase actually
-produced:
-
-1. a ``0`` / ``0.0`` constructor keyword on one of the telemetry constructors
-   that carry these fields;
+1. a zero keyword on a timing constructor;
 2. ``duration_ms or 0``;
-3. ``x if x is not None else 0.0`` (and the ``is None`` mirror);
-4. ``if x.duration_ms is None: x.duration_ms = 0.0`` — the form no existing
-   rule shape covers, and where the live Claude instance was hiding
-   (``_finalize_commands`` set it on every command force-closed without a
-   tool result, in the one harness a timing audit had called healthy);
-5. ``model_copy(update={"duration_ms": 0.0})`` — a keyword rule is blind to a
-   dict, and the dict is how ``CommandTelemetry.duration_ms`` is actually
-   written on the Antigravity DONE path, so forms 1-4 alone would have left
-   the next author's ``"duration_ms": 0.0`` in that idiom unguarded;
-6. ``cmd.duration_ms = 0.0`` as a PLAIN assignment — form 4 without the
-   ``is None`` guard, or under a guard that tests something else.
+3. ``x if x is not None else 0.0`` (and the mirror);
+4. ``if x.duration_ms is None: x.duration_ms = <number>``;
+5. ``model_copy(update={"duration_ms": 0.0})``;
+6. ``cmd.duration_ms = 0.0`` with no ``is None`` guard naming it.
 
-Form 6 exists because form 4 was passing the live defect by coincidence. Form 4
-keys on the ``if`` test naming a timing attribute, and the shipped
-``_finalize_commands`` bug happened to spell it that way
-(``if cmd.duration_ms is None:``) — but the assignment sat inside an outer
-``if cmd.result_status is None:`` block, and rewriting it to set the literal
-under THAT guard instead, which reads just as naturally and books the identical
-lie, was invisible to all five earlier forms. The rule was one plausible
-refactor away from silent. A guard is only evidence about the value when the
-guard names the value; without one there is no evidence at all, which is
-strictly worse and must not be the case the rule misses.
+Forms 2-4 flag any number (each replaces an unmeasured value); forms 1, 5, 6 only
+zero, since those shapes also write a real ``1234.0``. Form 6 skips form 4's hits:
+``visit_If`` records them before ``generic_visit`` descends.
 
-It uses ``_zero_literal``, not form 4's broader ``_numeric_literal``, and the
-asymmetry is the point. Under ``if x is None`` the guard PROVES the value was
-never measured, so any invented number is a defect. A bare assignment proves
-nothing: ``cmd.duration_ms = elapsed_ms`` is how a measured value is written,
-and a literal ``1234.0`` is a legitimate test factory or replay. Only the
-placeholder zero is the tell — the same narrowing form 1 already makes, and for
-the same reason.
+BLIND SPOTS: forms 1 and 6 key on spelling; renaming the
+``AssistantMessageTelemetry`` alias, a rebound local, or ``setattr`` escapes.
 
-Forms 4 and 6 overlap on the zero case, so form 4 records the statements it
-flags and form 6 skips them. The visit order makes that sound rather than
-lucky: ``visit_If`` runs its own check BEFORE ``generic_visit`` descends into
-the body, so the assignment is always registered before ``visit_Assign`` sees
-it. Form 4 keeps its wider literal set, so a guarded ``= 1234.0`` still fires
-exactly once, from form 4.
+``# noqa: CE058`` where missing genuinely means zero.
 
-BLIND SPOTS worth knowing. Form 1 keys on the callee's spelling, so
-``AssistantMessageTelemetry`` (an import alias for ``AssistantMessage`` in
-``claude_code_agent``) is matched by name only; renaming that alias silently
-disarms form 1 for that module. And form 6 keys on the TARGET's spelling, so it
-sees ``cmd.duration_ms = 0.0`` but not a write through a rebound local or
-``setattr(cmd, field, 0.0)`` — the same limit every AST rule here has without
-type inference.
-
-``# noqa: CE058`` for a genuinely aggregate-internal use where a missing value
-really is a zero, with a comment saying so.
+Rationale: .claude/notes/lint-rules.md § CE058
 """
 
 import ast
@@ -87,20 +30,10 @@ import re
 from tests.lint.rules.base import BaseRule
 
 
-# Trailing-segment match, so `cmd.duration_ms` and `generation_duration_ms`
-# fire while `duration_ms_limit` does not. The `_startup_ms` / `_teardown_ms`
-# arms need a leading segment for the same reason the `_duration_ms` arm does:
-# the shipped fields are `harness_*`, and a bare `startup_ms` is more likely a
-# budget than a measurement.
-#
-# THREE field families, not two. `tool_union_ms` is the turn's third wall-clock
-# bucket, on the same model and under the same None-vs-0.0 contract as the
-# `harness_*` pair — and it matched NO arm above, so `TurnRecord(tool_union_ms=0.0)`
-# would have been invisible even though `TurnRecord` is already in
-# `_TIMING_CONSTRUCTORS`. Naming the field `tool_union_duration_ms` to inherit
-# the generic `_duration_ms` arm for free was considered and rejected: the two
-# fields beside it needed their own arm for exactly this reason, and one
-# spelling across the four buckets is worth two lines of regex.
+# Trailing-segment match, so `cmd.duration_ms` and `generation_duration_ms` fire while
+# `duration_ms_limit` does not. THREE field families, not two: `tool_union_ms` is the
+# turn's third wall-clock bucket and matches no other arm.
+# Rationale: .claude/notes/lint-rules.md § CE058 field families
 _TIMING_NAME = re.compile(
     r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms"
     r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms|[a-z_]*_union_ms)$"

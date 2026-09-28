@@ -314,7 +314,7 @@ class TestCustomProviderRouting:
         """wire_api is always 'responses' — the pinned codex binary dropped 'chat'
         support, so it's a fixed constant, not an operator knob."""
         monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
-        monkeypatch.setenv("CODEX_WIRE_API", "chat")  # ignored — no longer a knob
+        monkeypatch.setenv("CODEX_WIRE_API", "chat")  # ignored — not a knob
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
         provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
         assert provider["wire_api"] == "responses"
@@ -1523,9 +1523,8 @@ class _ImmediateTimeoutWatchdog:
 class TestCommunicatePostWatchdogTimeoutRace:
     """Regression for the post-watchdog timeout race: when the watchdog fires but
     the pump completes before the cancel lands, the trailing `if timeout_hit`
-    block must set _state=ERROR (consistent with every other timeout/crash path).
-    Previously this path left _state unchanged — a latent inconsistency now fixed
-    by routing it through the shared _finalize_and_raise_timeout kernel."""
+    block must set _state=ERROR (consistent with every other timeout/crash path),
+    via the shared _finalize_and_raise_timeout kernel."""
 
     async def test_post_watchdog_timeout_sets_error_state_and_partial(self, monkeypatch):
         notifications = [_delta("done"), _turn_completed()]
@@ -2028,18 +2027,17 @@ class TestLoginShellMockPathHome:
             agent._cleanup_login_shell_home()
 
 
-class TestMaxTurnsVisibleTurnCap:
-    """``max_turns`` was documented as "unused for Codex single-turn" and dropped.
+class TestMaxTurnsApiCallCap:
+    """``max_turns`` caps main-thread model API calls, Claude Code's unit.
 
-    Codex delivers one SDK turn per ``communicate()``, so a native turn counter would
-    cap at 1 and mean nothing; the cap therefore counts VISIBLE turns (completed tool
-    calls — the unit ``reports_stats.visible_turn_count`` sums) and is enforced on the
-    same pump boundary as the cooperative stop.
+    A call runs from its first item to its tokenUsage event, and a call that ran tools
+    opens the next one there, so the pump stops as soon as the last allowed call's
+    tools finish, before the next call can run anything.
     """
 
     @staticmethod
     def _cmd_notifications(count: int) -> list:
-        """`count` completed shell commands, then the terminal turn/completed."""
+        """`count` API calls that each think and run one shell command, then a final-reply call."""
         notifications = []
         for i in range(count):
             root = SimpleNamespace(
@@ -2050,27 +2048,44 @@ class TestMaxTurnsVisibleTurnCap:
                 aggregated_output=f"step-{i}\n",
                 duration_ms=5,
             )
+            reasoning = _reasoning_item("plan", item_id=f"r{i}")
+            notifications.append(_item_notification("item/started", reasoning))
+            notifications.append(_item_notification("item/completed", reasoning))
             notifications.append(_item_notification("item/started", root))
             notifications.append(_item_notification("item/completed", root))
+            notifications.append(_token_usage(inp=10, out=5, cached=0))
+        reply = SimpleNamespace(type="agentMessage", id="m1", text="done")
+        notifications.append(_item_notification("item/started", reply))
+        notifications.append(_item_notification("item/completed", reply))
+        notifications.append(_token_usage(inp=10, out=5, cached=0))
         notifications.append(_turn_completed())
         return notifications
 
-    async def test_cap_stops_the_pump_at_the_limit(self):
+    async def test_cap_stops_before_the_next_call_runs_a_tool(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
         record = await agent.communicate("go", max_turns=2)
 
         assert len(record.commands) == 2
         assert record.max_turns_exhausted is True
+        assert record.num_turns == 3
 
     async def test_cap_keeps_the_deciding_call_complete(self):
-        """Counting COMPLETED calls means the one that reaches the cap keeps its result."""
+        """The last allowed call keeps its tool result: the cap fires only once the next call opens."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
 
         record = await agent.communicate("go", max_turns=1)
 
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
+
+    async def test_a_final_reply_on_the_last_allowed_call_completes(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(1))
+
+        record = await agent.communicate("go", max_turns=2)
+
+        assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
 
     async def test_cap_interrupts_the_in_flight_turn(self):
         """Best-effort server-side interrupt, so the cap actually stops spend."""
@@ -2087,6 +2102,7 @@ class TestMaxTurnsVisibleTurnCap:
 
         assert len(record.commands) == 2
         assert record.max_turns_exhausted is False
+        assert record.num_turns == 3
 
     async def test_no_cap_consumes_the_whole_stream(self):
         """None must preserve the pre-existing behavior exactly."""
@@ -2100,10 +2116,16 @@ class TestMaxTurnsVisibleTurnCap:
     async def test_cooperative_stop_outranks_the_cap(self):
         """Both firing on the same notification reports STOPPED_EARLY."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+        polls: list[int] = []
 
-        record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+        def should_stop() -> bool:
+            polls.append(1)
+            return len(polls) >= 5  # the poll after call 1's tokenUsage, where max_turns=1 also fires
+
+        record = await agent.communicate("go", max_turns=1, should_stop=should_stop)
 
         assert record.max_turns_exhausted is False
+        assert len(record.commands) == 1
 
     async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
         """A capped turn must not lose the child threads' spend.
@@ -2128,7 +2150,7 @@ class TestMaxTurnsVisibleTurnCap:
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
-        # The cap fires on the wait, before turn/completed is ever dispatched.
+        # The cap fires once the second call's tools finish, before turn/completed is dispatched.
         notifications = [
             _item_notification("item/started", spawn),
             _item_notification("item/completed", spawn),
@@ -2411,8 +2433,7 @@ class TestFlushMessageWindowBounds:
     The end-to-end cases above all describe a stream whose stamps advance, so
     they cannot reach the awkward case the reducer still hands `close_window`:
     the emission's own first stamp (`item_start`), whose `min()` against the
-    mark is the backwards-clock defence. The tool-span arguments this class
-    also used to cover are gone — the subtraction moved to
+    mark is the backwards-clock defence. Tool-span subtraction belongs to
     `timing.subtract_tool_time`, and
     `tests/test_event_collector.py::TestSubtractToolTime` pins it there.
     """
@@ -2470,8 +2491,7 @@ class TestFlushMessageWindowBounds:
     def test_the_published_window_is_raw_and_ignores_a_call_still_open(self):
         """The reducer publishes the RAW span; the collector subtracts.
 
-        It used to bound a still-open call at the window's end and take that
-        slice out here. `timing.subtract_tool_time` sees every span at
+        `timing.subtract_tool_time` sees every span at
         once, so a call is subtracted from the windows its REAL interval
         overlaps once it resolves — no boundary approximation, and nothing for
         this reducer to remember. A call that never resolves has no
@@ -2499,10 +2519,9 @@ class TestFlushMessageWindowBounds:
 class TestFlushMessageGenTimeSplit:
     """`gen_ms` is apportioned across sub-messages by their output share.
 
-    It used to land entirely on the FIRST spec, so a thinking+action
-    generation reported the thinking row as the whole generation and the
-    action row as instant — 98.5% of Codex generation time booked to
-    thinking. Billing tokens still travel with the first spec only; time is a
+    Booking it all on the FIRST spec would report a thinking+action
+    generation's thinking row as the whole generation and its action row as
+    instant. Billing tokens still travel with the first spec only; time is a
     property of the content, not of the call.
     """
 
@@ -2562,8 +2581,6 @@ class TestFlushMessageGenTimeSplit:
 
     def test_billing_tokens_stay_on_the_first_sub_message_only(self):
         # Time is split; input/cache are per-CALL figures and must not be.
-        # The comment this phase edited previously claimed the two travelled
-        # together, so assert them apart explicitly.
         msgs = self._flush(gen_ms=1000, think_out=800, action_out=200)
         assert len(msgs) == 2
         assert msgs[0].input_tokens == 500 - 200  # fresh slice

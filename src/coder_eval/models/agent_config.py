@@ -54,23 +54,13 @@ class LocalPluginConfig(TypedDict):
 
 
 _VALID_SDK_OPTION_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(ClaudeAgentOptions))
-# Keys that `coder_eval` already owns at the AgentConfig level OR that are
-# transport / lifecycle / security-critical. Setting them via the
-# sdk_options pass-through would either silently shadow a typed field, let
-# the user inject pre-LLM lifecycle hooks (hooks / mcp_servers /
-# permission_prompt_tool_name / can_use_tool / agents), or bypass
-# framework-managed runtime state (cwd / env / resume / max_turns / ...).
-# Most relevantly: AgentJudgeCriterion forces setting_sources=[] for
-# security; allowing `hooks` through sdk_options would re-open that hole.
-# NOTE on the allow/deny model: validation works as ALLOW iff
-#   (key in _VALID_SDK_OPTION_FIELDS)  AND  (key not in _FRAMEWORK_OWNED_SDK_FIELDS)
-# i.e. the user-visible set is ``_VALID - _FRAMEWORK_OWNED``. The denylist is
-# explicit so the curated rationale (transport / lifecycle / security / typed-
-# mirror) stays close to the code. To keep this from being fail-open as the
-# SDK grows: ``tests/test_sdk_option_classification.py`` asserts EVERY field
-# on ``ClaudeAgentOptions`` is classified — either typed-mirrored or in
-# ``_FRAMEWORK_OWNED_SDK_FIELDS``. A new SDK release adding an unclassified
-# field will fail that test loudly rather than silently being passed through.
+# Keys `coder_eval` already owns at the AgentConfig level, or that are transport /
+# lifecycle / security-critical. Validation is ALLOW iff
+#   (key in _VALID_SDK_OPTION_FIELDS) AND (key not in _FRAMEWORK_OWNED_SDK_FIELDS)
+# so the user-visible set is ``_VALID - _FRAMEWORK_OWNED``. The denylist is explicit
+# so each withheld key's reason stays beside the code, and
+# ``tests/test_sdk_option_classification.py`` asserts every SDK field is classified.
+# Rationale: .claude/notes/agents.md § The sdk_options pass-through
 _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
     {
         # mirrored as typed AgentConfig fields:
@@ -92,16 +82,12 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "session_id",
         "session_store",
         "session_store_flush",
-        # session lifecycle — coder_eval owns this via `resume` and the
-        # orchestrator's "advance session_id only on clean turns" logic.
-        # Letting YAML override would silently bypass that.
+        # session lifecycle -- owned by the orchestrator's "advance session_id
+        # only on clean turns" logic.
         "continue_conversation",
         "fork_session",
-        # budgeting — overlaps with RunLimits.max_usd / RunLimits.max_total_tokens
-        # which the orchestrator enforces with explicit FinalStatus codes
-        # (TOKEN_BUDGET_EXCEEDED / COST_BUDGET_EXCEEDED). Two independent
-        # budget guards would disagree on counts; route everything through
-        # RunLimits.
+        # budgeting -- overlaps RunLimits, which the orchestrator enforces with
+        # explicit FinalStatus codes. Two guards would disagree on counts.
         "max_budget_usd",
         "task_budget",
         # security-critical: arbitrary code injection or settings-bypass
@@ -118,11 +104,8 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "skills",
         "add_dirs",
         "setting_sources",  # framework-controlled to prevent hook injection
-        # telemetry: required by ClaudeCodeAgent to recover per-emission
-        # output_tokens via message_delta stream events (works around
-        # anthropics/claude-code#22686 where the assistant event's
-        # output_tokens is a partial streaming snapshot). Letting YAML
-        # turn it off would silently drop per-message output accounting.
+        # telemetry: required to recover per-emission output_tokens around
+        # anthropics/claude-code#22686. Turning it off drops that accounting.
         "include_partial_messages",
     }
 )
@@ -137,8 +120,7 @@ class BaseAgentConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
 
     # Cross-field merge exclusion: setting either prompt field at any layer clears
-    # the sibling (the generic resolver honors this uniformly). ClassVar -> not a
-    # model field; Pydantic does not validate/assign it.
+    # the sibling. ClassVar -> not a model field.
     _merge_exclusive_groups: ClassVar[tuple[tuple[str, ...], ...]] = (("system_prompt", "system_prompt_file"),)
 
     type: str | None = Field(
@@ -310,10 +292,8 @@ class CodexAgentConfig(BaseAgentConfig):
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
 
 
-# Gemini "thinking level" (reasoning effort) for the Antigravity backend. Mirrors
-# google.antigravity.types.ThinkingLevel as a plain Literal so this config module
-# imports without the optional `google-antigravity` SDK installed (the SDK is an
-# opt-in extra; base installs must still load every config class).
+# Mirrors google.antigravity.types.ThinkingLevel as a plain Literal so this module
+# imports without the optional SDK -- base installs must load every config class.
 type ThinkingLevel = Literal["minimal", "low", "medium", "high"]
 
 
@@ -381,45 +361,28 @@ class OpenCodeAgentConfig(BaseAgentConfig):
     )
 
 
-# Pi's ``--thinking`` reasoning-effort set. A STRICT SUPERSET of ThinkingLevel
-# (adds ``off``/``xhigh``/``max``), so Pi gets its own literal rather than reusing
-# the 4-value one — reuse would forbid valid Pi levels. Spike-confirmed against
-# ``pi --help`` on Pi 0.84.4.
+# A STRICT SUPERSET of ThinkingLevel, so Pi gets its own literal -- reuse would
+# forbid valid Pi levels. Confirmed against ``pi --help`` on Pi 0.87.1.
 type PiThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class PiAgentConfig(BaseAgentConfig):
     """Pi agent configuration (the ``pi`` Node coding agent — https://pi.dev/).
 
-    Drives the ``pi`` CLI in JSON print mode
-    (``pi -p --mode json``), which streams newline-delimited JSON events on
-    stdout. ``model`` is Pi's provider-prefixed ``provider/model`` form (e.g.
-    ``openrouter/moonshotai/kimi-k3``) and is passed through verbatim via
-    ``--model`` (no separate ``--provider`` needed).
+    Drives the ``pi`` CLI in JSON print mode (``pi -p --mode json``), which streams
+    newline-delimited JSON events on stdout. ``model`` is Pi's provider-prefixed
+    ``provider/model`` form, passed through verbatim via ``--model``.
 
-    Session continuity (multi-turn / simulation)
-    --------------------------------------------
-    Each ``communicate()`` is one ``pi`` subprocess. A standard task reaches its
-    solution inside a single ``communicate()`` (Pi runs its own multi-step agent
-    loop). A simulation/dialog task calls ``communicate()`` once per user turn and
-    relies on the agent remembering prior turns — so ``PiAgent`` reuses a per-agent
-    ``--session-dir`` + stable ``--session-id`` on every invocation (create-if-missing
-    on turn 1, resume after), mirroring OpenCode's ``--session`` continuity.
+    Each ``communicate()`` is one ``pi`` subprocess, so a dialog task relies on a
+    per-agent ``--session-dir`` + stable ``--session-id`` for continuity.
 
-    Enforced vs unenforced fields
-    -----------------------------
-    ``system_prompt`` → ``--append-system-prompt`` IS enforced (a small capability
-    win over OpenCode). ``allowed_tools`` / ``disallowed_tools`` are NOT forwarded:
-    the shared config default sets Claude-namespaced tool names
-    (``Bash``/``Read``/…) that do not exist in Pi's lowercase toolset
-    (``bash``/``read``/…), so forwarding them to ``--tools`` would allowlist
-    nonexistent tools and strip the agent of ALL tools — like OpenCode/Codex/
-    Antigravity, Pi ignores them and runs with its full native toolset.
-    ``permission_mode`` is NOT enforced (Pi headless print mode auto-runs tools;
-    the sandbox driver is the isolation boundary) and ``system_prompt_file`` is NOT
-    read — both warned about at ``start()``. ``plugins`` skills ARE injected (each
-    resolved skills dir → a ``--skill <dir>`` arg, recorded as ``pi_skill_paths`` in
-    ``environment_info``), so Pi can run activation suites. See ``docs/agents/PI.md``.
+    ``system_prompt`` IS enforced. ``allowed_tools`` / ``disallowed_tools`` are NOT
+    forwarded (the shared defaults name Claude-namespaced tools that do not exist in
+    Pi's toolset, so forwarding them would strip the agent of ALL tools), nor is
+    ``permission_mode``, nor is ``system_prompt_file`` read -- both warned about at
+    ``start()``. ``plugins`` skills ARE injected. See ``docs/agents/PI.md``.
+
+    Rationale: .claude/notes/agents.md § Pi
     """
 
     type: Literal[AgentKind.PI]  # type: ignore[assignment]
@@ -427,6 +390,62 @@ class PiAgentConfig(BaseAgentConfig):
     thinking_level: PiThinkingLevel = Field(
         default="medium",
         description="Pi reasoning effort passed as --thinking (off/minimal/low/medium/high/xhigh/max).",
+    )
+
+
+class DelegateAgentConfig(BaseAgentConfig):
+    """Delegate agent configuration (UiPath Autopilot's Delegate agent).
+
+    Drives a Node host subprocess this framework ships (``agents/delegate/delegate_host.mjs``)
+    that wraps the public ``@uipath/delegate-sdk`` npm package's ``DelegateAgent`` class in a
+    stdio JSON-Lines protocol. The SDK's reasoning runs in the UiPath backend; its tools
+    (shell, file, Office, PDF) execute locally through a bundled interop process, so file-based
+    success criteria work as usual. See ``docs/agents/DELEGATE.md``.
+
+    ``allowed_tools`` / ``disallowed_tools`` / ``system_prompt`` / ``system_prompt_file``
+    have no Delegate SDK equivalent and are warned about, not enforced, at ``start()``.
+    ``setting_sources`` is not inherited at all (it is Claude-Code-only, declared on
+    ``ClaudeCodeAgentConfig``, not ``BaseAgentConfig``), so setting it here is a plain
+    validation error rather than a silent no-op. ``permission_mode`` is silently ignored
+    (the SDK has no permission-prompt concept). ``plugins`` skills ARE injected (first
+    plugin's ``<path>/skills`` wins).
+    """
+
+    type: Literal[AgentKind.DELEGATE]  # type: ignore[assignment]
+
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Reasoning-effort tier forwarded to the backend as-is (documented values: "
+            "low/medium/high/xhigh/max). Not validated against a closed set here — the SDK "
+            "itself ignores a value it does not recognize, and a strict Literal would reject a "
+            "tier a future SDK release adds."
+        ),
+    )
+    project_id: str | None = Field(
+        default=None,
+        description=(
+            "Client-side wiki-routing key (never sent to the backend). None means session-scoped "
+            "wiki state under a server-assigned session id instead of a stable project directory."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Pins the Delegate SDK session id used when a turn omits one, for deterministic "
+            "wiki-path routing. Unlike project_id this IS a backend entity: a pinned id skips "
+            "session creation, so it must be one the backend accepts. project_id takes precedence."
+        ),
+    )
+    enable_computer_use: bool = Field(
+        default=False,
+        description=(
+            "Forwarded as the SDK's enableComputerUse. False (the default, and NOT the SDK's own "
+            "default of True) drops screenshots/window-list/focused-element/UI-automation tools "
+            "only — file, shell, Office and PDF tools are unaffected. Kept off by default because "
+            "this is a headless eval harness: True requires macOS Accessibility/Screen-Recording "
+            "grants that a CI runner does not have, and throws unconditionally on Linux."
+        ),
     )
 
 
@@ -450,15 +469,15 @@ class NoneAgentConfig(BaseAgentConfig):
     type: Literal[AgentKind.NONE]  # type: ignore[assignment]
 
 
-# Discriminated union type for type hints, validation, and YAML serialization
-# Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
-# must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
+# Concrete subclasses only (not BaseAgentConfig): the discriminator must be a
+# Literal. parse_agent_config returns BaseAgentConfig when type=None.
 type AgentConfig = Annotated[
     ClaudeCodeAgentConfig
     | CodexAgentConfig
     | AntigravityAgentConfig
     | OpenCodeAgentConfig
     | PiAgentConfig
+    | DelegateAgentConfig
     | NoneAgentConfig,
     Field(discriminator="type"),
 ]
@@ -521,10 +540,8 @@ def _coerce_agent_config(value: Any) -> Any:
     return value
 
 
-# The canonical annotation for any field that holds a resolved agent config.
-# BeforeValidator routes a dict through registry dispatch (so plugin kinds resolve
-# to their subclass); SerializeAsAny keeps subclass-only fields on model_dump()
-# instead of the base schema silently dropping them. Used by every persisted
-# agent-config field (TaskDefinition.agent, EvaluationResult.agent_config) so the
-# round-trip guarantee is uniform across the built-in union and plugin kinds.
+# The canonical annotation for a resolved agent config. BeforeValidator routes a
+# dict through registry dispatch so plugin kinds resolve to their subclass;
+# SerializeAsAny keeps subclass-only fields on model_dump(). Used by every persisted
+# agent-config field, so the round-trip guarantee is uniform.
 type ResolvedAgentConfig = Annotated[SerializeAsAny[BaseAgentConfig], BeforeValidator(_coerce_agent_config)]

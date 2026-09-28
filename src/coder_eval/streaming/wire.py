@@ -32,10 +32,10 @@ from coder_eval.streaming.events import (
 
 logger = logging.getLogger(__name__)
 
-# ASCII Record Separator (U+001E) framing the sentinel makes collision
-# with real agent / tool / pytest output effectively impossible: control
-# chars below 0x20 don't appear in normal stdout. A line that starts with
-# this exact byte sequence is a streamed event by construction.
+# ASCII Record Separator (U+001E) framing makes collision with real agent, tool
+# or pytest output effectively impossible: control chars below 0x20 do not appear
+# in normal stdout, so a line starting with this byte sequence is a streamed event
+# by construction.
 LINE_PREFIX = "\x1ecoder-eval-stream\x1e:"
 
 _EVENT_CLASSES: dict[str, type[StreamEvent]] = {
@@ -104,12 +104,9 @@ class StdoutNDJsonCallback:
     """
 
     def on_event(self, event: StreamEvent) -> None:
-        # Plain print + flush -- the in-container Python is line-buffered
-        # under non-tty stdout, so explicit flush matters.
-        # BrokenPipeError guard: if the host got SIGKILL'd or docker-kill'd
-        # the container mid-run, our stdout pipe peer is gone. Letting
-        # BrokenPipeError propagate would crash whatever in-container code
-        # path emitted the event (typically the orchestrator's run loop)
-        # and prevent task.json from being written for partial results.
+        # Explicit flush: the in-container Python is line-buffered under non-tty
+        # stdout. The BrokenPipeError guard matters because a host SIGKILL leaves
+        # our pipe peer gone, and letting it propagate would crash the
+        # in-container run loop before task.json is written for partial results.
         with contextlib.suppress(BrokenPipeError, OSError):
             print(serialize_event(event), flush=True)

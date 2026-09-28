@@ -75,7 +75,7 @@ jobs:
       # Load-bearing on the release path: the pool enforces a package-age safe-chain
       # check on uv installs. Same expression as pr-checks.yml (see the comment there),
       # so a package can't pass PR CI and then fail the release install.
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk
 
     steps:
       # Only a real release (main) needs the app token: semantic-release pushes the

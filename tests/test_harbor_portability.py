@@ -90,14 +90,20 @@ def test_reference_comparison_does_not_block_export() -> None:
         CommandExecutedCriterion(description="d", command_pattern="."),
         CommandsEfficiencyCriterion(description="d", expected_commands=3),
         SkillTriggeredCriterion(description="d", expected_skill="s", skill_name="s"),
-        CliCalledCriterion(description="d", verb="v"),
     ],
 )
-def test_missing_functionality_criteria_always_block_export(criterion: object) -> None:
-    """No flag can supply what does not exist yet (C1.3 / a recorder-baking step)."""
-    issues = audit_criteria([criterion], allow_credentials=True)  # type: ignore[list-item]
+def test_trajectory_criteria_do_not_block_export(criterion: object) -> None:
+    """NEEDS_TRAJECTORY is not in _BLOCKING_IN_V1 — CoderEvalAgent + test.sh always wire
+    /logs/agent/trajectory.json into the verifier's `coder-eval evaluate --format harbor` call."""
+    assert audit_criteria([criterion]) == []  # type: ignore[list-item]
+
+
+def test_cli_called_still_blocks_export() -> None:
+    """No flag can supply what does not exist yet (a recorder-baking step in C2)."""
+    criterion = CliCalledCriterion(description="d", verb="v")
+    issues = audit_criteria([criterion])
     assert len(issues) == 1
-    assert issues[0].criterion_type == criterion.type  # type: ignore[attr-defined]
+    assert issues[0].criterion_type == criterion.type
 
 
 @pytest.mark.parametrize(
@@ -108,9 +114,10 @@ def test_missing_functionality_criteria_always_block_export(criterion: object) -
         UiPathEvalCriterion(description="d", agent_name="a", eval_set="p", thresholds={}),
     ],
 )
-def test_credentials_criteria_block_by_default_but_have_an_escape_hatch(criterion: object) -> None:
-    assert len(audit_criteria([criterion])) == 1  # type: ignore[list-item]
-    assert audit_criteria([criterion], allow_credentials=True) == []  # type: ignore[list-item]
+def test_credentials_criteria_never_block_export(criterion: object) -> None:
+    """NEEDS_CREDENTIALS always exports -- the operator is assumed to provision
+    model access inside the verifier container themselves."""
+    assert audit_criteria([criterion]) == []  # type: ignore[list-item]
 
 
 def test_a_clean_multi_criterion_task_reports_no_issues() -> None:
@@ -125,11 +132,9 @@ def test_a_mixed_task_reports_only_the_blocking_criteria() -> None:
     criteria = [
         FileExistsCriterion(description="portable", path="p1"),
         SkillTriggeredCriterion(description="needs trajectory", expected_skill="s", skill_name="s"),
+        CliCalledCriterion(description="needs cli recorder", verb="v"),
         LLMJudgeCriterion(description="needs credentials", prompt="p"),
     ]
     issues = audit_criteria(criteria)
-    assert {i.criterion_description for i in issues} == {"needs trajectory", "needs credentials"}
-    assert {i.portability for i in issues} == {
-        CriterionPortability.NEEDS_TRAJECTORY,
-        CriterionPortability.NEEDS_CREDENTIALS,
-    }
+    assert {i.criterion_description for i in issues} == {"needs cli recorder"}
+    assert {i.portability for i in issues} == {CriterionPortability.NEEDS_CLI_RECORDER}

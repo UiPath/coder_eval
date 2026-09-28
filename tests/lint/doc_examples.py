@@ -1,34 +1,22 @@
 """CE029 — self-contained YAML examples in the docs must validate against their models.
 
-A published example that does not parse is worse than no example: readers copy it,
-hit a ``ValidationError``, and conclude the feature is broken. This rule caught
-exactly that — the ``prompt_mutations`` recipe in ``docs/AB_EXPERIMENTS.md`` used
-``text:`` where the field is ``content:``, and every mutation model declares
-``extra="forbid"``, so the published snippet raised
-``variants.1.prompt_mutations.0.suffix.content Field required``.
-
-Scope is deliberately narrow — the rule only validates blocks it can *prove* are
-whole documents, because a false positive on an illustrative fragment would make
-``make lint`` a nuisance and get the rule deleted:
+The rule validates only blocks it can prove are whole documents:
 
 * a block is a **task** when it has ``task_id`` + ``initial_prompt`` +
   ``success_criteria``, and an **experiment** when it has ``experiment_id`` +
-  ``variants``. Anything else is a fragment and is skipped — including a bare
-  ``success_criteria:`` list, which is the single most common doc shape.
-* **schematic** blocks are skipped: a doc that writes ``agent: { ... }`` to mean
-  "and so on" parses to the literal key ``"..."``. The task guide's overview block
-  uses that form deliberately.
-* a block that is not valid YAML at all is skipped rather than reported — it
-  cannot be classified, so the rule has no basis for claiming it is a broken
-  *example* as opposed to deliberately-invalid illustrative text.
-* escape hatch: a block preceded by ``<!-- lint-skip: doc-yaml -->`` is skipped,
-  for a future example that is intentionally partial in a way the heuristic
-  cannot see.
+  ``variants``. Anything else, including a bare ``success_criteria:`` list, is a
+  fragment and is skipped.
+* a **schematic** block (``agent: { ... }``, parsed as key ``"..."``) is skipped.
+* a block that is not valid YAML is skipped, not reported: it cannot be classified,
+  so it may be deliberately invalid illustrative text.
+* a block preceded by ``<!-- lint-skip: doc-yaml -->`` is skipped.
 
-Like CE027, this is intentionally NOT a ``BaseRule`` registered in
-``tests/lint/runner.py``: that runner is AST-only and walks ``.py`` files, whereas
-this rule reasons over Markdown. It is wired as a dedicated test in
-``tests/test_custom_lint.py::TestCE029DocYamlExamples``.
+BLIND SPOT: a broken example missing a classifying key is never validated.
+
+Wired as ``tests/test_custom_lint.py::TestCE029DocYamlExamples``, not the AST runner:
+it reasons over Markdown.
+
+Rationale: .claude/notes/lint-rules.md § CE029
 """
 
 from __future__ import annotations

@@ -66,12 +66,36 @@ def _step(
         content_delta=content_delta,
         thinking=thinking,
         thinking_delta=thinking_delta,
-        usage_metadata=usage,
+        # NOT `usage_metadata`: SDK 0.1.18 no longer puts usage on the Step. The fake
+        # conversation's meter bills it as the step is yielded, as the connection does.
+        billed=usage,
         is_complete_response=complete,
         error=error,
         step_index=step_index,
         trajectory_id=trajectory_id,
     )
+
+
+class _UsageMeter:
+    """Stands in for the SDK connection's ``cumulative_usage``: rises as model calls are billed."""
+
+    def __init__(self) -> None:
+        self.total = _usage(0, 0, 0, 0)
+
+    def feed(self, step):
+        billed = getattr(step, "billed", None)
+        if billed is not None:
+            t = self.total
+            self.total = _usage(
+                t.prompt_token_count + billed.prompt_token_count,
+                t.cached_content_token_count + billed.cached_content_token_count,
+                t.candidates_token_count + billed.candidates_token_count,
+                t.thoughts_token_count + billed.thoughts_token_count,
+            )
+        return step
+
+    def read(self):
+        return self.total
 
 
 class _FakeConversation:
@@ -94,6 +118,11 @@ class _FakeConversation:
         self.last_response = ""
         self.receive_steps_call_count = 0
         self.cancel_call_count = 0
+        self.meter = _UsageMeter()
+
+    @property
+    def total_usage(self):
+        return self.meter.read()
 
     async def send(self, prompt, **kwargs):
         return None
@@ -103,7 +132,7 @@ class _FakeConversation:
         batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
         self._batch_index += 1
         for s in batch:
-            yield s
+            yield self.meter.feed(s)
 
     async def cancel(self):
         self.cancel_call_count += 1

@@ -25,7 +25,7 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        exclude: ^tasks/  # Allow YAML templates with variables
+        exclude: ^tasks/|^mkdocs\.yml$  # tasks/: YAML templates with variables; mkdocs.yml: Material's !ENV tag
       - id: check-added-large-files
         args: ['--maxkb=500']
         exclude: ^docs/assets/hero\.gif$  # README hero media

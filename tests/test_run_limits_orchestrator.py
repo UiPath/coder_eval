@@ -328,7 +328,7 @@ class TestCostDataAvailableFlag:
         # The report_path lives under tmp_path so the write_text call lands
         # in a real (test-scoped) file and we don't need to mock pathlib.
         with (
-            _patch("coder_eval.reports_html.write_task_html", return_value=None),
+            _patch("coder_eval.reports.write_task_html", return_value=None),
             _patch("coder_eval.evaluation.judge_persistence.spill_judge_transcripts", return_value=None),
         ):
             orch._finalize_result(_time.time())
@@ -631,6 +631,50 @@ class TestExpectedTurnsSimulation:
 
         assert "Visible turns (5) exceeded expected_turns (2)" in caplog.text
         assert orch._expected_turns_warning_emitted is True
+
+
+@pytest.mark.asyncio
+async def test_agent_max_turns_ends_dialog_with_its_own_reason(tmp_path):
+    from coder_eval.models import SimulationConfig
+
+    sim = SimulationConfig(
+        enabled=True,
+        persona="user",
+        goal="get the agent to do x",
+        max_turns=5,
+        check_criteria="end_of_dialog",
+    )
+    task = _make_task(run_limits=RunLimits(max_turns=2))
+    task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
+
+    orch = _make_orchestrator(task, tmp_path)
+    turn = _make_turn(commands=2).model_copy(update={"max_turns_exhausted": True})
+    orch.agent = AsyncMock()
+    orch.agent.communicate = AsyncMock(return_value=turn)
+
+    mock_checker = MagicMock()
+    mock_checker.check_all_async = AsyncMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=0.0)]
+    )
+    orch.success_checker = mock_checker
+
+    mock_simulator = MagicMock()
+    mock_simulator.model = DEFAULT_SIMULATOR_MODEL
+    mock_simulator.start = AsyncMock()
+    mock_simulator.stop = AsyncMock()
+    mock_simulator.next_user_message = AsyncMock()
+
+    with (
+        patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+    ):
+        await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
+
+    assert orch.result.simulation is not None
+    assert orch.result.simulation.stop_reason == "agent_max_turns"
+    assert orch.result.simulation.total_turns == 1
+    assert orch.result.max_turns_exhausted is True
+    mock_simulator.next_user_message.assert_not_called()
 
 
 class TestBuildSimulationTelemetry:

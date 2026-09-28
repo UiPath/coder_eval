@@ -1,5 +1,5 @@
 {
-  "agent_output": "{\n  \"completed_at\": null,\n  \"duration_ms\": 1500,\n  \"error\": null,\n  \"id\": \"turn_1\",\n  \"items\": [\n    {\n      \"id\": \"m1\",\n      \"memory_citation\": null,\n      \"phase\": null,\n      \"text\": \"rebuilt from items\",\n      \"type\": \"agentMessage\"\n    }\n  ],\n  \"items_view\": \"TurnItemsView.full\",\n  \"started_at\": null,\n  \"status\": \"TurnStatus.completed\"\n}",
+  "agent_output": "{\n  \"completed_at\": null,\n  \"duration_ms\": 1500,\n  \"error\": null,\n  \"id\": \"turn_1\",\n  \"items\": [\n    {\n      \"delivery\": null,\n      \"id\": \"m1\",\n      \"memory_citation\": null,\n      \"phase\": null,\n      \"questions\": null,\n      \"text\": \"rebuilt from items\",\n      \"type\": \"agentMessage\"\n    }\n  ],\n  \"items_view\": \"TurnItemsView.full\",\n  \"started_at\": null,\n  \"status\": \"TurnStatus.completed\"\n}",
   "assistant_turn_count": 1,
   "commands": [],
   "crash_reason": null,

@@ -20,12 +20,12 @@ from coder_eval.models import (
     SuiteRollup,
     TaskResult,
 )
-from coder_eval.reports import (
+from coder_eval.reports import write_suite_rollups
+from coder_eval.reports.markdown import (
     _attach_row_accounting,
     _compute_suite_rollup,
     _render_criterion_aggregate,
     _render_suite_markdown,
-    write_suite_rollups,
 )
 
 
@@ -308,7 +308,7 @@ class TestWriteSuiteRollups:
 
     def test_failed_samples_capped(self, tmp_path: Path) -> None:
         # Generate more failed rows than the cap to confirm truncation.
-        from coder_eval.reports import _FAILED_SAMPLE_LIMIT
+        from coder_eval.reports.markdown import _FAILED_SAMPLE_LIMIT
 
         rows = [
             _make_row(
@@ -518,10 +518,11 @@ class TestReplicateIndexInSuiteRollup:
 
 
 class TestStackedSameTypeAggregation:
-    """A task can stack multiple criteria of the SAME type (e.g. activation's
-    per-skill skill_triggered) and each gets its OWN across-row aggregate, sliced
-    by position and keyed by description — not one type-pooled number repeated per
-    instance (the pre-fix behavior). This is what makes per-skill recall real."""
+    """Stacked criteria of the SAME type each get their OWN across-row aggregate.
+
+    A task can stack them (e.g. activation's per-skill skill_triggered). Each
+    aggregate is sliced by position and keyed by description, not one type-pooled
+    number repeated per instance. This is what makes per-skill recall real."""
 
     @staticmethod
     def _row(row_id: str, scores: tuple[float, float]) -> TaskResult:

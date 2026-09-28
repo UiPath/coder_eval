@@ -131,8 +131,9 @@ class TestRunLimitsResolver:
         assert resolved.run_limits.max_usd == 5.0
 
     def test_legacy_agent_max_turns_now_rejected(self):
-        """Legacy variant.agent.max_turns is no longer hoisted — it fails loudly via
-        the agent model's extra='forbid' (the hoist shim was removed)."""
+        """A variant `agent.max_turns` is rejected by the agent model's extra='forbid'.
+
+        It is not hoisted into `run_limits`."""
         default_exp = _default_exp()
         task = _make_task()
         exp = ExperimentDefinition(

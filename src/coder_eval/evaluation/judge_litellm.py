@@ -1,30 +1,15 @@
 """Single-completion invoker for the LiteLLM judge backend, via the ``litellm``
 library (the ``coder-eval[litellm]`` extra) rather than a hand-rolled HTTP call.
 
-Unlike the AGENT's own LiteLLM backend (which points the Claude Code SDK at
-``settings.litellm_base_url``/``settings.litellm_auth_token``), this module
-reads NOTHING from ``coder_eval.config.settings`` — the task author fully owns
-the call shape via ``LiteLLMRoute.params``/``LiteLLMRoute.env_params`` (see
-that class's docstring). A gateway-routed judge model rarely reuses the same
-proxy/credential the agent's own LiteLLM backend points at, so there is no
-implicit fallback here; if the provider needs ``api_base``/``api_key``/
-whatever else, the task author names it via ``params``/``env_params`` like any
-other kwarg.
-
-Calling through ``litellm.acompletion`` — rather than assuming one specific
-wire protocol — lets ``model`` carry its own provider hint (e.g.
-``azure_ai/gpt-5.6-luna``) and get that provider's actual request/response
-shape handled by the library, including per-provider quirks (``max_tokens``
-vs ``max_completion_tokens`` naming, unsupported-parameter drops via
-``drop_params``) instead of this module hand-coding them.
+Reads NOTHING from ``coder_eval.config.settings``: the task author fully owns the
+call shape via ``LiteLLMRoute.params``/``env_params``, with no implicit fallback to
+the AGENT's own LiteLLM proxy settings.
 
 ``litellm.acompletion`` always returns an OpenAI-shaped ``ModelResponse``
-regardless of the underlying provider, so the caller reuses
-``extract_verdict_from_openai_response``/``token_usage_from_openai_dict``
-unchanged.
+regardless of provider, so the caller reuses the OpenAI extractors unchanged.
+Async on purpose, mirroring the other two judge invokers.
 
-Async on purpose: mirrors ``invoke_anthropic_judge_async`` /
-``invoke_bedrock_judge_async`` — the judge's only network call, no sync twin.
+Rationale: .claude/notes/contracts.md § LiteLLM params and env_params
 """
 
 from __future__ import annotations
@@ -123,10 +108,8 @@ async def invoke_litellm_judge_async(
         "tool_choice": {"type": "function", "function": {"name": tool_spec["name"]}},
         "max_completion_tokens": max_tokens,
         "timeout": timeout_seconds,
-        # `drop_params` covers params litellm's own static model-cost map KNOWS a
-        # model rejects; a custom/gateway-routed model id (e.g. one behind an
-        # Azure AI deployment) usually isn't in that map, so this alone doesn't
-        # protect a `params`-supplied kwarg the target model live-rejects.
+        # HAZARD: `drop_params` only covers params litellm's static cost map knows a
+        # model rejects; a gateway-routed model id usually is not in that map.
         "drop_params": True,
     }
     # `params` (literal passthrough) applies first; `env_params` (resolved from

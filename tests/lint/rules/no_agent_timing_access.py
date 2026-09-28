@@ -1,8 +1,7 @@
-"""CE006: ``.agent.max_turns`` and ``.agent.turn_timeout`` are no longer fields.
+"""CE006: ``.agent.max_turns`` and ``.agent.turn_timeout`` are not ``AgentConfig`` fields.
 
-Phase 2 of the agent-timing refactor (2026-05-07) deleted these from
-``AgentConfig``. They live on ``TaskDefinition`` (top-level) and as a per-call
-argument on ``Agent.communicate(..., max_turns=...)``.
+For where they live, see CE007; ``max_turns`` is also a per-call argument on
+``Agent.communicate(..., max_turns=...)``.
 
 This rule blocks reintroduction. Pattern matched: any AST node of shape
 ``<x>.agent.<max_turns|turn_timeout>`` — both reads and writes.
@@ -11,8 +10,8 @@ Carve-outs:
 - ``criterion.max_turns`` / ``criterion.turn_timeout`` — those are real fields
   on ``LLMJudgeCriterion`` / ``AgentJudgeCriterion`` and are not nested under
   ``.agent``, so the AST shape doesn't match.
-- ``task.max_turns`` / ``task.turn_timeout`` — top-level fields on
-  ``TaskDefinition``; not nested under ``.agent``, doesn't match.
+- ``task.max_turns`` / ``task.turn_timeout`` — not nested under ``.agent``,
+  doesn't match (see CE007).
 
 If a legitimate exception arises, suppress with ``# noqa: CE006`` and a
 comment explaining why.

@@ -1,18 +1,14 @@
 """Run-level derived metrics: one pass-rate denominator, and honest cost totals.
 
-Two bugs are pinned here.
-
-**The denominator.** ``pass_rate`` used to be ``succeeded / (run - error)``, which
-paid a bonus for erroring: the more a run fell over, the smaller its denominator
-got, up to the degenerate case of a run rendering as a perfect score while passing
-a handful of rows. Every surface now divides by ``tasks_graded`` — every
-dispatched task except the ones that were never measured at all (``coder-eval
+**The denominator.** Every surface divides ``pass_rate`` by ``tasks_graded`` —
+every dispatched task except the ones never measured at all (``coder-eval
 execute`` leaves rows ``NOT_GRADED``, and those leave BOTH sides of the rate).
+Hazard: a ``run - error`` denominator pays a bonus for erroring, since the more a
+run falls over, the smaller it gets.
 
-**The bill.** Cost was summed over whatever rows happened to carry one, so a run
-whose model was missing from the rate card, or whose turns were killed before the
-backend reported a cost, understated its spend silently. Unpriced spend is now
-counted and the total is labelled a floor.
+**The bill.** Spend on a model missing from the rate card, or on turns killed
+before the backend reported a cost, is counted as unpriced, and the total is
+labelled a floor.
 """
 
 from __future__ import annotations

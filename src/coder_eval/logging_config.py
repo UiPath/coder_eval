@@ -13,7 +13,7 @@ import re
 import sys
 import threading
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -25,9 +25,8 @@ from .path_utils import TASK_LOG_FILENAME
 
 APP_LOGGER_NAME = "coder_eval"
 
-# Bounded ring-buffer used by ``_LogTailBuffer`` to capture a sanitised tail of
-# task logs for the HTML report. Sized so a 200 KB tail comfortably covers the
-# last few hundred lines of a typical run without bloating ``task.json``.
+# Sized so a 200 KB tail covers the last few hundred lines of a typical run without
+# bloating ``task.json``.
 DEFAULT_LOG_TAIL_MAX_BYTES = 200_000
 
 # ANSI CSI escape sequences (e.g. ``\x1b[31m``). Stripped from the buffered tail
@@ -75,11 +74,9 @@ class _LogTailBuffer(logging.Handler):
             self._size -= len(old.encode("utf-8"))
 
     def get_text(self) -> str:
-        # Acquire the handler's lock so concurrent emit() calls (which also
-        # hold self.lock via Handler.handle()) cannot mutate _records while
-        # we iterate it for the join.  Without this, a watchdog/proxy thread
-        # logging during the finally-block tail capture would raise
-        # "RuntimeError: deque mutated during iteration".
+        # HAZARD: hold the handler's lock, which concurrent emit() calls also take,
+        # or a watchdog thread logging during the tail capture raises "deque mutated
+        # during iteration".
         self.acquire()
         try:
             return _sanitise_log_text("".join(self._records))
@@ -87,9 +84,8 @@ class _LogTailBuffer(logging.Handler):
             self.release()
 
 
-# ContextVar that tracks the current task_id for the running async context.
-# Each asyncio task gets its own copy, so parallel tasks are isolated.
-# Set by task_log_handler; read by _TaskIdFilter to inject into plain-logger records.
+# Each asyncio task gets its own copy, so parallel tasks are isolated. Set by
+# task_log_handler; read by _TaskIdFilter.
 _current_task_id: ContextVar[str | None] = ContextVar("_current_task_id", default=None)
 
 # ANSI color codes for terminal output
@@ -265,25 +261,14 @@ def task_log_handler(
 ) -> Generator[_LogTailBuffer]:
     """Context manager for task-specific logging.
 
-    Attaches a ``FileHandler`` (raw bytes, uncapped) and a sibling
-    ``_LogTailBuffer`` (sanitised, bounded) to the app logger at the start and
-    removes both at the end, guaranteeing cleanup even if exceptions occur. The
-    buffer is yielded directly so callers can call ``get_text()`` to capture a
-    sanitised tail of the log alongside the on-disk file.
-
-    When task_id is provided, a filter is applied so that in parallel batch runs
-    each task's log file only contains its own messages. The ContextVar
-    ``_current_task_id`` is set so that plain loggers (no LoggerAdapter)
-    automatically get the correct task_id injected by ``_TaskIdFilter``.
-
-    Thread-safe: uses a lock and reference counting so that concurrent handlers
-    correctly restore the original log level when the last handler exits. The
-    buffer is a passive sibling and does NOT participate in the refcount.
+    Attaches a file handler for the task's own log, sets the task-id ContextVar so
+    parallel tasks stay isolated, and yields the bounded tail buffer the HTML report
+    reads.
 
     Args:
-        task_log_file: Path to task log file
-        level: Logging level for file output (default: DEBUG)
-        task_id: Optional task ID for filtering in parallel runs
+        task_log_file: Path to the task log file.
+        level: Logging level for the file output.
+        task_id: Filters the file to this task's own records in a parallel batch.
 
     Yields:
         ``_LogTailBuffer`` exposing ``get_text()`` for the sanitised log tail.
@@ -354,7 +339,7 @@ def task_log_handler(
         tail_buffer.close()
 
 
-def aggregate_task_logs(run_dir: Path) -> None:
+def aggregate_task_logs(run_dir: Path, *, task_dirs: Iterable[Path] | None = None) -> None:
     """Aggregate all task logs into a single experiment.log file.
 
     This function should be called after all tasks have completed.
@@ -362,7 +347,11 @@ def aggregate_task_logs(run_dir: Path) -> None:
     with clear separators and metadata.
 
     Args:
-        run_dir: Path to run directory containing task subdirectories
+        run_dir: Path to run directory; ``experiment.log`` is written here.
+        task_dirs: The per-task logging directories, resolved from
+            ``logging_dir_template``. Required whenever that template may place them
+            outside ``run_dir`` -- the ``run_dir`` glob fallback would then find
+            nothing and write an empty log with no error.
 
     Example:
         >>> # After running tasks
@@ -370,7 +359,11 @@ def aggregate_task_logs(run_dir: Path) -> None:
         >>> # Creates: runs/2025-10-16_14-25-18/experiment.log
     """
     run_log_path = run_dir / "experiment.log"
-    task_log_paths = sorted(run_dir.glob(f"**/{TASK_LOG_FILENAME}"))
+    if task_dirs is not None:
+        task_log_paths = sorted({d / TASK_LOG_FILENAME for d in task_dirs})
+        task_log_paths = [p for p in task_log_paths if p.is_file()]
+    else:
+        task_log_paths = sorted(run_dir.glob(f"**/{TASK_LOG_FILENAME}"))
 
     if not task_log_paths:
         # No task logs found - create empty experiment.log
@@ -384,11 +377,15 @@ def aggregate_task_logs(run_dir: Path) -> None:
         outfile.write("\n" + "=" * 80 + "\n\n")
 
         for task_log_file in task_log_paths:
-            # Use the path relative to run_dir so nested task ids from dataset
-            # fan-out (variant/suite/row) render with full context, not just
-            # the leaf directory name. as_posix() keeps the header consistent
-            # across platforms (experiment.log is commonly shared / pasted).
-            task_id = task_log_file.parent.relative_to(run_dir).as_posix()
+            # Relative to run_dir, so a dataset-fanned task id renders with full
+            # context rather than just its leaf. as_posix() keeps the header
+            # consistent across platforms.
+            # A logging dir outside run_dir has no relative form; fall back to the
+            # absolute path rather than raising ValueError mid-aggregation.
+            try:
+                task_id = task_log_file.parent.relative_to(run_dir).as_posix()
+            except ValueError:
+                task_id = task_log_file.parent.as_posix()
             outfile.write(f"\n{'=' * 80}\n")
             outfile.write(f"TASK: {task_id}\n")
             outfile.write(f"{'=' * 80}\n\n")

@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 10
     env:
       # `uv build` resolves build deps under the pool's safe-chain gate.
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk
     environment:
       name: testpypi
       url: https://test.pypi.org/project/coder-eval/

@@ -22,7 +22,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, build_error_result
-from coder_eval.models import EvaluationResult, FileExistsCriterion, FinalStatus, SandboxConfig, TaskDefinition
+from coder_eval.models import (
+    ContainerContext,
+    EvaluationResult,
+    FileExistsCriterion,
+    FinalStatus,
+    SandboxConfig,
+    TaskDefinition,
+)
+from tests._container_contract import contract_payload
 
 
 # DockerRunner targets Linux containers from POSIX hosts; see
@@ -62,7 +70,7 @@ class TestSyntheticTaskJson:
         asyncio.run(runner._write_synthetic_task_json(target, error))
 
         # Round-trips through the SAME parse every downstream consumer uses
-        # (batch.py / reports.py / reports_stats.py) — not just a raw key check —
+        # (batch.py / reports/markdown.py / result_metrics.py) — not just a raw key check —
         # so a schema change that broke validation on the synthetic record fails here.
         parsed = EvaluationResult.model_validate_json(target.read_text(encoding="utf-8"))
         assert parsed.final_status == FinalStatus.ERROR
@@ -105,7 +113,7 @@ class TestMalformedTaskJson:
     """A present-but-malformed task.json degrades to a synthetic ERROR record.
 
     Mirrors the missing-file branch: a stale ``:latest`` image producing a
-    schema-skewed task.json (the version checks only warn), or a truncated/torn
+    schema-skewed task.json the image preflight did not catch, or a truncated/torn
     write, must not surface as an uncaught ``ValidationError``/``JSONDecodeError``.
     Instead the runner preserves the original aside (``task.json.malformed``),
     persists a parseable synthetic ERROR task.json, and returns a ``DockerRunError``
@@ -246,9 +254,11 @@ class TestParseResultOrRaise:
     def test_present_task_json_parsed_and_returned(self, run_dir):
         """A real task.json -> parsed EvaluationResult returned, nothing raised."""
         runner = _make_runner(run_dir)
+        runner._staged_context = ContainerContext.model_validate(contract_payload())
         task_json = run_dir / "task.json"
         # A valid (non-synthetic) result the in-container orchestrator would have written.
         expected = build_error_result(runner.rt, DockerRunError("in-container failure"))
+        expected.environment_info["container_contract"] = runner._staged_context.model_dump(mode="json")
         task_json.write_text(expected.model_dump_json(indent=2), encoding="utf-8")
 
         result = asyncio.run(runner._parse_result_or_raise(run_dir, returncode=0, log_path=run_dir / "docker.log"))

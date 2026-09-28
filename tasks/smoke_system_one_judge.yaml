@@ -1,0 +1,105 @@
+task_id: "smoke_system_one_judge"
+description: |
+  Exercises the system_one_judge criterion end-to-end: the agent writes a small
+  retry helper, and the judge answers a rubric that uses all three question
+  primitives (noul / choice / score) over three different slices of state —
+  the FILES it wrote, its own final OUTPUT, and its TOOL-CALL trajectory.
+
+  This covers the path the unit tests mock out (rubric -> request payload ->
+  live answers -> weighted-mean reduction) and pins the wire shape the reduction
+  assumes, notably the string level keys in a score answer's probabilities.
+
+  Runs in the smoke-pass bucket alongside smoke_llm_judge. It needs the
+  TYPESAFE_API_KEY secret: this criterion escalates a credential-less run to
+  ERROR rather than scoring it 0.0, so pr-checks.yml preflights that key and
+  fails with a message naming it.
+initial_prompt: |
+  Use the Write tool to create retry.py containing a single function
+  fetch_with_retry(url, attempts=3). It must loop over the attempts, call
+  requests.get(url, timeout=5) inside a try block, catch requests.Timeout
+  specifically (not a bare except), sleep 2 ** attempt seconds between attempts,
+  return the parsed .json() on success, and raise RuntimeError once the attempts
+  are exhausted. Give it a docstring that says what it does and when it raises.
+  Do not leave any commented-out code. When you are done, reply with a one-
+  sentence summary of what you wrote.
+tags: [smoke, smoke-pass, judge, system-one]
+
+run_limits:
+  max_turns: 3
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+  setting_sources: []
+
+success_criteria:
+  - type: "file_exists"
+    path: "retry.py"
+    description: "Sanity check: agent must have written the file."
+
+  - type: "system_one_judge"
+    description: "Rubric grade of the retry helper."
+    files: ["retry.py"]
+    pass_threshold: 0.7
+    # The state the judge reads. `files` above is the artifact; these two add the
+    # agent's own final message and a summary of its tool calls, so the rubric can
+    # grade the TRAJECTORY and not just the end product. `include_dialog` adds the
+    # multi-turn user/agent exchange and is only meaningful in simulation mode.
+    include_agent_output: true
+    include_tool_calls: true
+    prompt: |
+      The agent was asked to write fetch_with_retry(url, attempts=3): a retry
+      loop around requests.get that catches requests.Timeout specifically, backs
+      off by 2 ** attempt, and raises RuntimeError when the attempts run out.
+    questions:
+      # --- the artifact ---
+      retries:
+        type: noul
+        instructions: "Does fetch_with_retry loop over multiple attempts instead of calling the URL once?"
+        weight: 2.0
+      raises_on_exhaustion:
+        type: noul
+        instructions: "Does the function raise RuntimeError after every attempt has failed?"
+        weight: 2.0
+      # expected: false — the rubric rewards the ABSENCE of this.
+      leftovers:
+        type: noul
+        instructions: "Is there any commented-out or otherwise dead code in the file?"
+        expected: false
+      # choice, bare-list form: the options need no descriptions.
+      exception_handling:
+        type: choice
+        instructions: "How does the function catch failures from requests.get?"
+        criteria: [none, bare_except, broad_exception, specific_timeout]
+        expected: specific_timeout
+        weight: 2.0
+      # choice with `values` — partial credit instead of one right answer.
+      backoff:
+        type: choice
+        instructions: "What delay does the function wait between attempts?"
+        criteria:
+          exponential: "the delay grows with each attempt, e.g. 2 ** attempt"
+          fixed: "the same delay every time"
+          none: "no delay at all"
+        values:
+          exponential: 1.0
+          fixed: 0.5
+      # score — an ordered spectrum, worst level first.
+      documentation:
+        type: score
+        instructions: "How well does the docstring describe what the function does and when it raises?"
+        criteria: ["absent", "a bare restatement of the name", "states the behaviour and the failure mode"]
+
+      # --- the trajectory and the agent's own words ---
+      efficient_trajectory:
+        type: noul
+        instructions: >-
+          Looking at agent_tool_calls, did the agent write the file directly
+          without redundant retries or exploratory calls it did not need?
+      summary_is_honest:
+        type: noul
+        instructions: >-
+          Does the agent's final message in agent_output describe what the file
+          in files actually contains, without claiming work it did not do?
+        weight: 2.0

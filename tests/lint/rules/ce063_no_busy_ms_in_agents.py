@@ -1,51 +1,22 @@
 """CE063: a reducer may not compute its own tool subtraction.
 
 Tool execution comes out of a generation window in exactly ONE place:
-``coder_eval.timing.subtract_tool_time``. Before that, five
-reducers each did it themselves — four through ``close_window`` as they
-flushed, claude-code once at finalization — while the head and the tail were
-already computed centrally at the collector seam. That asymmetry is where every
-timing defect on this branch actually lived, and none of them was in the
-arithmetic: they were in the bookkeeping AROUND it. When to reset a per-step
-span list (clearing it at ``step_start`` wiped a span before the flush could
-subtract it — a 100% overstatement of that window). When to clear a spent start
-stamp (a second flush with no intervening start republished the previous span —
-3000 ms of generation for a 2000 ms turn). When to advance the mark.
+``coder_eval.timing.subtract_tool_time``. In ``src/coder_eval/agents/`` this fires on
+a ``from`` import of ``busy_ms`` (any alias, relative forms included) and on the
+``timing.busy_ms`` spelling. Every timing defect in per-reducer subtraction lived
+not in the arithmetic but in the bookkeeping AROUND it: when to reset a span list,
+clear a spent start stamp, advance the mark. Separately, a reducer that also
+subtracts takes tool time out twice.
 
-A sixth harness whose author reaches for ``busy_ms`` is rebuilding exactly that
-bookkeeping, and its tool time would then be subtracted TWICE: once by the
-reducer and once by the collector, which subtracts from every window it is
-handed. The result is a silently under-reported generation figure on one
-harness only — the shape that takes a corpus comparison to notice.
+HAZARD: do not reuse CE061's ``_imports_the_helper``: inverted into a ban, its
+bare-module-import branch flags any reducer calling ``timing.close_window``. The banned
+name comes from the function object, so a rename moves the rule.
 
-Separate id from CE061 deliberately, and CE061 is NOT rebodied into this.
-CE061 asks where a window's ARITHMETIC came from, and four reducers still call
-``close_window``, so its property is still live and still worth guarding — it
-is not superseded. This one asks a different question: whether a reducer
-subtracts tool time at all. One invariant per id is what makes a ``# noqa``
-mean one thing. (Phase 5 did make CE061 exemption-free: claude-code now calls
-the shrunken ``close_window`` like the other four, so its one permanent
-suppression is gone.)
+BLIND SPOT: a reducer that re-implements the union inline, or reaches ``busy_ms``
+through a re-export, is invisible. ``tests/test_timing_identity_contract.py`` is the
+sensor for the arithmetic.
 
-WHY NOT ``_imports_the_helper``, which CE061 uses. That function deliberately
-returns True for a bare module import (``from coder_eval import timing``), so
-that ``timing.close_window(...)`` counts as reaching the helper — its own
-comment says a rule that missed it "would tell an author to change a working
-call site." Inverted into a BAN that branch flags any reducer importing the
-module and calling ``timing.close_window(...)``, which after Phase 5 is four of
-them. So this rule keys on the ``busy_ms`` NAME binding plus an
-``ast.Attribute`` match for the ``timing.busy_ms`` spelling, and leaves the
-module import alone.
-
-The name is taken from the function object rather than written here as a
-string, the way CE061 takes ``close_window``: renaming it moves this rule too.
-
-BLIND SPOT: a reducer that re-implements the union inline, without importing
-anything, is invisible — as is one reaching ``busy_ms`` through a re-export.
-The sensor for the arithmetic itself is
-``tests/test_timing_identity_contract.py``, which drives every harness off a
-scripted clock and asserts the four buckets tile the turn to the millisecond;
-this rule adds only the cheap structural half that a static check can reach.
+Rationale: .claude/notes/lint-rules.md § CE063
 """
 
 import ast

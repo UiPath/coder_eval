@@ -1,32 +1,23 @@
 """EvaluationResult → ATIF Trajectory converter (the emit direction).
 
-Maps coder_eval's persisted trajectory (``EvaluationResult.iterations`` — the
-``TurnRecord`` envelope over the per-generation ``messages`` stream) onto the
-vendored ATIF models, so every run can be consumed by ``harbor view``, Harbor
-Hub, and ATIF-based SFT/RL pipelines.
+Maps coder_eval's persisted trajectory onto the vendored ATIF models, so every run
+can be consumed by ``harbor view``, Harbor Hub, and ATIF-based SFT/RL pipelines.
 
-Mapping highlights:
+``UserMessage`` → ``Step(source="user")``; each ``AssistantMessage`` →
+``Step(source="agent")`` with per-generation ``Metrics``; ``CommandTelemetry`` joins
+its generation via ``assistant_turn_index``. Sub-agent generations are NESTED into
+embedded ``subagent_trajectories``, and ``ReconciliationMessage`` entries never become
+steps.
 
-- ``UserMessage`` → ``Step(source="user")``; ``AssistantMessage`` (one per LLM
-  generation) → ``Step(source="agent")`` with per-generation ``Metrics``.
-- ``CommandTelemetry`` joins its generation via ``assistant_turn_index`` and
-  becomes that step's ``tool_calls`` + ``observation``.
-- Sub-agent generations (``parent_tool_use_id`` set) are NESTED into embedded
-  ``subagent_trajectories`` — flattening them into the main thread would
-  corrupt SFT data derived from the trajectory.
-- ``ReconciliationMessage`` entries never become steps: their residuals are
-  recorded in ``Trajectory.extra["reconciliation"]`` and are already included
-  in the authoritative ``FinalMetrics`` totals (``total_token_usage``).
-- Turns with no message stream (legacy task.json, minimal agents) degrade to
-  one synthetic user step + one agent step carrying all the turn's commands.
+A PURE function of the models: no I/O, no agent-type branching, no mutation.
 
-The converter is a PURE function of the models: no I/O, no agent-type
-branching, no mutation of the input result.
+Rationale: .claude/notes/reporting.md § Emitting
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -395,21 +386,24 @@ def write_trajectory_json(result: EvaluationResult, path: Path) -> Path | None:
         return None
 
 
-def emit_trajectories_for_run(run_dir: Path) -> list[Path]:
-    """Write a ``trajectory.json`` sibling for every ``task.json`` under ``run_dir``.
+def emit_trajectories_for_run(task_dirs: Iterable[Path]) -> list[Path]:
+    """Write a ``trajectory.json`` sibling for every ``task.json`` in ``task_dirs``.
 
-    The ``--format harbor`` post-pass for ``coder-eval execute``: ATIF emission
-    is opt-in (unlike the old always-on design this module's predecessor
-    shipped), so a plain ``run``/``execute`` never gains a new output file.
-    Walks the run directory rather than hooking the orchestrator's finalize
-    path, keeping this package's "translate coder-eval's own artifacts"
-    scope (see ``coder_eval.harbor``'s module docstring) — it needs no access
-    to orchestrator internals, only the ``task.json`` files a run already
-    wrote. Per-task failures are logged and skipped (see
+    ``task_dirs`` are the per-task logging directories, resolved from the same
+    ``logging_dir_template`` the run wrote ``task.json`` with -- taken as an argument
+    rather than discovered by walking a run directory, since an overridden logging dir
+    need not live under ``run_dir`` at all. The ``--format harbor`` post-pass for
+    ``coder-eval execute``; opt-in, so a plain ``run``/``execute`` never gains a new
+    output file. Per-task failures are logged and skipped (see
     :func:`write_trajectory_json`), never aborting the rest of the run's export.
+
+    Rationale: .claude/notes/persistence.md § What run_dir still owns
     """
     written: list[Path] = []
-    for task_json in sorted(run_dir.glob(f"**/{TASK_JSON_FILENAME}")):
+    for task_json in sorted({d / TASK_JSON_FILENAME for d in task_dirs}):
+        if not task_json.is_file():
+            logger.warning("No %s at %s — skipping ATIF emission", TASK_JSON_FILENAME, task_json)
+            continue
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):

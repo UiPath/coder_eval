@@ -35,6 +35,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
   - [skill_triggered](#skill_triggered)
+  - [system_one_judge](#system_one_judge)
 - [Checker Context](#checker-context)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
@@ -239,7 +240,7 @@ valid and an empty block is legal — every field defaults to "no limit".
 ```yaml
 run_limits:
   # Structural caps
-  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
+  max_turns: 20                       # hard cap on model API calls per iteration
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
@@ -254,8 +255,8 @@ run_limits:
 
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
-| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
-| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
+| `max_turns` | *unset* | `> 0` | Hard cap on main-thread model API calls per iteration, Claude Code's turn, counted the same on every harness. The tools the last allowed call asks for still run; the turn ends when the next call begins. Each retry and each dialog exchange starts a fresh count. Unset uses the SDK default. See [HARNESS_PARITY.md](agents/HARNESS_PARITY.md). |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for visible turns (tool calls plus the final reply) summed over the whole task, a different unit from `max_turns`. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
@@ -326,8 +327,8 @@ that did: a budgeted task that failed counts as over budget, while tasks with no
 `expected_turns` budget are excluded entirely (success or fail).
 
 The count compared against the budget is **visible turns** — one per tool call
-plus one for the agent's final reply — *not* the SDK's `total_turns` (which
-counts assistant messages and can bundle several tool calls into one).
+plus one for the agent's final reply. It is *not* `total_turns`, which counts
+model API calls (the `max_turns` unit), and one call can batch several tool calls.
 
 Set it to the number of turns a competent agent should need for the task. Pick
 budgets consistently across a suite — the headline % is only comparable when
@@ -715,7 +716,7 @@ All criteria share these fields:
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `cli_called`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
+- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`, `system_one_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
@@ -903,6 +904,12 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
   expected_stdout: "Hello, World!"    # Optional: check stdout content
   stdout_match: "exact"               # "exact" (default), "contains", or "regex"
   description: "Script must output the correct text"
+
+# Also graded when the turn times out or the agent crashes
+- type: "run_command"
+  command: "python graders/check_flow.py"
+  read_only: true                     # declaration, not enforcement -- see below
+  description: "Flow must contain the approval node"
 ```
 
 | Field | Default | Description |
@@ -913,6 +920,19 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
 | `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
+| `read_only` | `false` | Declares the command inspects artifacts only. Its sole effect: a graded run also runs the criterion after a turn timeout or an agent crash — see [Post-failure criterion evidence](REPORT_SCHEMA.md#post-failure-criterion-evidence). |
+
+`read_only` is an author declaration, **not** a restriction. coder-eval cannot decide
+whether a shell command is pure, so it verifies nothing and confines nothing: the
+command runs exactly as it always does. Set it only when the command reads artifacts and
+nothing else. Leave it `false` when the command writes state or calls a live service (a
+`uip maestro flow debug` grader starts a real cloud job, so it must stay `false`).
+
+Keep a `read_only` criterion's `timeout` short. The diagnostic pass runs after the agent
+is gone, and the commands are not interruptible: a `task_timeout` that expires mid-pass
+cancels the await, not the shell subprocess, so it keeps running while the sandbox is
+torn down. Without a `task_timeout` the pass is bounded only by the sum of these
+timeouts.
 
 ### `file_matches_regex`
 
@@ -976,6 +996,8 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 | `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. Also matched with shell normalization (see below). |
 
 **Shell normalization.** For a Bash command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
+
+**Long commands.** A Bash command is searched in full: the first 2,000 characters, then the rest in windows of at most 2,000 characters that start and end on line boundaries. So a command that follows a long heredoc in the same Bash call still counts. Other tools match only on the first 2,000 characters of their JSON parameters, so a long Write or Edit body is not read as a command. This is not purely additive either: an `exclude_pattern` or a `max_count: 0` gate can now catch a call late in a long script that it did not see before, so suites should re-baseline. A match that crosses a window boundary is not guaranteed, and `^` and `$` can also match at a window edge.
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
@@ -1335,6 +1357,66 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
 
+### `system_one_judge`
+
+Grade with a **System One model** ([TypeSafe's `jev`](https://docs.typesafe.ai/concepts/system-one)) instead of a text LLM. A System One model generates no text: it reads one state and answers a map of typed questions with calibrated probabilities, all in one round trip. The rubric you write **is** the grading schema, so there is no prompt to follow, no tool call to force, and no verdict to parse.
+
+```yaml
+- type: "system_one_judge"
+  description: "Rubric grade of the refactor"
+  prompt: "The agent was asked to extract the retry loop into a helper."
+  files: ["src/client.py"]
+  questions:
+    helper_extracted:
+      type: noul
+      instructions: "Is the retry loop extracted into a named helper function?"
+    behaviour_preserved:
+      type: noul
+      instructions: "Does the refactor preserve the original retry semantics?"
+      weight: 2.0
+    naming:
+      type: score
+      instructions: "How well does the helper's name describe what it does?"
+      criteria: ["opaque", "workable", "self-explanatory"]
+    leftovers:
+      type: noul
+      instructions: "Is any dead code left behind?"
+      expected: false
+```
+
+**Question types**
+
+| Type | What the model returns | How the rubric turns it into 0.0–1.0 |
+| --- | --- | --- |
+| `noul` | P(yes) | `expected: true` (default) scores P(yes); `expected: false` scores 1 − P(yes) |
+| `choice` | the top option plus a distribution over all of them | `expected: <option>` scores that one option 1.0; `values: {option: 0.0–1.0}` gives partial credit per option |
+| `score` | a position on an ordered spectrum, plus a distribution over levels | levels ramp evenly from 0.0 (first) to 1.0 (last) unless `values:` overrides them |
+
+`choice` needs exactly one of `expected` or `values`. `score` takes 2–10 levels, ordered worst-first. Every question takes a `weight` (default 1.0).
+
+A `choice` question's `criteria` is a map of option to a description of when it applies, but when the option names speak for themselves you can write a bare list instead — it widens to that map with null descriptions, which the API accepts:
+
+```yaml
+exception_handling:
+  type: choice
+  instructions: "How does the function catch failures from requests.get?"
+  criteria: [none, bare_except, broad_exception, specific_timeout]
+  expected: specific_timeout
+  weight: 2.0
+```
+
+Option order is preserved as written, and a repeated option is a load-time error rather than a silently collapsed map.
+
+**What the judge reads.** By default the state is `prompt` plus the `files` you list. Three flags widen it, each off by default: `include_agent_output` adds the agent's own final message, `include_tool_calls` adds a summary of its tool-call trajectory, and `include_dialog` adds the multi-turn user/agent exchange (only meaningful in [simulation mode](#simulation)). Turning the first two on is what lets a rubric grade *how* the agent worked and whether its summary was honest, not just the artifact it left behind — see `tasks/smoke_system_one_judge.yaml` for a rubric that does both. `include_reference` (on by default) adds the reference solution. Each section is capped independently by `max_state_chars`.
+
+**Scoring** — the criterion score is computed by the harness, not the model: each question resolves to a value in [0.0, 1.0] and the score is their weighted mean. `scoring: expected` (default) weights every outcome by its probability, so a half-confident answer lands mid-scale; `scoring: argmax` reads only the top answer and discards the confidence. Either way the reduction is deterministic given the answers, and `findings` records the arithmetic per question so the grade is auditable line by line.
+
+**Credentials** — the bearer token comes from the env var named by `api_key_env` (default `TYPESAFE_API_KEY`); only the *name* is stored in the task and in run records. `base_url` (default `https://api.typesafe.ai/v1`) points the criterion at a gateway or a recording proxy. Unlike `llm_judge`, this criterion does **not** honour `checker_context.api_route` — a System One model is not interchangeable with a text model, so the eval route's judge model would be the wrong default.
+
+**When to reach for it over `llm_judge`** — a rubric with many small, repeated questions; a large dataset where a text judge's per-row cost dominates; or a grade you need to be reproducible and inspectable rather than argued in prose. Reach for `llm_judge` instead when the grade genuinely needs open-ended reasoning you cannot enumerate in advance.
+
+**Failure modes** — a transport failure escalates the row to `ERROR` (it is eval infrastructure, not agent quality) rather than scoring 0.0. A question the API leaves unanswered, or answers with the wrong primitive, scores 0.0 at its full weight and says so in `findings`.
+
 ## Checker Context
 
 `checker_context` carries task-authored config for the success-checking side, namespaced by reserved key. Currently the only recognized namespace is **`api_route`**:
@@ -1660,7 +1742,7 @@ The simulator runs as a tools-disabled Claude Code agent on its own resolved `Ap
 **Semantics:**
 
 - The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
-- `max_turns` is the intra-dialog cap (the worst-case agent call budget per trial). Use `n_trials` for variance sampling.
+- `max_turns` caps exchanges. Each exchange also gets a fresh `run_limits.max_turns` of model API calls, so the worst case per trial is the product of the two. Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 

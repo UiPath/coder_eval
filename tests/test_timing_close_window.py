@@ -36,9 +36,8 @@ def _load_decompose_run():
 class TestCloseWindow:
     """The RAW window: where it opens, where it ends, and the clamp.
 
-    The tool subtraction these cases used to cover moved to
-    `timing.py::subtract_tool_time`, where it happens once for all
-    five harnesses instead of five times in five reducers — see
+    The tool subtraction lives in `timing.py::subtract_tool_time`, once for
+    all five harnesses — see
     `tests/test_event_collector.py::TestSubtractToolTime`, which carries the
     union, grouping, clamping and non-mutation cases. What is left here is the
     part that is genuinely per-reducer: the mark.
@@ -144,7 +143,7 @@ class TestNaiveAwareMix:
         pin only whichever one it happened to call. What varies between sites
         is deliberate and only that: the field name, and which side is aware.
         Everything after that clause is the advice, and it must be identical or
-        the sites are no longer sharing a helper.
+        the sites do not share a helper.
         """
         advice = set()
         for call in (
@@ -269,10 +268,10 @@ class TestTurnClock:
         Note what this deliberately does NOT assert: that two clocks report
         different times. They should AGREE, and closely, because both derive
         from the same monotonic source — re-anchoring exists to correct drift
-        against real wall time, not to introduce an offset. An earlier version
-        of this test asserted `second.now() != first.now()`; that passed only
-        on sub-microsecond skew between the two constructors' reads, so it was
-        flaky under load and asserted the opposite of the design.
+        against real wall time, not to introduce an offset. Asserting
+        `second.now() != first.now()` would pass only on sub-microsecond skew
+        between the two constructors' reads: flaky under load, and the opposite
+        of the design.
         """
         import time as _time
 
@@ -302,8 +301,8 @@ def _command(tool_id: str, started, completed) -> dict:
 def _turn(*, commands: list[dict], messages: list[dict] | None = None, duration_seconds: float = 3.0) -> dict:
     """A `task.json` turn dict that validates as a `TurnRecord`.
 
-    The two sensors no longer parse stamps out of a raw dict; they validate and
-    call the typed selector, so a fixture below the model's required fields
+    The two sensors validate and call the typed selector rather than parse
+    stamps out of a raw dict, so a fixture below the model's required fields
     would fail in validation rather than on the thing the test is about.
     """
     return {
@@ -320,23 +319,17 @@ class TestTheThreeToolUnionsAgree:
     """Three readers answer "how long did this turn's tools run". They must agree.
 
     * `timing.main_thread_tool_spans` + `union_ms` — the TYPED selector the
-      collector subtracts from its generation windows and measures the head and
-      tail against, and which now writes `TurnRecord.tool_union_ms`.
+      collector subtracts from its generation windows, measures the head and
+      tail against, and writes `TurnRecord.tool_union_ms` from.
     * `tests/_fixtures/golden_streams/_scrub.py::_tool_union_ms` — the golden
       corpus's identity check, which validates the dump and calls that selector.
     * `scripts/timing/decompose_run.py::_tool_ms` — the LIVE two-sided residual
-      gate, which `.github/workflows/pr-checks.yml` runs against a real run, and
-      which does the same.
+      gate, which does the same.
 
-    The three used to be three COPIES of the selection rule, and they agreed by
-    luck once at a real cost: the collector filtered its GENERATIONS to the main
-    thread and then passed EVERY command as a tool span. A child nests inside
-    the parent Agent call, whose interval the union already covers, so nothing
-    failed — but Codex's recovered child tools carry the CHILD's clock, so the
-    nesting is not guaranteed. Now there is ONE selector and two callers of it,
-    and what remains worth pinning is that neither sensor has grown a second
-    path back, and that each still computes its OWN union rather than reading
-    the producer's stored answer.
+    Pins: all three exclude a sub-agent's own tools, and each sensor computes
+    its OWN union rather than reading the producer's stored answer.
+
+    Rationale: .claude/notes/timing.md § main_thread_tool_spans
     """
 
     @staticmethod
@@ -580,11 +573,11 @@ class TestTheLiveGatesExitCode:
         assert main([self._record(tmp_path, stored=999.0), "--min-turn-ms", "0"]) == 1
 
     def test_a_union_disagreement_exits_one_even_when_every_turn_is_too_short_to_gate(self, tmp_path):
-        """The arm-order regression, asserted directly.
+        """A union breach outranks the no-gateable-turns arm.
 
         The turn is excluded from the share columns and the gate, so the
-        no-gateable-turns arm fires — and used to return before the breach was
-        ever consulted.
+        no-gateable-turns arm fires — and it must not return before the breach
+        is consulted.
         """
         main = _load_decompose_run().main
         assert main([self._record(tmp_path, stored=999.0), "--min-turn-ms", "999999999"]) == 1

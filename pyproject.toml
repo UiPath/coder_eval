@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
-version = "0.12.1"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, Pi) with sandboxed, reproducible YAML task suites."
+version = "0.12.7"
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, Pi, Delegate) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -9,7 +9,7 @@ authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
 keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
-    "gemini", "antigravity", "opencode", "pi", "sandbox", "code-generation", "agent-evaluation",
+    "gemini", "antigravity", "opencode", "pi", "delegate", "uipath", "sandbox", "code-generation", "agent-evaluation",
     "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
     "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
     "agent-testing", "llmops",
@@ -43,8 +43,8 @@ dependencies = [
     # explicitly since our code/tests construct httpx2 types directly. Capped to
     # mirror anthropic's own bound on it (`httpx2<3,>=2.0.0`).
     "httpx2>=2.12.0,<3.0.0",
-    "claude-agent-sdk>=0.2.124",
-    "anyio>=4.13.0",
+    "claude-agent-sdk>=0.2.157",
+    "anyio>=4.14.2",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
     "jmespath>=1.1.0",
@@ -83,6 +83,10 @@ dev = [
 # Optional extra that enables UiPath-specific features:
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with
 #     tasks that invoke `uv run uipath eval ...`)
+#   - the Delegate agent's home in the packaging metadata (`agent.type: delegate`).
+#     Like `opencode`/`pi` below, its real prerequisite is a Node package
+#     (`npm install @uipath/delegate-sdk`, genuinely public — no token needed),
+#     so nothing new is added to THIS list; it just shares this extra's name.
 # Without this extra, the framework still installs and runs; UiPath-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 # NOTE: the LLM judge and the prompt `rephrase` mutation route through the
@@ -108,7 +112,7 @@ litellm = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex>=0.144.4",
+    "openai-codex>=0.155.1",
 ]
 # Optional extra that enables Antigravity agent support:
 #   - AntigravityAgent implementation using Google's official google-antigravity SDK
@@ -127,7 +131,7 @@ codex = [
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.8",
+    "google-antigravity==0.1.18",
 ]
 # Optional extra that enables OpenCode agent support.
 #
@@ -176,7 +180,7 @@ pi = []
 # back here (it is not needed to EXPORT a task to Harbor format, only to run coder-eval
 # itself as Harbor's agent).
 harbor = [
-    "harbor==0.22.0",
+    "harbor==0.23.0",
 ]
 
 [project.scripts]
@@ -208,14 +212,14 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# openai-codex 0.144.4 hardpins `openai-codex-cli-bin==0.144.4` (a stable
+# openai-codex 0.156.1 hardpins `openai-codex-cli-bin==0.156.1` (a stable
 # release; the SDK version now tracks the codex CLI version line). Naming it
 # here documents and holds the pinned cli-bin build — the harness binary is a
 # dominant non-model driver of eval results, so it travels with the coder_eval
 # release tag and is bumped deliberately (mirrors the antigravity localharness
-# and claude-code CLI pins). 0.144.4 publishes manylinux wheels (x86_64 +
+# and claude-code CLI pins). 0.156.1 publishes manylinux wheels (x86_64 +
 # aarch64), so CI/Linux installs work.
-override-dependencies = ["openai-codex-cli-bin==0.144.4"]
+override-dependencies = ["openai-codex-cli-bin==0.156.1"]
 
 constraint-dependencies = [
     # Fix known CVEs in transitive dependencies
@@ -262,7 +266,6 @@ external = [
     "CE020",
     "CE021",
     "CE022",
-    "CE023",
     "CE024",
     "CE025",
     "CE026",
@@ -280,6 +283,7 @@ external = [
     "CE038",
     "CE039",
     "CE043",
+    "CE044",
     "CE045",
     "CE046",
     "CE047",
@@ -299,6 +303,9 @@ external = [
     "CE061",
     "CE063",
     "CE064",
+    "CE065",
+    "CE066",
+    "CE068",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.pylint]
@@ -324,7 +331,7 @@ line-ending = "auto"
 
 [tool.pyright]
 pythonVersion = "3.13"
-include = ["src/coder_eval"]
+include = ["src/coder_eval", ".github/scripts"]
 exclude = [
     "data",
     "tmp",
@@ -437,6 +444,8 @@ filterwarnings = [
     "ignore::DeprecationWarning",        # Ignore deprecation warnings from dependencies
     "ignore::PendingDeprecationWarning",
     "ignore::ResourceWarning",           # Ignore unclosed resources (handled by cleanup)
+    # litellm>=1.102 TypedDicts mark fields ReadOnly; pydantic warns when it builds their schema
+    "ignore:Item '.*' on TypedDict class '.*' is using the `ReadOnly` qualifier:UserWarning",
 ]
 
 # Coverage integration (when using --cov)

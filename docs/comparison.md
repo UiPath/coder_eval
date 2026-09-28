@@ -10,7 +10,7 @@ description: >-
 
 **Coder Eval** is an agent-agnostic framework for evaluating AI coding agents and
 their skills. It runs a real agent (Claude Code, OpenAI Codex, Antigravity/Gemini,
-OpenCode, or Pi — one `agent.type` field apart) in a sandbox against declarative YAML
+OpenCode, Pi, or Delegate — one `agent.type` field apart) in a sandbox against declarative YAML
 tasks and scores the files and commands it produces on a weighted 0.0–1.0 scale,
 with cost/token telemetry, an A/B experiment layer, skill-activation checks, and CI
 pass/fail gates.
@@ -25,7 +25,7 @@ in its own documentation; see [Sources](#sources).
 | --- | --- | --- | --- | --- | --- | --- |
 | **What it grades** | Files + commands the agent produced | Whether a patch passes the repo's tests | Skill value on a fixed task set | Agent task success in sandboxes | Model text output | Whatever you wire up |
 | **Task source** | Your own (YAML) | Fixed benchmark (+ collection script) | Fixed (87 tasks / 8 domains) | Your own (framework) + Terminal-Bench 2.0 | Your own (YAML/JSON) + registry | Manual |
-| **Runs a real agent + tools** | ✅ Claude Code, Codex, Antigravity (Gemini), OpenCode, Pi | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | ❌ |
+| **Runs a real agent + tools** | ✅ Claude Code, Codex, Antigravity (Gemini), OpenCode, Pi, Delegate | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | ❌ |
 | **Sandboxed & reproducible** | ✅ tempdir / Docker | ✅ Docker | ✅ deterministic verifiers | ✅ Docker + cloud (Daytona/Modal) | — (grades text) | ❌ |
 | **Scoring** | Weighted 0.0–1.0 + thresholds | Pass/fail (tests) | Pass/fail (verifiers) | Task-level | Match / model-graded | ❌ |
 | **A/B experiments (model / tool / prompt)** | ✅ built-in | ❌ | Skills on/off only | — | Compare model versions | ❌ |

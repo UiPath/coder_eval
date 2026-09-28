@@ -85,24 +85,20 @@ const ALLOWED = new Map<string, string>([
         "A threshold comparison: an untimed call is not a slow call, so 0 answers the question asked.",
     ],
     [
-        "(toolExecMs ?? 0) -",
+        "(toolExecMs ?? 0) +",
         "The residual's tool half, and the reason the cell itself now renders a dash: a turn with no BOUNDED span measured no tool time, so its time belongs IN the residual rather than being subtracted as a zero.",
     ],
     [
-        "(harnessStartupMs ?? 0) -",
+        "(harnessStartupMs ?? 0) +",
         "The residual. Subtracting only what was measured is the whole point; an unmeasured head leaves its time IN the residual rather than silently claiming it.",
     ],
     [
-        "(harnessTeardownMs ?? 0) -",
+        "(harnessTeardownMs ?? 0);",
         "The residual's tail half: subtracting only what was measured leaves unmeasured time IN the residual.",
     ],
     [
-        "(setupMs ?? 0) -",
-        "Same residual rule: a run predating the field leaves its setup time IN the residual rather than having it silently subtracted as zero.",
-    ],
-    [
-        "(gradingMs ?? 0)",
-        "Same residual rule, and it is also the ungraded case — `coder-eval execute` grades nothing, so there is no grading time to subtract.",
+        "const phaseMs = (setupMs ?? 0) + (gradingMs ?? 0);",
+        "Same residual rule: a run predating the fields leaves setup and grading time IN the residual, and `coder-eval execute` grades nothing, so there is no grading time to subtract.",
     ],
     [
         "const slowExec = (execMs ?? 0) >= SLOW_TOOL_MS;",

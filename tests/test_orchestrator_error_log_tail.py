@@ -33,7 +33,7 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
 
 def _patch_finalize_persistence():
     """Skip the on-disk persistence side-effects of _finalize_result."""
-    return patch("coder_eval.reports_html.write_task_html", return_value=None)
+    return patch("coder_eval.reports.write_task_html", return_value=None)
 
 
 @pytest.mark.asyncio

@@ -30,11 +30,7 @@ def _telemetry(tool_name: str = "Bash", tool_id: str = "tool_123", **params: obj
 
 
 def test_agent_start_event_creation():
-    """AgentStartEvent stores iteration/prompt info and is a StreamEvent.
-
-    (Migrated from the old TurnStartEvent, which used to mean the
-    orchestrator/agent-start boundary — that role is now AgentStartEvent.)
-    """
+    """AgentStartEvent stores iteration/prompt info and is a StreamEvent."""
     event = AgentStartEvent(
         task_id="test-task",
         iteration=1,

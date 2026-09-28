@@ -136,7 +136,7 @@ class TestMaskDirs:
 
 class TestSharedResolver:
     def test_uses_shared_manifest_skill_dirs(self):
-        # SSOT: eval_material and CE065 must agree on "what is a skill dir".
+        # SSOT: eval_material and CE068 must agree on "what is a skill dir".
         from coder_eval.agents._skills import manifest_skill_dirs
         from coder_eval.isolation import eval_material
 

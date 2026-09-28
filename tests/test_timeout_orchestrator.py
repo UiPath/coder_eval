@@ -429,6 +429,89 @@ async def test_terminal_agent_error_records_safe_artifact_evidence_without_resco
     ]
 
 
+@pytest.mark.asyncio
+async def test_read_only_run_command_is_graded_after_a_terminal_agent_error(tmp_path) -> None:
+    """A declared read-only grader records artifact truth without rescuing the run."""
+    task = _make_task(turn_timeout=1200, task_timeout=1500)
+    task.success_criteria = [
+        RunCommandCriterion(
+            type="run_command",
+            command="test -f artifact.txt",
+            read_only=True,
+            description="declared read-only grader",
+        ),
+        RunCommandCriterion(
+            type="run_command",
+            command="test -f missing.txt",
+            read_only=True,
+            description="declared read-only grader that fails",
+        ),
+        RunCommandCriterion(
+            type="run_command",
+            command="touch should-not-run",
+            description="undeclared sandbox command",
+        ),
+        LLMJudgeCriterion(
+            type="llm_judge",
+            prompt="Grade the artifact.",
+            description="paid judge",
+        ),
+    ]
+    run_dir = tmp_path / "run" / "read_only_post_failure"
+    run_dir.mkdir(parents=True)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+    terminal_error = TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
+    orchestrator._evaluation_loop = AsyncMock(side_effect=terminal_error)  # type: ignore[method-assign]
+
+    sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id=task.task_id)
+    sandbox_dir = sandbox.setup()
+    (sandbox_dir / "artifact.txt").write_text("finished", encoding="utf-8")
+    orchestrator.sandbox = sandbox
+    orchestrator.success_checker = SuccessChecker(sandbox)
+
+    # Recorded before teardown removes the directory; asserting inside `cleanup`
+    # would hide the failure in the orchestrator's finally block.
+    marker_seen: list[bool] = []
+
+    async def cleanup() -> None:
+        marker_seen.append((sandbox_dir / "should-not-run").exists())
+        sandbox.cleanup()
+
+    orchestrator._cleanup = cleanup  # type: ignore[method-assign]
+
+    mock_agent = MagicMock()
+    mock_agent.kill_sync = MagicMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    result = await orchestrator.run()
+
+    assert marker_seen == [False], "an undeclared run_command must not execute on this path"
+
+    passed, failed, undeclared, judge = result.post_failure_criteria_results
+    assert passed.evaluation_status == "evaluated"
+    assert passed.score == 1.0
+
+    # A real failing verdict, NOT the not_evaluated placeholder -- both score 0.0.
+    assert failed.evaluation_status == "evaluated"
+    assert failed.score == 0.0
+    assert "Not evaluated after terminal agent failure" not in (failed.details or "")
+
+    # The opt-in hint belongs only to the type that has the opt-in.
+    assert undeclared.evaluation_status == "not_evaluated"
+    assert "read_only: true" in (undeclared.details or "")
+    assert judge.evaluation_status == "not_evaluated"
+    assert "read_only: true" not in (judge.details or "")
+
+    # The evidence is additive: the run is still the failure it was.
+    assert result.final_status == "ERROR"
+    assert result.error_message == str(terminal_error)
+    assert result.weighted_score == 0.0
+    assert result.success_criteria_results == []
+
+
 @pytest.mark.parametrize(
     "recovery_error",
     [

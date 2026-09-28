@@ -16,9 +16,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Per-stream output budget included in criterion details. Large enough for
-# typical tool diagnostics (e.g. uip --output json, pytest tracebacks) while
-# preventing a runaway process from blowing up the JSON trace or HTML report.
+# Per-stream output budget in criterion details: enough for typical diagnostics,
+# bounded so a runaway process cannot blow up the JSON trace or HTML report.
 _OUTPUT_BUDGET_CHARS = 4000
 
 

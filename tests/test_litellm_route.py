@@ -244,10 +244,9 @@ class TestBackendOverride:
 
 
 class TestCheckerContextModel:
-    """CheckerContext/ApiRouteContext — the typed replacement for the old
-    hand-validated open dict (previously 0% covered, per the PR #137 review).
-    ``extra="forbid"`` + real field types now do what the hand-rolled
-    ``validate_checker_context_shape`` used to."""
+    """CheckerContext/ApiRouteContext validate the checker context shape.
+
+    ``extra="forbid"`` plus real field types reject a malformed context."""
 
     @staticmethod
     def _validate(value):
@@ -720,8 +719,8 @@ class TestLitellmPreflight:
         assert _litellm_preflight_error(s) is None
 
     def test_scheme_less_base_url_returns_clean_error(self):
-        # Regression: a scheme-less URL used to make urlopen raise a bare
-        # ValueError that escaped as a traceback. Now it returns a clean message.
+        # A scheme-less URL makes urlopen raise a bare ValueError; the preflight
+        # returns a clean message rather than a traceback.
         s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url="localhost:4000", litellm_model="m")
         err = _litellm_preflight_error(s)
         assert err is not None and "http(s)" in err

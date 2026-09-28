@@ -72,22 +72,15 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
 def resolve_template_source_paths(sources: list[TemplateSource], base_dir: Path) -> None:
     """Resolve TemplateDirSource paths to absolute, in place.
 
-    Expands $VAR / ${VAR} environment variables, then normalizes the path:
-    relative paths are resolved against ``base_dir``; absolute paths are
-    used as-is (but still go through ``Path(...)`` for string normalization).
+    Expands ``$VAR`` / ``${VAR}``, then resolves a relative path against
+    ``base_dir``. An UNDEFINED env variable raises rather than deferring: a
+    template directory is load-bearing config, and an unresolved variable would
+    otherwise surface as a cryptic "Template directory not found" at sandbox
+    setup, far from the actual mistake.
 
-    Undefined env variables raise ``ValueError`` — a template directory is a
-    load-bearing config field and an unresolved variable would otherwise
-    surface as a cryptic "Template directory not found" error at sandbox
-    setup, far from the actual configuration mistake.
-
-    Scope: only environment variables (``$VAR`` / ``${VAR}``) are expanded
-    here. Dataset row substitution (``${row.field}`` in ``expand_dataset``)
-    runs over ``initial_prompt`` and ``success_criteria`` only — it does
-    NOT touch ``sandbox.template_sources``. The two regexes are disjoint
-    (env requires ``[A-Za-z_][A-Za-z0-9_]*``, row-var requires the dot)
-    but a ``${row.X}`` left inside a template path will not be substituted
-    and will fail at sandbox setup.
+    Only ENV variables are expanded here. Dataset row substitution runs over
+    ``initial_prompt`` and ``success_criteria`` only, so a ``${row.X}`` left in a
+    template path will not be substituted and fails at sandbox setup.
 
     Skips non-TemplateDirSource entries.
 
@@ -257,15 +250,12 @@ def resolve_agent_system_prompt[T: AgentConfig | BaseAgentConfig | None](agent_c
         prompt_path = (base_dir / prompt_path).resolve()
     if not prompt_path.exists():
         raise FileNotFoundError(f"system_prompt_file not found: {prompt_path}")
-    # A whitespace-only file is no prompt at all — mirror the normalization
-    # _blank_prompt_is_no_prompt applies to inline prompts (model_copy skips
-    # validators, so this seam has to apply it itself).
+    # A whitespace-only file is no prompt at all. `model_copy` skips validators,
+    # so this seam applies the normalization itself...
     content = prompt_path.read_text(encoding="utf-8").strip() or None
-    # ...which means model_copy also skips check_replace_mode_has_prompt, so a
-    # blank file under `replace` would reach the agent as (replace, no prompt)
-    # and silently downgrade to the append preset at runtime. Reject it here
-    # instead: the file is the only prompt the config had, and the docs promise
-    # this combination fails at load.
+    # ...and also skips check_replace_mode_has_prompt, so a blank file under
+    # `replace` would reach the agent as (replace, no prompt) and silently
+    # downgrade to the append preset at runtime.
     if content is None and getattr(agent_config, "system_prompt_mode", "append") == "replace":
         raise ValueError(
             f"system_prompt_file {prompt_path} is empty; system_prompt_mode='replace' requires a "
@@ -379,29 +369,22 @@ def expand_dataset(
 
     Tasks without ``dataset:`` pass through unchanged as ``[task]``.
 
-    Each expanded task:
-      - has task_id rewritten to ``"<original_task_id>/<row_id>"``
-      - has ``dataset`` cleared (prevents re-expansion downstream)
-      - has ``${row.<field>}`` substituted in ``initial_prompt`` and in all
-        string leaves of ``success_criteria`` entries
+    Each expanded task has its task_id rewritten to
+    ``"<original_task_id>/<row_id>"``, its ``dataset`` cleared (preventing
+    re-expansion downstream), and ``${row.<field>}`` substituted in
+    ``initial_prompt`` and every string leaf of ``success_criteria``.
 
-    Row ids are validated against a safe pattern so they're filesystem-safe
-    when used as directory names under the run_dir.
+    Row ids are validated against a safe pattern, since they become directory
+    names under the run dir.
 
     Args:
         task: Task that may carry a dataset.
-        task_file_dir: Directory of the source task YAML (for resolving dataset.paths).
-        max_rows: Optional CLI cap on rows used (for cheap smoke runs). A
-            fixed-seed uniform-random N-row sample over the whole dataset
-            (reproducible, but unbiased across ``dataset.paths`` — unlike a raw
-            slice). When provided, overrides both ``sample_per_stratum`` args.
-            Absent it, ``sample_per_stratum`` (stratified random) applies.
-        sample_per_stratum: Optional CLI override (``--sample-per-stratum``) for
-            ``dataset.sample_per_stratum`` — keep up to N rows per stratum
-            (stratum = ``dataset.stratify_field``, default ``expected_skill``).
-            Lets a runner cap a stratified dataset without editing the task YAML
-            (the nightly activation suite uses this). Ignored when ``max_rows``
-            is set. When None, falls back to ``dataset.sample_per_stratum``.
+        task_file_dir: Directory of the source task YAML.
+        max_rows: CLI cap (``--sample``) — a fixed-seed uniform-random sample,
+            reproducible but unbiased across ``dataset.paths``. Overrides both
+            ``sample_per_stratum`` args.
+        sample_per_stratum: CLI override for ``dataset.sample_per_stratum``, so a
+            runner can cap without editing the YAML. Ignored under ``max_rows``.
 
     Returns:
         Expanded list of TaskDefinitions. Length is 1 when dataset is None.
@@ -418,19 +401,15 @@ def expand_dataset(
     if not rows:
         raise ValueError(f"Dataset for task '{task.task_id}' is empty")
 
-    # Row selection precedence:
-    #   1. CLI --sample (max_rows): flat uniform-random N over the whole dataset.
-    #      Fixed seed => reproducible across runs, but (unlike a first-N slice)
-    #      unbiased across the concatenated dataset.paths.
-    #   2. sample_per_stratum: stratified random N-per-stratum. CLI
-    #      --sample-per-stratum (the arg) overrides dataset.sample_per_stratum
-    #      (the YAML), so a runner can cap a dataset without editing its task.
+    # Row selection precedence: CLI --sample (flat uniform-random N over the whole
+    # dataset, fixed seed so it is reproducible but unbiased across the
+    # concatenated paths) wins over sample_per_stratum, whose CLI arg in turn
+    # overrides the YAML so a runner can cap a dataset without editing its task.
     ds = task.dataset
     n_per_stratum = sample_per_stratum if sample_per_stratum is not None else ds.sample_per_stratum
-    # Stratified sampling is seeded only by dataset.sample_seed. When that is None the sample is
-    # deliberately nondeterministic — re-drawn every run — regardless of whether the CLI
-    # --sample-per-stratum flag or the YAML supplied the count (see Dataset.sample_seed). The
-    # nightly activation suite relies on this to broaden coverage across runs.
+    # Seeded ONLY by dataset.sample_seed. When that is None the sample is
+    # deliberately nondeterministic — re-drawn every run — and the nightly
+    # activation suite relies on this to broaden coverage.
     stratum_seed = ds.sample_seed
     if max_rows is not None and max_rows < len(rows):
         rows = random.Random(_SMOKE_SAMPLE_SEED).sample(rows, max_rows)

@@ -177,7 +177,7 @@ class TestSimulatorRouteDecoupledFromCheckerContext:
             simulation=SimulationConfig(enabled=True, persona="p", goal="g"),
             api_route=self._litellm_api_route(),
         )
-        orchestrator._resolve_routes()  # no raise -- this used to be rejected
+        orchestrator._resolve_routes()  # no raise
         assert isinstance(orchestrator.eval_route, LiteLLMRoute)
         assert not isinstance(orchestrator.simulator_route, LiteLLMRoute)
 
@@ -2276,7 +2276,7 @@ def test_finalize_result_logs_summary_on_success(tmp_path, caplog):
 
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time() - 1.5)
 
@@ -2301,7 +2301,7 @@ def test_finalize_result_logs_summary_on_timeout(tmp_path, caplog):
 
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time())
 
@@ -2324,7 +2324,7 @@ def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
     orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.ERROR, iterations=0)
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time())
 
@@ -2343,9 +2343,8 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     """Evaluate-only branch (agent is None) must still stage the reference and
     forward it to SuccessChecker.check_all_async.
 
-    Regression: previously this branch called check_all without the reference,
-    so judge-style criteria (llm_judge / agent_judge) silently saw no
-    reference even when task.reference was set — surfaced as
+    Without it, judge-style criteria (llm_judge / agent_judge) silently see no
+    reference even when task.reference is set, logged as
     "include_reference=True but reference not set" in the judge_context log.
     """
     from datetime import datetime

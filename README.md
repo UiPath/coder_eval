@@ -253,6 +253,7 @@ The step's exit code is coder-eval's own: non-zero on any failed task.
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](docs/agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
 | [Pi](docs/agents/PI.md) | Running the Pi agent on open-weight models |
+| [Delegate](docs/agents/DELEGATE.md) | Running UiPath Autopilot's Delegate agent |
 | [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |

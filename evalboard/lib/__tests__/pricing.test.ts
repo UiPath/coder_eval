@@ -40,7 +40,7 @@ describe("resolvePricing", () => {
         // generations differ 3x, so pin the boundary: an id on the wrong side of
         // it triples (or thirds) every Opus cost the board renders, which reads
         // as a plausible number rather than an obvious error.
-        // pricing-parity.test.ts is the authority on the rates themselves; this
+        // CE065 (tests/lint/pricing_mirror.py) is the authority on the rates themselves; this
         // asserts the split survives an edit to the table.
         expect(resolvePricing("claude-opus-4-8")?.outputPerMTok).toBe(25);
         expect(resolvePricing("claude-opus-5")?.outputPerMTok).toBe(25);

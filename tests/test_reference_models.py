@@ -134,6 +134,21 @@ class TestTaskDefinition:
                 ]
             )
 
+    def test_system_one_judge_reference_dir_token_without_reference_block_is_rejected(self):
+        """Same guard as the other two judges: it reads files the same way."""
+        from coder_eval.models import NoulQuestion, SystemOneJudgeCriterion
+
+        with pytest.raises(ValidationError, match="consume the reference solution"):
+            _task(
+                success_criteria=[
+                    SystemOneJudgeCriterion(
+                        description="Judge",
+                        questions={"q": NoulQuestion(instructions="i")},
+                        files=["$REFERENCE_DIR/rubric.md"],
+                    )
+                ]
+            )
+
     @pytest.mark.parametrize(
         "command",
         [

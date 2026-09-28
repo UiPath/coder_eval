@@ -1,30 +1,21 @@
 """CE027 — documented framework env vars must be backed by a real consumer.
 
-``coder_eval.config.Settings`` sets no ``env_prefix`` and uses ``extra="ignore"``,
-so a documented env var whose name does not match a ``Settings`` field (or one of
-its ``AliasChoices``) is **silently dropped** at runtime with zero signal — the
-exact failure mode behind the ``CODER_EVAL_API_BACKEND`` doc bug (the real field
-is ``API_BACKEND``, so the ``CODER_EVAL_``-prefixed spelling selected no backend
-and the run fell back to Direct Anthropic).
+``Settings`` sets no ``env_prefix`` and uses ``extra="ignore"``, so a documented env
+var that nothing consumes is silently dropped at runtime.
 
-This rule scans the doc/config surfaces (``README.md``, ``action.yml``,
-``docs/**``) for env-var **assignments** (``NAME=value`` — the copy-pasteable,
-dangerous form) carrying a **framework-owned prefix** and flags any whose name is
-neither a ``Settings`` env name/alias nor referenced anywhere in ``src/`` — the
-framework also reads a handful of vars directly via ``os.getenv`` (e.g.
-``CODER_EVAL_SKILLS_DIR``, ``CODEX_BASE_URL``, ``CODER_EVAL_IN_CONTAINER``), and
-those are legitimately documentable.
+The rule scans ``README.md``, ``action.yml`` and ``docs/**`` for assignments
+(``NAME=value``) whose name carries a ``FRAMEWORK_ENV_PREFIXES`` prefix. It flags a
+name that is neither a ``Settings`` field or alias nor consumed in ``src/``: an
+``os.getenv`` / ``os.environ`` read, a ``"NAME=VALUE"`` child-process literal, or
+either of those through a named constant.
 
-Scope note: only *assignments* are checked, not bare prose mentions. Prose
-scanning is too false-positive-prone (markdown links like
-``CODEX_AGENT_GUIDE.md``, secret RHS references like ``secrets.BEDROCK_TOKEN``,
-regex-pattern examples like ``API_KEY = "…"``), and the assignment form is the
-one users actually copy into a workflow, so it carries the real risk.
+Blind spot: only assignments are checked, never bare prose mentions, and third-party
+prefixes (``AWS_``, ``ANTHROPIC_``, ...) are not scanned.
 
-It is intentionally NOT a ``BaseRule`` registered in ``tests/lint/runner.py``:
-that runner is AST-only and walks ``.py`` files, whereas this rule reasons over
-Markdown/YAML doc surfaces. It is wired as a dedicated test in
+Not a ``BaseRule``: it reasons over Markdown/YAML, and is wired as
 ``tests/test_custom_lint.py::TestCE027DocEnvVarParity``.
+
+Rationale: .claude/notes/lint-rules.md § CE027
 """
 
 from __future__ import annotations
@@ -35,11 +26,8 @@ from pathlib import Path
 from pydantic import AliasChoices
 
 
-# Framework-owned env-var name prefixes. A documented token starting with one of
-# these is owned by coder-eval and MUST be consumed by it. Deliberately EXCLUDES
-# broad third-party namespaces (AWS_, ANTHROPIC_, GEMINI_, GITHUB_, EVALBOARD_,
-# PLUGIN_) whose vars are consumed by SDKs / CI, not necessarily via Settings, so
-# scanning them would produce false positives on legitimately-external names.
+# A documented token with one of these prefixes is owned by coder-eval and MUST be consumed by it.
+# Third-party namespaces (AWS_, ANTHROPIC_, GEMINI_, GITHUB_, EVALBOARD_, PLUGIN_) are excluded on purpose.
 FRAMEWORK_ENV_PREFIXES: tuple[str, ...] = (
     "CODER_EVAL_",
     "API_",
@@ -51,35 +39,20 @@ FRAMEWORK_ENV_PREFIXES: tuple[str, ...] = (
 
 _PREFIX_ALT = "|".join(FRAMEWORK_ENV_PREFIXES)
 
-# A framework-prefixed env-var ASSIGNMENT in doc/config text: ``NAME=`` where NAME
-# carries a framework prefix. The negative lookbehind rejects a name embedded in
-# a larger token — attribute access (``secrets.BEDROCK_TOKEN``), a hyphenated
-# token (``X-API_KEY=``), a path/URL segment (``dir/API_X=``, ``http://API_Y=``),
-# or a Windows path (``C:\\API_Z=``). The single ``=`` (not ``==``) with no space
-# before it also rejects ``API_KEY = "…"`` regex-pattern examples.
+# A framework-prefixed ``NAME=`` assignment. The lookbehind rejects a name inside a larger token:
+# ``secrets.BEDROCK_TOKEN``, ``X-API_KEY=``, ``dir/API_X=``, ``http://API_Y=``, ``C:\\API_Z=``.
+# A single ``=`` with no space before it rejects ``API_KEY = "…"`` regex-pattern examples.
 _ENV_ASSIGNMENT = re.compile(r"(?<![\w./:\\-])((?:" + _PREFIX_ALT + r")[A-Z0-9_]*[A-Z0-9])=(?!=)")
 
-# How the framework actually *consumes* an env var, so a documented assignment is
-# only "backed" if some module reads it: a direct ``os.getenv("NAME")`` /
-# ``os.environ["NAME"]`` / ``os.environ.get("NAME")`` read, or the NAME side of an
-# inline ``"NAME=VALUE"`` literal handed to a child process (e.g. docker
-# ``--env NAME=1``). This is stricter than "any uppercase literal" so an unrelated
-# constant that merely spells a var name cannot silently mask a documented-but-
-# unconsumed assignment.
+# A consumer: an ``os.getenv`` / ``os.environ[...]`` / ``os.environ.get`` read of NAME, or the NAME side of an
+# inline ``"NAME=VALUE"`` child-process literal. Stricter than "any uppercase literal", so a constant that
+# only spells a var name cannot mask a documented-but-unconsumed assignment.
 _SRC_ENV_READ = re.compile(r"""(?:getenv\(\s*|environ(?:\.get\(\s*|\[\s*))['"]([A-Z][A-Z0-9_]{2,})['"]""")
 _SRC_ENV_VALUE = re.compile(r"""['"]([A-Z][A-Z0-9_]{2,})=[^'"]*['"]""")
 
-# The same two shapes again, but reached through a NAMED CONSTANT rather than an
-# inline literal. `CODER_EVAL_IN_CONTAINER` has a single definition
-# (`models/container_paths.py::IN_CONTAINER_ENV`) and every consumer now spells it
-# `os.environ.get(IN_CONTAINER_ENV)`, so a scanner that recognised only literals
-# would report the repo's own gate as unbacked and push the author to paste the
-# literal back -- the scanner arguing against the SSOT it should reinforce.
-#
-# Resolution is deliberately TWO-STEP, so this stays as strict as it was: a
-# constant counts only when some module actually reads it by name. A bare
-# `CONST = "CODER_EVAL_BOGUS"` that nothing consumes is still unbacked, which is
-# the property `test_src_scan_requires_a_real_consumer_not_any_literal` pins.
+# The same two shapes reached through a named constant (``os.environ.get(IN_CONTAINER_ENV)``). Two-step: a
+# constant counts only when some module reads it; an unread ``CONST = "CODER_EVAL_BOGUS"`` stays unbacked
+# (pinned by ``test_src_scan_requires_a_real_consumer_not_any_literal``).
 _SRC_ENV_CONST_DEF = re.compile(r"""^([A-Z][A-Z0-9_]{2,})\s*(?::[^=\n]+)?=\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*$""", re.M)
 _SRC_ENV_CONST_READ = re.compile(r"""(?:getenv\(\s*|environ(?:\.get\(\s*|\[\s*))([A-Z][A-Z0-9_]{2,})\b""")
 _SRC_ENV_CONST_VALUE = re.compile(r"""f['"]\{([A-Z][A-Z0-9_]{2,})\}=[^'"]*['"]""")
@@ -113,8 +86,7 @@ def src_env_literals(src_root: Path) -> set[str]:
         const_values.update(dict(_SRC_ENV_CONST_DEF.findall(text)))
         const_reads.update(_SRC_ENV_CONST_READ.findall(text))
         const_reads.update(_SRC_ENV_CONST_VALUE.findall(text))
-    # Step two: a constant is backed only if it is BOTH defined as an env name and
-    # read somewhere. Defined-but-unread stays unbacked, exactly as before.
+    # Step two: a constant is backed only if it is BOTH defined as an env name and read somewhere.
     names.update(const_values[ident] for ident in const_reads & const_values.keys())
     return names
 

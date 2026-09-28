@@ -1,4 +1,4 @@
-"""Harness: no public numeric helper in reports_stats may launder NaN/inf into a report.
+"""Harness: no public numeric helper in coder_eval.stats may launder NaN/inf into a report.
 
 This enumerates the module rather than listing functions by hand, so a helper added
 later is covered automatically — the failure mode this guards (a new statistic that
@@ -15,7 +15,7 @@ import math
 
 import pytest
 
-from coder_eval import reports_stats
+from coder_eval import stats
 
 
 # Thin wrappers over the stdlib that intentionally propagate whatever they are given;
@@ -27,11 +27,11 @@ _INF = float("inf")
 
 
 def _numeric_helpers():
-    """Public reports_stats functions whose parameters are all floats / float lists."""
-    for name, fn in vars(reports_stats).items():
+    """Public coder_eval.stats functions whose parameters are all floats / float lists."""
+    for name, fn in vars(stats).items():
         if name.startswith("_") or name in _PASSTHROUGH_HELPERS or not inspect.isfunction(fn):
             continue
-        if fn.__module__ != reports_stats.__name__:
+        if fn.__module__ != stats.__name__:
             continue
         hints = inspect.get_annotations(fn, eval_str=True)
         params = inspect.signature(fn).parameters

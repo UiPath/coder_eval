@@ -514,7 +514,7 @@ def test_load_attaches_dict_when_schema_mismatch(tmp_path: Path) -> None:
 
 def test_load_reads_legacy_json_sibling(tmp_path: Path) -> None:
     """Sibling files spilled before the YAML switch are ``judge-<idx>.json``.
-    The loader must still read them so previously-archived runs render."""
+    The loader must still read them so archived runs render."""
     judge = _make_judge_result(transcript=None)
     judge.transcript_path = "judge-0.json"
     legacy = (

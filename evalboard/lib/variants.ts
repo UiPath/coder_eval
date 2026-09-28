@@ -12,7 +12,7 @@ export const DEFAULT_VARIANT_ID = "default";
 
 // A variant id is exactly ONE path segment, so it is held to a stricter rule
 // than a task id, which may nest (`<suite>/<row>` from dataset expansion).
-// Mirrors coder_eval's reports_junit._is_safe_component. Restated rather than
+// Mirrors coder_eval's reports/junit.py::_is_safe_component. Restated rather than
 // imported from lib/blob.ts to keep this module free of node built-ins.
 const VARIANT_ID_RE = /^[\w.-]+$/;
 

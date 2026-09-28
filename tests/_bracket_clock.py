@@ -1,23 +1,13 @@
 """A ``TurnClock`` stand-in anchored far from real time, for the CE064 tests.
 
 CE064 checks only that ``timestamp=`` is PRESENT on an ``AgentStartEvent`` /
-``AgentEndEvent`` emit — its own declared blind spot is that it cannot tell
-``self.clock.now()`` from a ``datetime.now()`` written out at the call site.
-This is the guard for the SOURCE of that stamp, on the three harnesses that own
-a clock.
+``AgentEndEvent``; this guards the SOURCE of that stamp on the three harnesses
+that own a clock. The stand-in sits a year from ``datetime.now()``, so a
+bracket that fell back to ``StreamEvent``'s default fails by a year, not by a
+microsecond. It advances on the real monotonic clock, so the head and tail
+come out as small positive measurements.
 
-ANCHORED FAR FROM NOW, and that is the whole trick. A bracket left on
-``StreamEvent.timestamp``'s ``default_factory=datetime.now`` lands within
-microseconds of a clock-derived one, so an assertion written against real time
-would pass either way. Anchoring the stand-in a year out (the same device as
-``tests/test_timing_identity_contract.py``'s ``EPOCH_MS``) makes a reverted
-``timestamp=`` fail by a year rather than by a microsecond.
-
-It advances on the REAL monotonic clock instead of stepping by hand, which is
-what lets the same fixture assert the second half: with the bracket and the
-window bounds finally on one basis, ``decompose_turn``'s head and tail come out
-as small positive measurements rather than as the clamped ``0.0`` a cross-basis
-subtraction produced (see ``ce064_turn_bracket_on_the_clock``'s measured probe).
+Rationale: .claude/notes/lint-rules.md § CE064
 """
 
 import time
@@ -68,22 +58,12 @@ def assert_bracket_on_the_clock(events: list[StreamEvent]) -> None:
 def assert_overhead_is_measured(record: TurnRecord) -> None:
     """The turn's head and tail are real measurements taken on one basis.
 
-    The two ends fail differently, and each needs its own assertion.
+    A defaulted ``AgentStartEvent`` blows the head's upper bound by the whole
+    anchor offset. A defaulted ``AgentEndEvent`` makes ``decompose_turn`` clamp
+    the tail to ``0.0``, which only the strict ``> 0.0`` catches. Do not relax
+    it to ``>= 0.0`` — a zero is the defect.
 
-    A defaulted ``AgentStartEvent`` lands ~365 days before the clock-derived
-    first window, so the HEAD blows any sane bound by that whole offset — the
-    upper bound is what catches it.
-
-    A defaulted ``AgentEndEvent`` fails the other way: it lands ~365 days
-    BEFORE its own last message, so ``decompose_turn`` clamps the negative and
-    publishes ``0.0`` — "measured, and instant", which sails through an upper
-    bound. Only a strict ``> 0.0`` catches it, and it holds on all three
-    harnesses because a turn's last flush and its end event are separated by
-    real work. The margin is small where it is smallest: antigravity holds its
-    process across turns and measures 0.007-0.03 ms here, which is 7-30 ticks
-    of the 1 us resolution both `datetime` and `time.monotonic()` have on
-    Linux, macOS and Windows. That is the magnitude the clamped defect hid, so
-    do not relax this to ``>= 0.0`` — a zero is the defect.
+    Rationale: .claude/notes/lint-rules.md § CE064
     """
     assert record.harness_startup_ms is not None, "harness_startup_ms was never measured"
     assert record.harness_teardown_ms is not None, "harness_teardown_ms was never measured"

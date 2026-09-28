@@ -82,14 +82,11 @@ def process_plugins(
             resolved = Path(expanded).resolve()
             processed_plugin["path"] = str(resolved)
 
-            # Loud: claude-code loads a local plugin as a PLUGIN ROOT, so its skills must
-            # sit at <path>/skills/<name>/SKILL.md. Point one level deeper — at the bare
-            # directory of skill directories — and the SDK loads NOTHING, with no error:
-            # every positive row of an activation suite scores 0 and the suite reports
-            # recall 0.0, which reads exactly like a skill that never triggers. This
-            # function is claude-code-only (see the module docstring); Codex and
-            # Antigravity scan both depths and warn for themselves. Warn rather than
-            # raise — a plugin may legitimately ship only agents/, commands/ or hooks/.
+            # HAZARD: a local plugin loads as a PLUGIN ROOT, so its skills must sit
+            # at <path>/skills/<name>/SKILL.md. One level deeper and the SDK loads
+            # NOTHING, with no error -- every positive row of an activation suite
+            # then scores 0, which reads exactly like a skill that never triggers.
+            # Warn rather than raise: a plugin may ship only agents/ or hooks/.
             if plugin.get("type") == "local" and resolved.is_dir() and not (resolved / "skills").is_dir():
                 log.warning(
                     f"Plugin path has no skills/ subdirectory, so it loads no skills: {resolved}. "
@@ -236,9 +233,8 @@ def _git_short_sha(repo_path: Path) -> str:
     return "unknown"
 
 
-# A semver-ish version token: major.minor.patch with an optional leading `v`
-# and any prerelease/build tail (e.g. `1.196.0-alpha.20260605.7426`). Anchored
-# at the start of a line so it rejects non-version `uip --version` output.
+# major.minor.patch with an optional leading `v` and any prerelease tail. Anchored
+# at line start so it rejects non-version `uip --version` output.
 _VERSION_TOKEN = re.compile(r"^v?\d+\.\d+\.\d+\S*$")
 
 
@@ -309,9 +305,8 @@ def resolve_uipath_plugin_dir(search_path: str | None = None) -> Path | None:
     except (OSError, RuntimeError) as exc:
         logger.debug("Failed to resolve `uip` symlink %s: %s", resolved, exc)
         return None
-    # Walk up looking for `.../node_modules/@uipath`. We accept the first
-    # @uipath dir whose parent is named `node_modules` — the cli is always
-    # inside one, e.g. `~/.bun/.../node_modules/@uipath/cli/dist/index.js`.
+    # The first @uipath dir whose parent is named `node_modules` -- the cli is
+    # always inside one.
     for ancestor in real.parents:
         if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
             logger.debug("Resolved @uipath plugin-tools dir=%s from `uip` at %s", ancestor, real)
@@ -355,9 +350,8 @@ def _tool_plugin_versions(tools_dir: Path | None = None) -> dict[str, str]:
         return {}
 
     plugins: dict[str, str] = {}
-    # npm installs ``@uipath/<pkg>`` into ``@uipath/<pkg>/``, so a ``-tool`` plugin
-    # dir is always named ``<pkg>-tool``. Mirror the manifest-name contract
-    # (``name.endswith("-tool")`` below) in the glob to avoid statting unrelated dirs.
+    # A ``-tool`` plugin dir is always named ``<pkg>-tool``; mirroring the
+    # manifest-name contract in the glob avoids statting unrelated dirs.
     for pkg_json in sorted(tools_dir.glob("*-tool/package.json")):
         try:
             data = json.loads(pkg_json.read_text(encoding="utf-8"))
@@ -454,23 +448,20 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     project_root = Path(__file__).resolve().parent.parent
     version_info["git_commit"] = _git_short_sha(project_root)
 
-    # Sibling repos that contribute to the agent's runtime context.
-    # Path resolution: env var first (CODER_EVAL_SKILLS_DIR), then sibling-of-coder_eval default.
-    # A downstream runner can set this env var to its configured path so custom layouts get the right SHA.
+    # Env var first (CODER_EVAL_SKILLS_DIR), then the sibling default, so a
+    # downstream runner with a custom layout still gets the right SHA.
     sibling_root = project_root.parent.parent
     skills_override = os.environ.get("CODER_EVAL_SKILLS_DIR")
     skills_path = Path(skills_override) if skills_override else sibling_root / "skills"
     version_info["skills_git_commit"] = _git_short_sha(skills_path)
 
-    # uip CLI is installed via npm; read its version from @uipath/cli's
-    # package.json (same source tool_plugins uses), falling back to a validated
-    # `uip --version`. Consumed by downstream run-summary tooling.
+    # Read from @uipath/cli's package.json (the source tool_plugins uses), falling
+    # back to a validated `uip --version`.
     tools_dir = resolve_uipath_plugin_dir()
     version_info["cli_version"] = _resolve_cli_version(tools_dir, None)
 
-    # The CLI shell (cli_version) and its `@uipath/*-tool` plugins (e.g.
-    # maestro-tool) version independently, so the shell version alone can
-    # mislead regression timelines. Record the installed plugin versions too.
+    # The shell and its `@uipath/*-tool` plugins version independently, so the
+    # shell version alone can mislead a regression timeline.
     version_info["tool_plugins"] = _tool_plugin_versions(tools_dir)
 
     # Get coder_eval version

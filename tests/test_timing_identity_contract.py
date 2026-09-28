@@ -2,44 +2,17 @@
 
     head + Σ generation + UNION(tool) + tail == the turn's own span
 
-This is the committed MAGNITUDE sensor, and it exists because nothing else in
-the suite is one:
+Pins: the identity closes ms-exact on every built-in harness. Each case drives
+the harness's own REDUCER with a hand-moved clock and reduces its output through
+a real ``EventCollector``, so every asserted number is computed by the harness.
 
-* the golden corpus masks ``generation_duration_ms``, both window bounds, both
-  ``execution_*_at`` stamps and both head/tail fields to a placeholder
-  (``_scrub.py::SCRUB_KEYS``), so a snapshot records that a window was measured
-  and never what it measured — a timing value can move by seconds with every
-  golden test still green;
-* ``_scrub.py::assert_timing_captured``'s own identity check is ONE-SIDED
-  (``overshoot <= ...``), so an UNDERCOUNT — a bucket claiming less time than
-  it should, which is the defect class this whole area keeps producing — passes
-  it silently. It cannot be made two-sided either: the replays run in ~0.3 ms of
-  synthetic wall clock, where a relative bound is vacuous;
-* ``scripts/timing/decompose_run.py --max-residual-pct`` IS two-sided, but needs
-  live ``task.json`` files.
+HAZARD: a case must script every clock its reducer reads — an injected
+``TurnClock`` (pi, antigravity, claude-code), a ``datetime`` subclass on the
+module (opencode), ``time.monotonic`` on top of the injected clock
+(claude-code), or SDK epoch-ms stamps (codex). A real clock left in makes the
+case pass by accident.
 
-Magnitudes are only real where a scripted clock makes them real, so each case
-drives the harness's own REDUCER with a clock it moves by hand, then feeds the
-messages and commands it produced through a real ``EventCollector`` — the same
-seam production uses to compute the head and the tail. Every number asserted is
-therefore one the harness computed, against a span the test declared.
-
-Three clock-injection styles are needed, and all three already exist in the
-per-harness suites (this module reuses their idiom rather than inventing a
-fourth):
-
-* an injected ``TurnClock`` — pi, antigravity and claude-code take ``clock=``
-  / build one through a patched ``TurnClock`` factory;
-* a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
-  calls ``datetime.fromtimestamp`` through the same global (see
-  ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` patched ON TOP of an injected clock — claude-code, whose
-  ``turn_start_time``, turn deadline and measured tool durations still read
-  ``time.monotonic()``, so scripting only the clock leaves the reducer
-  straddling a real clock and a scripted one.
-
-Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
-from any host clock, so its case scripts those stamps directly.
+Rationale: .claude/notes/timing.md § Why the ms-exact identity contract exists
 """
 
 from __future__ import annotations
@@ -189,7 +162,7 @@ class _InjectedClock:
 
     Injected rather than monkeypatched: pi and antigravity derive every wall
     stamp from their per-turn clock, so patching the module's ``datetime``
-    would no longer reach them and the case would quietly measure the real
+    would not reach them and the case would quietly measure the real
     clock and pass by accident.
     """
 
@@ -266,6 +239,42 @@ class _SteppedDatetime(datetime):
         return at(_SteppedDatetime.at_ms)
 
 
+def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+    """One tiled window covering the whole turn (the delegate agent builds no
+    per-round-trip segments — see ``.claude/notes/agents.md`` § Delegate agent),
+    with a real head (dispatch before ``_TurnState`` is constructed) and tail
+    (published after the last flush)."""
+    from coder_eval.agents import delegate_agent as delegate_module
+    from coder_eval.agents.delegate_agent import DelegateAgent, _TurnState
+    from coder_eval.models import DelegateAgentConfig
+
+    monkeypatch.setattr(delegate_module, "datetime", _SteppedDatetime)
+    agent = DelegateAgent(DelegateAgentConfig(type=AgentKind.DELEGATE), task_id="t")
+    commands: list[CommandTelemetry] = []
+    messages: list[TranscriptMessage] = []
+
+    def emit(e: Any) -> None:
+        if isinstance(e, ToolEndEvent):
+            commands.append(e.tool)
+        elif isinstance(e, AgentEndEvent):
+            messages.extend(e.messages)
+
+    _SteppedDatetime.at_ms = 500  # dispatch before the turn state exists: head
+    state = _TurnState(iteration=1, user_input="go", model="m")
+
+    _SteppedDatetime.at_ms = 700
+    agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "input": {}}, state, emit)
+    _SteppedDatetime.at_ms = 1200
+    agent._handle_tool_result({"type": "tool_result", "toolId": "c1", "output": "ok"}, state, emit)
+    _SteppedDatetime.at_ms = 1800
+    agent._handle_event({"type": "message", "content": "done"}, state, emit)
+
+    _SteppedDatetime.at_ms = 2000  # last flush: the single window closes here
+    agent._finalize_turn(state, AgentEndStatus.COMPLETED, emit)
+
+    return Turn(started_ms=0.0, ended_ms=2200.0, messages=messages, commands=commands)
+
+
 def _opencode_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """The same two-window shape, driven through OpenCode's step stream."""
     from coder_eval.agents import opencode_agent as opencode_module
@@ -313,11 +322,12 @@ def _antigravity_turn() -> Turn:
     measurable head at all.
     """
     from coder_eval.agents.antigravity_agent import AntigravityAgent, _AntigravityTurnState
-    from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage
+    from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage, _UsageMeter
 
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, model="gemini-3.5-flash"))
     collector = EventCollector()
     clock = _InjectedClock(at_ms=500)  # dispatch before the first Step: head
+    meter = _UsageMeter()
     state = _AntigravityTurnState(
         agent=agent,
         emit=CompositeStreamCallback([collector]),
@@ -329,6 +339,7 @@ def _antigravity_turn() -> Turn:
         model="gemini-3.5-flash",
         turn_start_time=0.0,
         clock=clock,
+        cumulative_usage=meter.read,
     )
 
     clock.at_ms = 700
@@ -350,9 +361,11 @@ def _antigravity_turn() -> Turn:
         )
     )
     clock.at_ms = 2000
-    state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
+    state.process_step(meter.feed(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5))))
     clock.at_ms = 3000
-    state.process_step(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
+    state.process_step(
+        meter.feed(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
+    )
 
     return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=list(state.commands))
 
@@ -433,33 +446,15 @@ def _codex_turn() -> Turn:
 def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """A tool call between two emissions, with a real head and a real tail.
 
-    The clock is INJECTED, like pi's and antigravity's: every wall stamp this
-    reducer records now derives from the turn's ``TurnClock``, and a derived
-    stamp escapes a monkeypatched module ``datetime`` entirely — the case would
-    quietly measure the real clock and pass by accident. ``time.monotonic`` is
-    still patched off the same counter, because ``turn_start_time``, the
-    deadline and the tool call's own measured duration read it; leaving it real
-    leaves the reducer straddling a scripted clock and a live one, and the tool
-    span (a monotonic duration subtracted back off a clock reading) would be
-    nonsense.
+    Pins: the first `message_start` re-seeds the window, so the CLI spawn before
+    it is head. The result lands the instant the tool ends, so this cannot tell
+    a tiled window from one reset at the result; see
+    `test_a_slow_tool_result_round_trip_is_not_lost`.
 
-    The first `message_start` re-seeds the window, so the CLI spawn and the
-    query build before it are head rather than msg0's generation. That a LATER
-    one must not re-seed is asserted directly in
-    `tests/test_agent_telemetry.py`; here it shows up as the windows still
-    tiling.
+    HAZARD: the clock is INJECTED and `time.monotonic` is patched off the same
+    counter; leave either real and the reducer straddles two clocks.
 
-    Its windows TILE across the tool result, and this case only proved that by
-    accident until the reducer was fixed. The mark used to be reset when the
-    result arrived, so the interval between the emission that ISSUED the call
-    and the result landed in no bucket. Here that interval IS the tool's
-    execution exactly — the case scripts the result at the instant the tool
-    ends — so the tool bucket happened to claim the same milliseconds and the
-    identity closed anyway. On a real turn the two differ: a 21.5 ms `Write`
-    can be followed by a 2.5 s round trip, and 21% of the turn goes missing.
-    `test_a_slow_tool_result_round_trip_is_not_lost` is the case that
-    discriminates; this one deliberately keeps the coincident shape so the two
-    read as a pair.
+    Rationale: .claude/notes/timing.md § Why a coincident tool result cannot catch an un-tiled window
     """
     from coder_eval.agents import claude_code_agent as claude_module
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
@@ -524,21 +519,14 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 
 
 def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
-    """A FAST tool followed by a SLOW result round trip — the shape that hid a defect.
+    """A FAST tool followed by a SLOW result round trip.
 
-    ``_claude_turn`` above scripts the tool result at the instant the tool
-    finishes, so the un-tiled interval and the tool's own span were the same
-    milliseconds and the identity closed even while the mark was being reset.
-    Every live probe had the same blind spot from the other direction: three
-    concurrent ``sleep 3`` calls make the tool union so large that the round
-    trip rounds away (measured: 0.05% residual).
+    Pins: the window after a tool result tiles from the previous emission and
+    does not open when the result lands. The tool runs for 20 ms and its result
+    takes 2000 ms to come back, the shape traced off
+    `tasks/dataset_example.yaml`; the identity closing is the assertion.
 
-    Here the tool runs for 20 ms and its result takes 2000 ms to come back,
-    which is `tasks/dataset_example.yaml` — the task CI actually runs, where a
-    21.5 ms ``Write`` met a 2511.7 ms round trip and 21% of the turn was
-    accounted to nothing. The identity closing here is the whole point: the
-    window after the result must tile from the previous emission, not open
-    when the result lands.
+    Rationale: .claude/notes/timing.md § Why a coincident tool result cannot catch an un-tiled window
     """
     from coder_eval.agents import claude_code_agent as claude_module
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
@@ -587,17 +575,13 @@ def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
             message_id="m1",
         )
     )
-    # The tool itself is 20 ms. What follows is the shape a live turn actually
-    # has, traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user
-    # messages, the second ~2 s after the first. The old code reset the mark on
-    # each, so the next window opened at the LAST one and that 2 s vanished.
-    #
-    # One user message is not enough to catch it, and that is exactly why this
-    # shipped: claude-code reconstructs `execution_started_at` by subtracting
-    # the measured duration from the resolve instant, so with a single message
-    # the discarded interval and the tool's own span are the SAME milliseconds
-    # — `subtract_tool_time` removes them either way and the identity closes
-    # with or without the bug. The second message is what separates them.
+    # The tool itself is 20 ms. What follows is the shape a live turn actually has,
+    # traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user messages, the
+    # second ~2 s after the first. The old code reset the mark on each, so the next
+    # window opened at the LAST one and that 2 s vanished. One user message is not
+    # enough to catch it — with a single message the discarded interval and the tool's
+    # own span are the SAME milliseconds, so the identity closes either way.
+    # Rationale: .claude/notes/timing.md § subtract_tool_time
     clock.at_ms = 1000
     state.on_user_message(UserMessage("c1", False, "written"))
     clock.at_ms = 3000
@@ -626,6 +610,10 @@ def test_pi_buckets_tile_the_turn():
 
 def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
     assert_identity_closes(_opencode_turn(monkeypatch))
+
+
+def test_delegate_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
+    assert_identity_closes(_delegate_turn(monkeypatch))
 
 
 def test_antigravity_buckets_tile_the_turn():
@@ -673,15 +661,14 @@ def test_every_built_in_harness_has_a_case():
 def test_the_sensor_sees_a_window_that_stops_tiling():
     """The gating mutation check, as a committed test rather than an attestation.
 
-    A window seeded from its own turn start instead of from the previous
-    flush's close is the defect pi shipped with, and the whole point of this
-    module is that the SUITE notices it rather than a reviewer reproducing it
-    by hand. The golden corpus cannot: it masks every value involved.
+    Pins: a pi window seeded from its own turn start, not from the previous
+    flush's close, fails ``assert_identity_closes`` and loses exactly the 600 ms
+    scripted between one ``turn_end`` and the next ``turn_start``.
 
-    Asserted on the MAGNITUDE as well as on the failure, because "it raised"
-    would also pass if the mutation broke the case in some unrelated way. The
-    600 ms is the scripted gap between one ``turn_end`` and the next
-    ``turn_start`` — real model time, which untiling books to nothing.
+    Assert the MAGNITUDE as well as the failure: "it raised" alone would also
+    pass if the mutation broke the case in some unrelated way.
+
+    Rationale: .claude/notes/timing.md § Why the ms-exact identity contract exists
     """
     healthy = _pi_turn()
     mutated = _pi_turn(untile=True)

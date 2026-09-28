@@ -1104,10 +1104,9 @@ class TestTheToolUnionIsStored:
     def test_the_span_set_is_computed_exactly_once(self):
         """All four buckets must be measured against ONE selection.
 
-        `_overhead_ms` used to accept `tool_spans=None` and fall back to
-        building its own set — a second selection, which is what the comment at
-        the single call site says must never happen. The parameter is now
-        required, so the fallback is unrepresentable rather than merely unused.
+        `_overhead_ms` takes `tool_spans` as a required parameter, so a fallback
+        that builds its own set — a second selection, which the comment at the
+        single call site forbids — is unrepresentable.
         """
         import inspect
 

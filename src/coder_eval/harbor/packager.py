@@ -1,71 +1,46 @@
 """C2 — the packager. ``coder-eval export --format harbor <task.yaml> -o <dir>``.
 
-Emits a Harbor task directory from a coder-eval task, with coder-eval's own
-criteria as the grader (C1.1's verifier shim). Task *definition* only; the
-runtime contract (C1.1's reward writer) is what makes the emitted
-``tests/test.sh`` actually work once Harbor runs it.
+Emits a Harbor task directory from a coder-eval task, with coder-eval's own criteria
+as the grader. Task *definition* only; ``harbor/reward.py`` is the runtime contract
+that makes the emitted ``tests/test.sh`` work once Harbor runs it.
 
-Emitted layout (see ``tmp/harborframework.md`` § C2 for the full mapping
-table):
+Layout::
 
     <out>/
     ├── task.toml
-    ├── instruction.md       # fixed placeholder -- the real prompt is in environment/task.yaml
-    ├── environment/
-    │   ├── Dockerfile          # copied from dockerfile_path, or synthesized from
-    │   │                       # sandbox.docker.image -- always written, WORKDIR pinned
-    │   ├── task.yaml           # criteria-free copy for the CoderEvalAgent embed
-    │   └── templates/          # sandbox.template_sources' TemplateDirSource dirs,
-    │                           # present only when the task has any (see agent_paths.py)
-    └── tests/
-        ├── test.sh             # C1.1's two-line shim
-        ├── task.yaml           # the criteria, as authored
-        └── reference/          # task.reference, verifier-side only
+    ├── instruction.md          # placeholder
+    ├── environment/            # Dockerfile (optional), task.yaml, docker-compose.yaml
+    └── tests/                  # test.sh, task.yaml, reference/
 
-One design point worth stating explicitly because it is not obvious from
-either side's docs: ``tests/task.yaml`` (uploaded whole into the container at
-``/tests/`` by Harbor's own verifier — see ``_TEST_SH_TEMPLATE``, which
-therefore references it as ``/tests/task.yaml``, not a cwd-relative path;
-confirmed live against real docker, not assumed) must NOT set
-``agent: {type: none}``
-even though C1.1's own docstring describes the verifier phase as exactly
-that. coder-eval's own ``check_none_agent`` validator rejects any criterion
-with ``requires_agent=True`` — which includes ``reference_comparison``, a
-criterion this module treats as portable (C1.4) — the moment ``agent.type``
-is literally ``none``, regardless of whether an agent actually runs.
-``coder-eval evaluate <task.yaml> <workdir>`` (the bare-task/work-dir path
-C1.1's shim calls) never instantiates an agent no matter what ``agent.type``
-says (see ``evaluate_command.py``'s own comment: "no agent is created" is
-true unconditionally on that path) — so a placeholder real agent type plus a
-placeholder prompt satisfies coder-eval's validators without changing
-behaviour, and unblocks ``reference_comparison``. Verified directly (not
-inferred) before writing this module.
+``tests/task.yaml`` is uploaded whole into the container at ``/tests/``, which is why
+``_TEST_SH_TEMPLATE`` references it absolutely rather than cwd-relative.
+
+Rationale: .claude/notes/reporting.md § Harbor export
 """
 
 from __future__ import annotations
 
-import shlex
+import os
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli_w
 import yaml
 
-from coder_eval.harbor.agent_paths import AGENT_TASK_TEMPLATES_DIR, AGENT_TASK_YAML_PATH
+from coder_eval.harbor.agent_paths import AGENT_TASK_YAML_PATH
 from coder_eval.harbor.portability import PortabilityIssue, audit_criteria
-from coder_eval.models import TaskDefinition, TemplateDirSource
+from coder_eval.isolation.docker_runner import _validate_extra_mount
+from coder_eval.models import CONTAINER_WORK_DIR, TaskDefinition, TemplateDirSource
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
-DEFAULT_WORKDIR = "/app"
 _HARBOR_SCHEMA_VERSION = "1.4"  # pinned to the harbor 0.22.0 findings in tmp/harborframework.md § C0
 
-# The task.yaml this module emits is graded via `coder-eval evaluate`, which
-# never instantiates an agent on the bare-task/work-dir path regardless of
-# `agent.type` (see module docstring) — this prompt is never read.
+# Graded via `coder-eval evaluate`, which never instantiates an agent on the
+# bare-task path regardless of `agent.type` -- this prompt is never read.
+# Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
 _VERIFIER_PLACEHOLDER_PROMPT = (
     "(unused placeholder — this file is graded via `coder-eval evaluate`, which does not invoke an agent on this path)"
 )
@@ -86,7 +61,27 @@ _TEST_SH_TEMPLATE = """#!/bin/sh
 # always reach it.
 set -u
 
-coder-eval evaluate /tests/task.yaml "{workdir}" --in-place --run-dir /logs/verifier || true
+# `/tests/task.yaml /logs/agent` -- an explicit task file over a RUN DIRECTORY,
+# not a plain workdir. CoderEvalAgent's `coder-eval execute --logging-dir
+# /logs/agent --workspace-dir "$(pwd)" --artifacts-dir "$(pwd)"` (see
+# harbor/agent.py) always finishes with `/logs/agent/task.json` (this task's
+# own recorded trajectory) and the agent's workspace left in-place at the
+# container's own WORKDIR ($(pwd) here too -- Harbor's verifier phase reuses
+# the same image/WORKDIR) -- artifacts_dir IS the workspace here, so
+# capture_as's self-referential guard makes the would-be copy a no-op.
+# `--workspace "$(pwd)"` is therefore load-bearing: without it, `coder-eval
+# evaluate` resolves the workspace from task.json's recorded sandbox_path via
+# `default_workspace`, which requires it to resolve INSIDE /logs/agent and
+# refuses otherwise -- exactly this WORKDIR case, which is legitimately
+# outside /logs/agent. No ATIF trajectory.json round-trip either (task.json
+# already carries the same trajectory natively). Passing the task file
+# explicitly (rather than the bare run directory alone) makes coder-eval grade
+# with THIS file -- the exported contract -- instead of rebuilding the task
+# from the run's own recorded config, which is also what keeps this off the
+# untrusted-recorded-config path: that path exists for a shared run directory
+# whose config is not to be trusted without --allow-recorded-commands, and
+# does not apply once an explicit, operator-supplied task file is in hand.
+coder-eval evaluate /tests/task.yaml /logs/agent --workspace "$(pwd)" --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json
 """
 
@@ -103,12 +98,7 @@ class CriteriaNotExportableError(Exception):
         lines = "\n".join(
             f"  - {i.criterion_description!r} ({i.criterion_type}): {i.portability.value}" for i in issues
         )
-        super().__init__(
-            f"{len(issues)} criterion/criteria cannot export to Harbor v1:\n{lines}\n"
-            + "Remove them, or pass allow_credentials=True (--allow-credentials on the CLI) for the "
-            + "NEEDS_CREDENTIALS ones if you have already provisioned model access inside the verifier "
-            + "container yourself."
-        )
+        super().__init__(f"{len(issues)} criterion/criteria cannot export to Harbor v1:\n{lines}\nRemove them.")
 
 
 @dataclass(frozen=True)
@@ -116,15 +106,13 @@ class ExportResult:
     """What ``export_task`` produced, for the CLI to report."""
 
     out_dir: Path
-    workdir: str
+    workdir: str | None
     warnings: list[str] = field(default_factory=list)
 
 
 def export_task(
     task_file: Path,
     out_dir: Path,
-    *,
-    allow_credentials: bool = False,
 ) -> ExportResult:
     """Emit a Harbor task directory at ``out_dir`` from the coder-eval task at ``task_file``.
 
@@ -137,15 +125,13 @@ def export_task(
             portability audit.
     """
     task, _raw_yaml = load_task(task_file)
-    return export_resolved_task(task, task_file, out_dir, allow_credentials=allow_credentials)
+    return export_resolved_task(task, task_file, out_dir)
 
 
 def export_resolved_task(
     task: TaskDefinition,
     task_file: Path,
     out_dir: Path,
-    *,
-    allow_credentials: bool = False,
 ) -> ExportResult:
     """Emit a Harbor task directory from an already-loaded/resolved ``TaskDefinition``.
 
@@ -161,7 +147,7 @@ def export_resolved_task(
 
     Raises the same two errors as ``export_task``, for the same reasons.
     """
-    issues = audit_criteria(task.success_criteria, allow_credentials=allow_credentials)
+    issues = audit_criteria(task.success_criteria)
     if issues:
         raise CriteriaNotExportableError(issues)
 
@@ -173,12 +159,9 @@ def export_resolved_task(
         )
 
     if task.dataset is not None:
-        # `export_task`/`export_resolved_task` calls `load_task`, which does
-        # NOT run `expand_dataset` -- fan-out happens later, in the experiment
-        # pipeline (`export_experiment` resolves it per row before reaching
-        # here). Exporting a raw dataset-backed task would silently emit ONE
-        # Harbor task whose prompt and criteria still contain literal
-        # `${row.<field>}` placeholders: never expressible, but scored anyway.
+        # `load_task` does NOT run `expand_dataset` -- fan-out happens later, so
+        # exporting a raw dataset-backed task would emit ONE Harbor task still
+        # carrying literal `${row.<field>}` placeholders.
         raise TaskNotExportableError(
             f"Task {task.task_id!r} has a `dataset:` block, which this function does not expand -- its "
             + "`${row.*}` placeholders would export unsubstituted. Export via `coder-eval export ... "
@@ -194,12 +177,6 @@ def export_resolved_task(
         )
 
     warnings: list[str] = []
-    if task.pre_run:
-        warnings.append(
-            f"{len(task.pre_run)} pre_run command(s) were NOT translated — they run against a live sandbox "
-            + "with template files already staged, which has no Dockerfile-build-time equivalent. Fold their "
-            + "effect into environment/Dockerfile by hand if the exported task needs it."
-        )
     if task.post_run:
         warnings.append(
             f"{len(task.post_run)} post_run command(s) were NOT translated — they run after the verdict is "
@@ -210,12 +187,12 @@ def export_resolved_task(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "tests").mkdir(parents=True, exist_ok=True)
 
-    workdir = _write_environment(task, task_file, out_dir, warnings)
+    workdir, docker_image = _write_environment(task, task_file, out_dir, warnings)
     _write_instruction(out_dir)
     _write_verifier_task_yaml(task, out_dir)
-    _write_test_sh(out_dir, workdir=workdir)
+    _write_test_sh(out_dir)
     _write_reference(task, task_file, out_dir)
-    _write_task_toml(task, out_dir, workdir=workdir)
+    _write_task_toml(task, out_dir, workdir=workdir, docker_image=docker_image)
 
     return ExportResult(out_dir=out_dir, workdir=workdir, warnings=warnings)
 
@@ -268,55 +245,41 @@ def _write_environment(
     task_file: Path,
     out_dir: Path,
     warnings: list[str],
-) -> str:
-    """Copy/derive ``environment/`` and return the WORKDIR both it and test.sh must agree on.
+) -> tuple[str | None, str | None]:
+    """Derive ``environment/`` and return ``(workdir, docker_image)``.
 
-    Per C0 § 5, Harbor has no fixed workspace path — the verifier (default
-    SHARED mode) runs at whatever the container's own WORKDIR is. This
-    function is the one place that decides it, so nothing downstream can
-    silently disagree.
+    ``workdir`` is an EXPLICIT override only — ``sandbox.docker.working_dir`` or a
+    Dockerfile's own ``WORKDIR`` line — ``None`` otherwise. ``docker_image`` is set only
+    when no ``environment/Dockerfile`` was written, so ``task.toml``'s
+    ``[environment].docker_image`` points at the pre-built image; ``None`` when a
+    Dockerfile was written and Harbor must build from it. A ``dockerfile_path`` is the
+    only shape that writes a Dockerfile, copied in UNCHANGED. ``environment/task.yaml``
+    is bind-mounted at :data:`AGENT_TASK_YAML_PATH`, never ``COPY``'d.
 
-    A ``Dockerfile`` is ALWAYS written here (never left to a pre-built
-    ``docker_image`` reference in ``task.toml``) — the whole point of
-    ``environment/task.yaml`` is to be baked in at :data:`AGENT_TASK_YAML_PATH`
-    for the ``CoderEvalAgent`` Harbor-agent embed, and a task exported without
-    a Dockerfile has no `COPY` step to put it there. Two shapes, both ending
-    in the same `COPY task.yaml ...` line:
-
-    - ``dockerfile_path`` set: copy the user's Dockerfile as the base, appending
-      a `WORKDIR` (if it declared none) and the `COPY` line.
-    - unset: synthesize a minimal one (`FROM <docker_cfg.image>` + `WORKDIR` +
-      `COPY`) — ``docker_cfg.image`` always has a value (default_factory=
-      ``get_default_docker_image_tag``), so this is a real choice, not a
-      null-vs-set distinction.
+    Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
     env_dir = out_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
     docker_cfg = task.sandbox.docker
-    has_templates = _write_agent_phase_task_yaml(
-        task, env_dir, initial_prompt=_resolve_prompt_text(task, task_file), warnings=warnings
-    )
-    templates_copy_line = f"COPY templates/ {AGENT_TASK_TEMPLATES_DIR}/\n" if has_templates else ""
+    _write_agent_phase_task_yaml(task, env_dir, initial_prompt=_resolve_prompt_text(task, task_file), warnings=warnings)
+    # docker-compose.yaml (bind mounts: task.yaml itself, agent.plugins[], template_sources'
+    # TemplateDirSource dirs, sandbox.docker.extra_mounts) is a separate concern from the
+    # Dockerfile -- nothing is ever COPY'd in anymore, see _write_docker_compose_mounts.
+    _write_docker_compose_mounts(task, docker_cfg, env_dir, warnings)
     dest_dockerfile = env_dir / "Dockerfile"
 
     if docker_cfg.dockerfile_path is not None:
         source_dockerfile = Path(docker_cfg.dockerfile_path)  # already absolute — load_task resolves it
         shutil.copy2(source_dockerfile, dest_dockerfile)
-        workdir = docker_cfg.working_dir or _find_workdir(dest_dockerfile) or DEFAULT_WORKDIR
-        if _find_workdir(dest_dockerfile) is None:
-            with dest_dockerfile.open("a", encoding="utf-8") as fh:
-                fh.write(f"\nWORKDIR {workdir}\n")
-            warnings.append(
-                f"environment/Dockerfile declared no WORKDIR; appended `WORKDIR {workdir}` so the "
-                + "verifier and agent phases agree on a path."
-            )
-        with dest_dockerfile.open("a", encoding="utf-8") as fh:
-            fh.write(f"\nCOPY task.yaml {AGENT_TASK_YAML_PATH}\n{templates_copy_line}")
+        # No fabricated WORKDIR appended when the Dockerfile declares none --
+        # the built image just inherits its base image's own default, and
+        # CoderEvalAgent's own `--workspace-dir "$(pwd)"` (agent.py) finds it
+        # at run time either way (see this function's docstring).
+        workdir = docker_cfg.working_dir or _find_workdir(dest_dockerfile)
         if not _from_line_mentions_coder_eval_agent(dest_dockerfile):
             warnings.append(_MISSING_CODER_EVAL_WARNING)
-        # Non-Dockerfile build context (COPY sources etc.) is not carried over in
-        # v1 — a dockerfile_path build context beyond the Dockerfile itself needs
-        # its own decision (open question) before this is safe to widen.
+        # A build context beyond the Dockerfile itself is not carried over in v1;
+        # widening it needs its own decision.
         if source_dockerfile.parent != task_file.parent:
             other_files = [p for p in source_dockerfile.parent.iterdir() if p != source_dockerfile]
             if other_files:
@@ -324,63 +287,22 @@ def _write_environment(
                     f"{source_dockerfile.parent} holds {len(other_files)} other file(s) alongside the "
                     + "Dockerfile (build context) that were NOT copied — v1 only copies the Dockerfile itself."
                 )
-        return workdir
+        return workdir, None
 
-    # No dockerfile_path — synthesize a minimal Dockerfile on top of the
-    # pre-built image so the `CoderEvalAgent` embed always has somewhere to
-    # `COPY task.yaml` into.
+    # No dockerfile_path -- no Dockerfile at all. task.toml's [environment].docker_image
+    # points Harbor straight at the pre-built image instead (see docstring).
     if "coder-eval-agent" not in docker_cfg.image:
         warnings.append(_MISSING_CODER_EVAL_WARNING)
-    if docker_cfg.working_dir is not None:
-        workdir = docker_cfg.working_dir
-    else:
-        inspected = _inspect_image_workdir(docker_cfg.image)
-        if inspected is not None:
-            workdir = inspected
-        else:
-            workdir = DEFAULT_WORKDIR
-            warnings.append(
-                f"Could not determine {docker_cfg.image}'s own WORKDIR (image not present locally, or "
-                + f"docker unavailable at export time) -- defaulting to `{DEFAULT_WORKDIR}`. Harbor's "
-                + "`docker exec -w` hard-fails if that path does not already exist in the image (unlike "
-                + "`docker run -w`, it will not create it); set `sandbox.docker.working_dir` explicitly "
-                + "to the image's real WORKDIR to avoid a verify-time exit 127."
-            )
-    dest_dockerfile.write_text(
-        f"FROM {docker_cfg.image}\nWORKDIR {workdir}\n\nCOPY task.yaml {AGENT_TASK_YAML_PATH}\n{templates_copy_line}",
-        encoding="utf-8",
-    )
-    return workdir
-
-
-def _inspect_image_workdir(image: str) -> str | None:
-    """Best-effort ``docker image inspect`` for a pre-built image's own ``WORKDIR``.
-
-    A pre-built image has no Dockerfile for ``_find_workdir`` to read, so this
-    is the only way to avoid guessing a path that doesn't exist in it (Harbor's
-    ``docker exec -w`` -- unlike ``docker run -w`` -- fails outright if the
-    directory isn't already there; confirmed live). Returns ``None`` (never
-    raises) whenever docker isn't available, the image isn't present locally,
-    or it declares no WORKDIR -- callers fall back to ``DEFAULT_WORKDIR`` and
-    warn.
-    """
-    try:
-        result = subprocess.run(
-            # `--` before `image` (task-YAML-controlled) stops it from being
-            # parsed as an option if it happens to start with "-".
-            ["docker", "image", "inspect", "--format", "{{.Config.WorkingDir}}", "--", image],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    workdir = result.stdout.strip()
-    return workdir or None
+    # No `docker image inspect` guess here either (v1 used to shell out for
+    # one, defaulting to a fabricated path on failure -- a real bug: a stale
+    # or wrong guess baked into task.toml made Harbor's `docker exec -w`
+    # hard-fail with exit 127 the moment it didn't exist in the image that
+    # actually ran). Leaving `workdir` unset unless the task pins one is
+    # strictly safer: Harbor's docker environment only adds `-w <workdir>`
+    # when `[environment].workdir` is set at all, so `None` here means the
+    # container's OWN `WORKDIR` decides -- always current, never a snapshot.
+    workdir = docker_cfg.working_dir
+    return workdir, docker_cfg.image
 
 
 _MISSING_CODER_EVAL_WARNING = (
@@ -419,145 +341,234 @@ def _find_workdir(dockerfile: Path) -> str | None:
 
 
 def _write_verifier_task_yaml(task: TaskDefinition, out_dir: Path) -> None:
-    """``tests/task.yaml`` — the criteria, as authored. See the module docstring for the agent-type caveat."""
+    """``tests/task.yaml`` — the criteria, as authored. It must not set a ``none`` agent type.
+
+    Carries ``sandbox.python``/``sandbox.node`` (``env_packages`` only) so
+    ``Sandbox.adopt`` sees the same package list the agent phase installed: the
+    verifier grades the agent's workspace in place, and if ``docker-compose``'s
+    ``WORKDIR`` alignment or ``capture_to`` stripped ``.venv``/``node_modules``
+    from it, ``adopt`` re-provisions ONLY when it knows what was there.
+    Everything else in ``sandbox`` (``driver``, ``docker``, ``template_sources``,
+    ``mock_path_dirs``) is an agent-phase-only concern and stays out.
+
+    Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+    """
     payload: dict[str, object] = {
         "task_id": task.task_id,
         "description": task.description,
-        "agent": {"type": "claude-code"},  # placeholder; never instantiated (see module docstring)
+        "agent": {"type": "claude-code"},  # placeholder; never instantiated (see this function's docstring)
         "initial_prompt": _VERIFIER_PLACEHOLDER_PROMPT,
         "success_criteria": [c.model_dump(mode="json", exclude_none=True) for c in task.success_criteria],
     }
+    sandbox_env: dict[str, object] = {}
+    if task.sandbox.python is not None and task.sandbox.python.env_packages:
+        sandbox_env["python"] = {"env_packages": list(task.sandbox.python.env_packages)}
+    if task.sandbox.node is not None and task.sandbox.node.env_packages:
+        sandbox_env["node"] = {"env_packages": list(task.sandbox.node.env_packages)}
+    if sandbox_env:
+        payload["sandbox"] = sandbox_env
     if task.reference is not None:
         payload["reference"] = {"directory": "reference"}
     if task.run_limits is not None:
-        # Carried through so `coder-eval evaluate` (run by tests/test.sh inside
-        # Harbor's verifier container) sees the same turn/token/USD caps the
-        # task author declared, rather than silently falling back to the
-        # packaged default experiment's -- grading itself has no agent loop to
-        # cap, but `run_limits.task_timeout` still bounds the verifier
-        # invocation, and a future criterion or judge call reading `run_limits`
-        # off the resolved task should see the real value, not the default.
+        # Carried through so the verifier sees the caps the task author declared
+        # rather than the packaged default experiment's: grading has no agent loop
+        # to cap, but `task_timeout` still bounds the verifier invocation.
+        # Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
         payload["run_limits"] = task.run_limits.model_dump(mode="json", exclude_none=True)
     if task.checker_context is not None:
-        # The judge-route override (`checker_context.api_route`) determines
-        # which backend an `llm_judge`/`agent_judge` criterion dispatches
-        # through at verify time -- dropping it silently replaces a pinned
-        # route with the verifier environment's own default.
+        # Dropping the judge-route override silently replaces a pinned route with
+        # the verifier environment's own default.
         payload["checker_context"] = task.checker_context.model_dump(mode="json", exclude_none=True)
     (out_dir / "tests" / "task.yaml").write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
 
 
-def _copy_template_sources(task: TaskDefinition, env_dir: Path, warnings: list[str]) -> list[dict[str, object]] | None:
-    """Copy each ``TemplateDirSource``'s directory into ``environment/templates/<n>-<name>/``
-    and return a rewritten ``template_sources`` list pointing at the in-container copy
-    (:data:`AGENT_TASK_TEMPLATES_DIR`), or ``None`` if the task has no template sources.
+def _template_volume_specs(task: TaskDefinition, warnings: list[str]) -> list[str]:
+    """Return one ``src:src:ro`` compose volume spec per ``TemplateDirSource`` in
+    ``sandbox.template_sources``, or ``[]`` if there are none.
 
     ``TemplateDirSource.path`` is resolved to an absolute HOST path at task-load time
-    (``task_loader.resolve_template_source_paths``) -- baking that path verbatim into
-    ``environment/task.yaml`` would point the in-container agent at a directory that
-    doesn't exist there. Only ``TemplateDirSource`` is copied: ``RepoSource`` (clones at
-    runtime) and ``StarterFilesSource`` (inline file content) resolve entirely inside the
-    container already and are carried over unchanged.
+    (``task_loader.resolve_template_source_paths``) — mounted at that same host path,
+    exactly like ``_plugin_volume_specs``, so ``environment/task.yaml``'s
+    ``sandbox.template_sources[].path`` needs no rewriting: ``task.sandbox.model_dump()``
+    already carries the correct absolute path verbatim.
+
+    Read-only is safe here: ``sandbox.py``'s ``_apply_template_dir_source`` only ever
+    reads from this path (it copies FROM here into the sandbox workdir at setup time),
+    never writes to it.
+
+    Only ``TemplateDirSource`` is mounted — ``RepoSource`` (clones at runtime) and
+    ``StarterFilesSource`` (inline file content) resolve entirely inside the container
+    already and are carried over unchanged (nothing to mount; ``task.sandbox.model_dump()``
+    keeps them verbatim).
     """
-    sources = task.sandbox.template_sources
-    if not sources:
-        return None
-    templates_dir = env_dir / "templates"
-    rewritten: list[dict[str, object]] = []
+    sources = task.sandbox.template_sources or []
+    specs: list[str] = []
     for i, source in enumerate(sources):
-        dumped = source.model_dump(mode="json", exclude_none=True)
-        if isinstance(source, TemplateDirSource):
-            source_path = Path(source.path)  # already absolute — load_task resolved it
-            dest_name = f"{i:02d}-{source_path.name}"
-            dest = templates_dir / dest_name
-            if not source_path.is_dir():
-                # A hard failure, not a warning: the agent-phase task.yaml
-                # still references this template (starter files, or a pytest
-                # suite the prompt expects), so a silently-skipped copy ships
-                # an export whose agent has no starter code -- every criterion
-                # then reads "file does not exist" indistinguishable from a
-                # real agent failure (the exact CE039 anti-pattern, one layer
-                # up at the export boundary instead of the grading boundary).
-                raise TaskNotExportableError(
-                    f"template_sources[{i}].path {source_path} is not a directory -- cannot copy it into the "
-                    + "export. Fix the task's template_sources entry before exporting."
-                )
-            if dest.exists():
-                shutil.rmtree(dest)
-            # Symlinks dereferenced by default (`shutil.copytree`'s default
-            # `symlinks=False`) would write a symlink TARGET's content into the
-            # distributable export -- e.g. a `creds -> /root/.aws/credentials`
-            # plant. Drop symlinks outright rather than following them, same
-            # rule as the sibling reference copy below and every other
-            # task-authored-tree copy in `src/` (`orchestration/evaluation.py`,
-            # `isolation/docker_runner.py`, `evaluation/sub_agent.py`).
-            shutil.copytree(source_path, dest, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
-            dumped["path"] = f"{AGENT_TASK_TEMPLATES_DIR}/{dest_name}"
-        else:
+        if not isinstance(source, TemplateDirSource):
             warnings.append(
                 f"template_sources[{i}] ({type(source).__name__}) is not a TemplateDirSource -- carried over "
-                + "unchanged; only TemplateDirSource directories are copied into the export."
+                + "unchanged; only TemplateDirSource directories are mounted into the export."
             )
-        rewritten.append(dumped)
-    return rewritten
+            continue
+        source_path = Path(source.path)  # already absolute — load_task resolved it
+        if not source_path.is_dir():
+            # A hard failure, not a warning: the agent-phase task.yaml still
+            # references this template (starter files, or a pytest suite the
+            # prompt expects), so a silently-skipped mount ships an export whose
+            # agent has no starter code -- every criterion then reads "file does
+            # not exist" indistinguishable from a real agent failure (the exact
+            # CE039 anti-pattern, one layer up at the export boundary instead of
+            # the grading boundary).
+            raise TaskNotExportableError(
+                f"template_sources[{i}].path {source_path} is not a directory -- cannot mount it into the "
+                + "export. Fix the task's template_sources entry before exporting."
+            )
+        mount_path = source_path.as_posix()
+        specs.append(f"{mount_path}:{mount_path}:ro")
+    return specs
+
+
+def _plugin_volume_specs(task: TaskDefinition) -> list[str]:
+    """Return one ``src:src:ro`` compose volume spec per ``type: local`` ``agent.plugins[]``.
+
+    Mounted at its own host path, unmodified, mirroring ``docker_runner.py``'s auto-mount
+    (``-v {target}:{target}:ro``), so ``environment/task.yaml``'s ``agent.plugins[].path``
+    needs no rewriting -- the path is identical inside and outside the container.
+
+    Always ``:ro``: this carries skill/plugin content an agent reads, never writable
+    state, and the same host path may be mounted into unrelated concurrent containers.
+
+    HAZARD: a plugin ``path`` is carried UNEXPANDED (a literal ``"$SKILLS_REPO_PATH"``
+    reaches the spec), unlike ``TemplateDirSource.path``, which ``load_task`` has already
+    resolved. ``docker_runner.py`` expands it at container-launch time; changing either
+    side alone breaks the mirror.
+
+    Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
+    """
+    plugins = (task.agent.plugins if task.agent is not None else None) or []
+    local_plugins = [p for p in plugins if isinstance(p, dict) and p.get("type") == "local"]
+    specs: list[str] = []
+    for i, plugin in enumerate(local_plugins):
+        raw_path = plugin.get("path")
+        source_path = Path(os.path.expandvars(os.path.expanduser(raw_path or ""))).resolve()
+        if not source_path.is_dir():
+            # Hard failure, not a warning — same rationale as the template-source guard
+            # below: the agent-phase task.yaml still references this plugin for skill
+            # discovery, so a silently-skipped mount ships an agent with no skill content
+            # and no error, indistinguishable from a real "the skill didn't trigger" defect.
+            raise TaskNotExportableError(
+                f"agent.plugins[{i}].path {raw_path!r} (resolved to {source_path}) is not a directory -- "
+                + "cannot mount it into the export. Fix the task's (or experiment's) agent.plugins entry, "
+                + "or unset SKILLS_REPO_PATH/whichever env var it references, before exporting."
+            )
+        mount_path = source_path.as_posix()
+        specs.append(f"{mount_path}:{mount_path}:ro")
+    return specs
+
+
+def _extra_mount_volume_specs(docker_cfg: object) -> list[str]:
+    """Return one ``src:dst:mode`` compose volume spec per ``sandbox.docker.extra_mounts`` entry.
+
+    Reuses ``docker_runner._validate_extra_mount`` — the exact same validation
+    ``docker run -v`` gets for a non-Harbor run (var/`~` expansion, mode required and
+    checked, destination collision with framework-reserved paths rejected, source must
+    exist on the host at export time) — so an ``extra_mounts`` entry behaves identically
+    whether the task runs through the ordinary docker sandbox or through this export.
+    Unlike plugin mounts, an author-specified mode (``ro`` or ``rw``) is kept as-is
+    rather than forced.
+    """
+    raw_specs = getattr(docker_cfg, "extra_mounts", None) or []
+    specs: list[str] = []
+    for raw_spec in raw_specs:
+        specs.append(_validate_extra_mount(raw_spec))
+    return specs
+
+
+def _write_docker_compose_mounts(task: TaskDefinition, docker_cfg: object, env_dir: Path, warnings: list[str]) -> None:
+    """Write ``environment/docker-compose.yaml``: always mounts ``environment/task.yaml``
+    read-only at :data:`AGENT_TASK_YAML_PATH` (instead of the Dockerfile ``COPY``ing it
+    in), plus one read-only bind mount per local plugin dir and per ``TemplateDirSource``
+    in ``sandbox.template_sources``, plus one bind mount (mode as authored) per
+    ``sandbox.docker.extra_mounts`` entry, when any of those are non-empty.
+
+    Called AFTER ``_write_agent_phase_task_yaml`` has already written
+    ``environment/task.yaml`` — the mount source must exist on disk at export time for
+    the path to be meaningful.
+
+    Harbor's Docker environment auto-detects ``environment/docker-compose.yaml`` and
+    layers it on top of the generated build/prebuilt compose file's ``main`` service
+    (see ``harborframework``'s ``docker.py::_docker_compose_paths``) — this is Harbor's
+    own documented mechanism for host bind mounts; ``task.toml`` itself has no
+    mount/volume field (checked directly against ``EnvironmentConfig`` in
+    ``harbor/models/task/config.py``: only resource limits, image selection, and env-var
+    passthrough live there).
+    """
+    task_yaml_mount = f"{(env_dir / 'task.yaml').resolve().as_posix()}:{AGENT_TASK_YAML_PATH}:ro"
+    host_specific_specs = (
+        _plugin_volume_specs(task) + _template_volume_specs(task, warnings) + _extra_mount_volume_specs(docker_cfg)
+    )
+    volumes = [task_yaml_mount, *host_specific_specs]
+    compose_path = env_dir / "docker-compose.yaml"
+    compose_path.write_text(
+        yaml.safe_dump({"services": {"main": {"volumes": volumes}}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    if host_specific_specs:
+        warnings.append(
+            "environment/docker-compose.yaml bind-mounts agent.plugins[]/template_sources[]/"
+            + "sandbox.docker.extra_mounts path(s) from this machine's own host paths -- unlike the rest "
+            + "of the export, this is NOT portable to another machine (or CI runner) without the same "
+            + "paths present there too."
+        )
 
 
 def _write_agent_phase_task_yaml(
     task: TaskDefinition, env_dir: Path, *, initial_prompt: str, warnings: list[str]
-) -> bool:
+) -> None:
     """``environment/task.yaml`` — the REAL agent config, but criteria-free.
 
-    Baked into the image at :data:`AGENT_TASK_YAML_PATH` (see the Dockerfile
-    ``COPY`` line in ``_write_environment``) for a ``CoderEvalAgent`` Harbor
-    agent embed (``harbor/agent.py``) to run via ``coder-eval execute --format
-    harbor``. Unlike ``tests/task.yaml`` (the verifier's placeholder-agent,
-    real-criteria file), this is the mirror image: ``task.agent`` and the
-    resolved prompt are carried over VERBATIM (the whole point is running the
-    task's actual configured agent), but ``success_criteria`` is forced to
-    ``[]`` — never leaked into the agent-visible image, and never read either
-    (`coder-eval execute` never grades). ``TaskDefinition`` no longer requires
-    at least one criterion, so this no longer needs a placeholder.
+    Bind-mounted read-only at :data:`AGENT_TASK_YAML_PATH` (see
+    ``_write_docker_compose_mounts``) for a ``CoderEvalAgent`` embed to run via
+    ``coder-eval execute --format harbor``. ``task.agent`` and the resolved prompt
+    carry over VERBATIM; ``success_criteria`` is forced to ``[]``, so it is never
+    leaked into the agent-visible container.
 
-    ``sandbox`` is the original task's ``sandbox`` block, field-merged with
-    ``driver: tempdir`` and (when present) a rewritten ``template_sources`` —
-    everything else (``python.env_packages``, ``limits``, ...) is preserved,
-    not blanked. ``driver`` must be forced regardless of the original task's
-    driver: this file runs INSIDE the container Harbor already built, so
-    re-declaring ``driver: docker`` here would have ``coder-eval execute`` try
-    to launch a second, nested container rather than just using its own
-    in-process sandbox at the container's current workdir. ``docker`` config
-    is dropped along with it — moot once ``driver`` is forced to ``tempdir``.
+    ``sandbox`` is field-merged with ``driver: tempdir``, which MUST be forced
+    regardless of the original: this file runs inside the container Harbor already
+    built, so ``driver: docker`` here would launch a second, nested one. ``docker``
+    config is dropped with it. Everything else is preserved verbatim, and
+    ``template_sources`` / ``agent.plugins[]`` paths need no rewriting -- they are
+    bind-mounted at their own unchanged host path.
 
-    ``initial_prompt`` is omitted entirely for a ``type: none`` (agentless)
-    task: coder-eval's own schema forbids a no-op agent from setting a prompt
-    (no agent ever runs to read it) and raises at load time otherwise --
-    verified live via ``harbor run`` against a real ``harbor`` install, which
-    surfaced exactly this ``TaskDefinition`` validation error before this
-    guard was added.
+    ``initial_prompt`` is omitted entirely for an agentless task -- the schema
+    forbids a no-op agent from setting one and raises at load time.
 
-    Returns whether any template directory was copied into ``environment/templates/``,
-    so ``_write_environment`` knows whether to add the corresponding Dockerfile ``COPY``.
+    Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
     is_agentless = task.agent is not None and task.agent.type == "none"
-    rewritten_template_sources = _copy_template_sources(task, env_dir, warnings)
     sandbox_dict = task.sandbox.model_dump(mode="json", exclude_none=True)
     sandbox_dict["driver"] = "tempdir"
     sandbox_dict.pop("docker", None)
-    if rewritten_template_sources is not None:
-        sandbox_dict["template_sources"] = rewritten_template_sources
+    agent_dict = (
+        task.agent.model_dump(mode="json", exclude_none=True) if task.agent is not None else {"type": "claude-code"}
+    )
     payload: dict[str, object] = {
         "task_id": task.task_id,
         "description": task.description,
-        "agent": (
-            task.agent.model_dump(mode="json", exclude_none=True) if task.agent is not None else {"type": "claude-code"}
-        ),
+        "agent": agent_dict,
         "sandbox": sandbox_dict,
         "success_criteria": [],
     }
     if not is_agentless:
         payload["initial_prompt"] = initial_prompt
+    if task.pre_run:
+        # A real translation, not a build-time stand-in: `coder-eval execute` still
+        # runs the pre-agent phase for the CoderEvalAgent embed, unlike `post_run`,
+        # which belongs to grading and never runs there. Commands are relative to the
+        # sandbox cwd, resolved as template_sources are, so no path rewriting.
+        payload["pre_run"] = [c.model_dump(mode="json", exclude_none=True) for c in task.pre_run]
     if task.run_limits is not None:
         # `CoderEvalAgent.run()` invokes `coder-eval execute` against this
         # file, which enforces `max_turns`/`turn_timeout`/`task_timeout`/the
@@ -567,18 +578,14 @@ def _write_agent_phase_task_yaml(
         # token ceiling at all).
         payload["run_limits"] = task.run_limits.model_dump(mode="json", exclude_none=True)
     (env_dir / "task.yaml").write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
-    return (env_dir / "templates").is_dir()
 
 
-def _write_test_sh(out_dir: Path, *, workdir: str) -> None:
+def _write_test_sh(out_dir: Path) -> None:
+    # No task-controlled value is interpolated into the template anymore -- it
+    # is a fixed literal (see _TEST_SH_TEMPLATE) -- so there is no longer an
+    # injection surface here to shlex.quote against.
     path = out_dir / "tests" / "test.sh"
-    # `workdir` comes from task-YAML-controlled `sandbox.docker.working_dir`
-    # (or a derived default), and the only validator on that field checks for a
-    # leading "/" -- it does not reject quotes, `$(...)`, backticks or
-    # newlines. shlex.quote it before interpolating into the generated /bin/sh
-    # script so a crafted working_dir can't break out of the argument it's
-    # meant to be.
-    path.write_text(_TEST_SH_TEMPLATE.format(workdir=shlex.quote(workdir)), encoding="utf-8")
+    path.write_text(_TEST_SH_TEMPLATE, encoding="utf-8")
     path.chmod(0o755)
 
 
@@ -589,13 +596,9 @@ def _write_reference(task: TaskDefinition, task_file: Path, out_dir: Path) -> No
     dest = out_dir / "tests" / "reference"
     if dest.exists():
         shutil.rmtree(dest)
-    # Same rule as the template copy above: drop symlinks rather than
-    # dereferencing them into the distributable export. Wrapped in
-    # TaskNotExportableError rather than left to raise a bare OSError: the
-    # `export` CLI only catches `(TaskNotExportableError,
-    # CriteriaNotExportableError)`, so an unreadable/missing reference tree
-    # would otherwise surface as an uncaught traceback (single-task path) or
-    # abort a whole experiment export the docstring promises it won't abort.
+    # Drop symlinks, as above. Wrapped in TaskNotExportableError rather than left
+    # to raise a bare OSError: the `export` CLI catches only the export errors, so
+    # an unreadable tree would abort an experiment export that promises not to.
     try:
         shutil.copytree(source, dest, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
     except OSError as e:
@@ -604,7 +607,7 @@ def _write_reference(task: TaskDefinition, task_file: Path, out_dir: Path) -> No
         ) from e
 
 
-def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str) -> None:
+def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str | None, docker_image: str | None) -> None:
     verifier_section: dict[str, object] = {}
     env_names = _env_passthrough_names(task)
     if env_names:
@@ -620,23 +623,22 @@ def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str) -> No
             "description": task.description,
             "keywords": list(task.tags),
         },
-        "environment": _build_environment_section(task, workdir=workdir),
+        "environment": _build_environment_section(task, workdir=workdir, docker_image=docker_image),
     }
     if verifier_section:
         doc["verifier"] = verifier_section
     if task.run_limits is not None and task.run_limits.task_timeout is not None:
         doc["agent"] = {"timeout_sec": float(task.run_limits.task_timeout)}
+    # Rationale: .claude/notes/reporting.md § The artifacts default is CONTAINER_WORK_DIR, not a required field
+    doc["artifacts"] = [workdir or CONTAINER_WORK_DIR]
     (out_dir / "task.toml").write_bytes(tomli_w.dumps(doc).encode("utf-8"))
 
 
 _HARBOR_ENV_PASSTHROUGH_EXCLUDE = {
-    # `HOME` is intentional in `env_passthrough`'s default ONLY because
-    # `docker_runner.py` also bind-mounts the host's `~/.claude` into the
-    # container at that same path, so the host `HOME` value still resolves to
-    # a real, populated directory there (see docs/DOCKER_ISOLATION.md). Harbor
-    # builds its own container with no such mount, so forwarding the host's
-    # literal `HOME` (e.g. `/Users/alice`) would point the container at a
-    # directory that doesn't exist in it -- a real regression, not a no-op.
+    # HAZARD: `HOME` is in the default passthrough ONLY because docker_runner
+    # bind-mounts ~/.claude at that same path. Harbor builds its own container
+    # with no such mount, so forwarding the host's literal HOME is a regression.
+    # Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     "HOME",
 }
 
@@ -670,15 +672,21 @@ def _env_template_dict(names: list[str]) -> dict[str, str]:
     return {name: f"${{{name}:-}}" for name in names}
 
 
-def _build_environment_section(task: TaskDefinition, *, workdir: str) -> dict[str, object]:
-    """No ``docker_image`` key: ``_write_environment`` always writes ``environment/Dockerfile``
-
-    now (either copied from ``dockerfile_path`` or synthesized from
-    ``docker_cfg.image``), so Harbor always builds from that file rather than
-    pulling a bare image reference named in ``task.toml``.
+def _build_environment_section(
+    task: TaskDefinition, *, workdir: str | None, docker_image: str | None
+) -> dict[str, object]:
+    """``docker_image`` is set (by ``_write_environment``) only when no ``environment/Dockerfile``
+    was written at all -- i.e. no ``dockerfile_path``, nothing to build -- so Harbor's own
+    ``should_use_prebuilt_docker_image`` pulls this image directly and skips building. When a
+    Dockerfile WAS written (``dockerfile_path`` set: real build steps needed), this stays unset
+    and Harbor builds from that file instead.
     """
     docker_cfg = task.sandbox.docker
-    section: dict[str, object] = {"workdir": workdir}
+    section: dict[str, object] = {}
+    if workdir is not None:
+        section["workdir"] = workdir
+    if docker_image is not None:
+        section["docker_image"] = docker_image
     limits = task.sandbox.limits
     if limits.max_memory_mb is not None:
         section["memory_mb"] = limits.max_memory_mb
@@ -692,7 +700,6 @@ def _build_environment_section(task: TaskDefinition, *, workdir: str) -> dict[st
 
 
 __all__ = [
-    "DEFAULT_WORKDIR",
     "CriteriaNotExportableError",
     "ExportResult",
     "TaskNotExportableError",

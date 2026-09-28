@@ -1,14 +1,19 @@
-import { describe, expect, test, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { TaskResultSummary } from "@/lib/runs";
 
 // RunView reads the URL via next/navigation hooks; stub them so it renders in
 // jsdom. The filter state we don't exercise here just resolves to "no filter".
+const nav = vi.hoisted(() => ({ search: new URLSearchParams() }));
 vi.mock("next/navigation", () => ({
     useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
     usePathname: () => "/runs/r1",
-    useSearchParams: () => new URLSearchParams(),
+    useSearchParams: () => nav.search,
 }));
+
+afterEach(() => {
+    nav.search = new URLSearchParams();
+});
 
 const { RunView } = await import("../run-view");
 
@@ -23,6 +28,7 @@ function row(
         status: "SUCCESS",
         weightedScore: 1.0,
         durationSeconds: 1.0,
+        agentSeconds: 1.0,
         totalCostUsd: 0.1,
         actualCommands: null,
         totalTurns: null,
@@ -90,10 +96,10 @@ describe("RunView — multi-variant runs replace the pooled pass rate", () => {
     // 50%, which describes neither configuration; the whole point of the tile
     // change is that this number no longer appears anywhere on the page.
     const AB = [
-        row("X", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, durationSeconds: 1 }),
-        row("Y", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, durationSeconds: 1 }),
-        row("X", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, durationSeconds: 5 }),
-        row("Y", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, durationSeconds: 5 }),
+        row("X", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, agentSeconds: 1 }),
+        row("Y", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, agentSeconds: 1 }),
+        row("X", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, agentSeconds: 5 }),
+        row("Y", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, agentSeconds: 5 }),
     ];
 
     test("each arm gets its own rate and the blended rate is gone", () => {
@@ -111,6 +117,8 @@ describe("RunView — multi-variant runs replace the pooled pass rate", () => {
 
         // Pooled totals stay: a run's cost is real however many arms produced it.
         expect(screen.getByText("$0.80")).toBeInTheDocument();
+        expect(screen.getByText("Agent time")).toBeInTheDocument();
+        // Agent seconds (1+1+5+5), not the rows' full durations (4 x 1s).
         expect(screen.getByText("12s")).toBeInTheDocument();
         // ...with the per-arm split replacing p50/p90, which would describe a
         // pooled population that does not exist.
@@ -134,5 +142,64 @@ describe("RunView — multi-variant runs replace the pooled pass rate", () => {
         expect(screen.queryByText(/arms · spread/)).toBeNull();
         // Both the cost and time tiles carry one, hence getAll.
         expect(screen.getAllByText(/p50/).length).toBe(2);
+    });
+});
+
+describe("RunView — variant filter", () => {
+    const AB = [
+        row("X", { variantId: "A", status: "SUCCESS" }),
+        row("Y", { variantId: "A", status: "SUCCESS" }),
+        row("X", { variantId: "B", status: "FAILURE" }),
+        row("Y", { variantId: "B", status: "FAILURE" }),
+    ];
+
+    test("offered on a multi-arm run only", () => {
+        const { unmount } = render(
+            <RunView sourceId="skills" runId="r1" tasks={AB} />,
+        );
+        const group = screen.getByRole("group", { name: "Filter by variant" });
+        expect(group).toHaveTextContent("allAB");
+        expect(screen.getByRole("button", { name: "all" })).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        unmount();
+
+        render(
+            <RunView
+                sourceId="skills"
+                runId="r1"
+                tasks={[row("X", { variantId: "only" })]}
+            />,
+        );
+        expect(screen.queryByRole("group", { name: "Filter by variant" })).toBeNull();
+    });
+
+    test("a selected arm scopes the tiles and the grid to its rows", () => {
+        nav.search = new URLSearchParams("variant=B");
+        render(<RunView sourceId="skills" runId="r1" tasks={AB} />);
+
+        expect(screen.getByRole("button", { name: "B" })).toHaveAttribute(
+            "aria-pressed",
+            "true",
+        );
+        expect(screen.getByText("0%")).toBeInTheDocument();
+        expect(screen.queryByText("100%")).toBeNull();
+        expect(screen.queryByText(/arms · spread/)).toBeNull();
+        expect(screen.getByText("2 / 4")).toBeInTheDocument();
+    });
+
+    test("an unknown arm in the URL is ignored", () => {
+        nav.search = new URLSearchParams("variant=nope");
+        render(<RunView sourceId="skills" runId="r1" tasks={AB} />);
+        expect(screen.getByText(/2 arms · spread 100 pts/)).toBeInTheDocument();
+    });
+
+    test("picking an arm writes it to the URL", () => {
+        const replace = vi.spyOn(window.history, "replaceState");
+        render(<RunView sourceId="skills" runId="r1" tasks={AB} />);
+        fireEvent.click(screen.getByRole("button", { name: "B" }));
+        expect(replace).toHaveBeenLastCalledWith(null, "", "/runs/r1?variant=B");
+        replace.mockRestore();
     });
 });

@@ -33,11 +33,9 @@ logger = logging.getLogger(__name__)
 _YES = "yes"
 _NO = "no"
 
-# Extracts the skill name between ``skills/<name>/`` path segments (the Codex
-# file-read signal). Accept both POSIX and Windows separators because telemetry
-# records the command exactly as the agent emitted it. One-or-more separators
-# also handles JSON-escaped commands that retain doubled backslashes. The
-# lookahead permits overlapping matches such as ``.../skills/skills/<name>/...``.
+# Both separator styles, because telemetry records the command exactly as the agent
+# emitted it; one-or-more also handles JSON-escaped doubled backslashes. The
+# lookahead permits overlapping matches like ``.../skills/skills/<name>/...``.
 _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)")
 
 
@@ -45,25 +43,13 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """All skill names engaged by ONE command, agent-agnostically (any-skill).
 
     Detects both engagement signals so the criterion scores identically across
-    agents, and returns the (possibly empty) set of engaged skill names:
+    agents: Claude's explicit ``Skill`` tool call (namespace stripped), and, for
+    every other agent, the ``skills/<name>/`` substring in any string parameter.
 
-    - Claude: an explicit ``Skill`` tool call carries the skill in
-      ``parameters['skill']``, optionally namespaced (e.g.
-      ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
-      A harness whose skill tool names that argument something else renames it at
-      the AGENT boundary (OpenCode's ``name`` -> ``skill``, via
-      ``_OPENCODE_ARG_RENAME``), so this stays keyed on one canonical name rather
-      than growing an alternative per harness.
-    - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
-      engaged by reading its files off disk via shell. Both the repo layout
-      (``.../skills/<name>/...``) and the sandbox symlink
-      (``.agents/skills/<name>/...``) contain the substring ``skills/<name>/``,
-      matched here in any string parameter (Bash ``parameters['command']`` or a
-      file-path parameter). The trailing separator required by ``_SKILL_PATH_RE``
-      prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    Returning the full SET rather than a single-skill yes/no lets callers detect a
+    *competing* skill engagement.
 
-    Returning the full set (rather than a single-skill yes/no) lets callers detect
-    a *competing* skill engagement.
+    Rationale: .claude/notes/contracts.md § Any-engagement, and why order does not matter
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
@@ -130,12 +116,9 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        # Any-engagement policy (mirrors ``live_verdict``): the row is scored on
-        # whether this skill was engaged AT ALL, regardless of order. A positive
-        # criterion (skill_name == expected_skill) passes iff the expected skill
-        # was engaged somewhere in the run — a wrong skill engaged first does not
-        # fail it (recall). A distractor/negative criterion fails on ANY
-        # engagement of its skill (precision).
+        # Any-engagement policy, mirroring ``live_verdict``: scored on whether this
+        # skill was engaged AT ALL, regardless of order.
+        # Rationale: .claude/notes/contracts.md § Any-engagement, and why order does not matter
         triggered: bool = criterion.skill_name in _all_engaged_skill_names(turn_records)
         expected_yes: bool = criterion.expected_skill == criterion.skill_name
         score = 1.0 if triggered == expected_yes else 0.0
@@ -159,25 +142,14 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
     ) -> LiveVerdict:
         """Any-engagement latch: decide the instant THIS skill is engaged.
 
-        Mirrors ``_check_impl``'s any-engagement policy, latched monotonically
-        over the growing partial trajectory:
+        Monotonic and deterministic, as the ``LiveVerdict`` contract requires: a
+        decided verdict is a latch over a prefix that only grows.
 
-        - this skill not engaged yet -> ``"undecided"`` (the final outcome still
-          depends on the rest of the run — the expected skill may load later, or
-          a distractor may yet fire);
-        - this skill engaged -> ``expected_skill == skill_name`` decides:
-          ``"pass"`` for a positive criterion (the expected skill loaded),
-          ``"fail"`` for a distractor/negative one (a wrong skill loaded).
+        A positive criterion can therefore only ever live-``pass`` and a distractor
+        only ever live-``fail``; the ABSENCE of an engagement is never decidable
+        mid-run (see ``live_decidable_polarities``).
 
-        Because engagement is monotonic (a skill, once engaged, stays engaged), a
-        latched verdict never flips, so it agrees with ``_check_impl`` on the
-        frozen trajectory by construction — whether or not the run stopped early.
-        A positive criterion can therefore only ever live-``pass`` and a
-        distractor/negative one only ever live-``fail``; their *absence* is never
-        decidable mid-run (see ``SkillTriggeredCriterion.live_decidable_polarities``
-        in models/criteria.py). This is the change from first-engagement: a wrong
-        skill engaged first no longer live-fails a positive row — the run keeps
-        going so the expected skill can still load.
+        Rationale: .claude/notes/contracts.md § Any-engagement, and why order does not matter
         """
         if criterion.skill_name not in _all_engaged_skill_names(turn_records):
             return "undecided"

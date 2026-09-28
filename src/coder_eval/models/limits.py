@@ -32,18 +32,20 @@ class RunLimits(BaseModel):
     max_turns: int | None = Field(
         default=None,
         gt=0,
-        description="Max agent inner-loop turns per iteration. None = SDK default.",
+        description=(
+            "Max main-thread model API calls per iteration, on every harness. Each retry and each "
+            "dialog exchange starts a fresh count. None = SDK default."
+        ),
     )
     expected_turns: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "Soft target for cumulative visible turns across a task. A 'turn' is one "
-            "entry in the Turn timeline: each tool call contributes 1, plus 1 for the "
-            "final reply when present. "
-            "When the running total exceeds this, the orchestrator logs a one-shot "
-            "warning and the report renders a badge — the run is NOT aborted "
-            "(use max_turns for a hard cap). None disables the check."
+            "Soft target for visible turns summed over the whole task: each tool call counts 1, "
+            "plus 1 for the final reply when present. This is a different unit and scope from "
+            "max_turns, which caps model API calls per iteration. When the running total exceeds "
+            "this, the orchestrator logs a one-shot warning and the report renders a badge; the "
+            "run is NOT aborted. None disables the check."
         ),
     )
     task_timeout: int | None = Field(
@@ -137,23 +139,8 @@ class RunLimits(BaseModel):
         ),
     )
 
-    # NOTE: stop_early_gate_threshold <= 0.0 on an ARMED task is a degenerate,
-    # gate-neutralizing config (a threshold of 0 trivially passes the armed
-    # gate regardless of whether anything decided) and is rejected — but NOT
-    # here, and neither is stop_early: True (the removed master arm). Whether a
-    # task is armed lives on the criteria, which RunLimits cannot see, and
-    # RunLimits is field-merged across 5 layers, so a model-level validator has
-    # no visibility into which layer produced the merged value and cannot
-    # distinguish a real mistake from a value merged forward from a sibling
-    # layer (e.g. a task-level threshold inherited by a variant that only
-    # toggles the kill switch). Both checks live in
-    # orchestration/early_stop.py::validate_early_stop instead, where they
-    # raise EarlyStopConfigError and get the same hard-stop CLI treatment
-    # (flips the plan exit code, aborts run) as every other early-stop
-    # guardrail — a plain pydantic ValueError here would instead land in
-    # plan_command's generic per-variant "resolution failed" branch, which
-    # prints red text but does NOT flip the exit code by design (unlike
-    # EarlyStopConfigError), so a model-level raise would silently pass CI.
-    # Other cross-field semantics that are warnings rather than errors live in
-    # orchestration/run_limits.py::validate_run_limits for the same post-merge
-    # visibility without rejecting or mutating the resolved values.
+    # A degenerate gate threshold on an ARMED task, and the removed master arm, are
+    # both rejected -- but in orchestration/early_stop.py::validate_early_stop, NOT
+    # here. Whether a task is armed lives on the criteria, which RunLimits cannot
+    # see, and post-merge is the only place with enough visibility.
+    # Rationale: .claude/notes/orchestration.md § Why the guardrails are not model validators

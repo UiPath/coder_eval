@@ -119,3 +119,26 @@ def test_all_zero_rate_resolves_and_blocks_shadowing():
     assert calculate_cost("free-1", 1_000_000, 1_000_000) == 0.0
     with pytest.raises(ValueError, match="already registered"):
         register_pricing({"free-1": ModelPricing(1.0, 0.0, 0.0, 0.0)})
+
+
+def test_four_positional_args_still_construct_with_per_request_defaulted():
+    """`per_request_billing` is defaulted and last, so out-of-tree plugin rate
+    cards (coder_eval_uipath/pricing.py) keep working unchanged."""
+    assert ModelPricing(1.0, 2.0, 3.0, 4.0).per_request_billing is False
+
+
+def test_conflicting_per_request_billing_is_a_real_conflict():
+    """Two plugins disagreeing about whether a model is per-request billed is a
+    price disagreement: it decides whether a frontend shows an estimate or the
+    provider's actual apportioned bill."""
+    register_pricing({"acme-1": ModelPricing(1.0, 2.0, 3.0, 4.0)})
+    with pytest.raises(ValueError, match="refusing to shadow"):
+        register_pricing({"acme-1": ModelPricing(1.0, 2.0, 3.0, 4.0, per_request_billing=True)})
+
+
+def test_per_request_billing_model_is_still_priced_in_python():
+    """The flag is metadata for the frontend; Python keeps pricing the model so
+    the `max_usd` pre-flight still has a figure to work from."""
+    assert is_priced("moonshotai/kimi-k3")
+    # 1M uncached input at $3/MTok.
+    assert calculate_cost("moonshotai/kimi-k3", 1_000_000, 0) == 3.0

@@ -276,19 +276,14 @@ class TestRecordCliProbeIntegrity:
     def test_dispatch_is_proved_against_a_real_shim_log(self):
         """The authoritative detector, checked against a log the SHIM actually wrote.
 
-        `cli_called` matches argv only, so it passes whether a rule answered or the
-        entry fallback did. `captured.txt` is transcribable: this YAML is serialised
-        to /work/input and mounted at /work/task_dir, both readable. And a codegen
-        regression that renders `RULES = []` raises nothing, so neither `rule_error`
-        nor `sidecar_error` is booked. Only the `"rule": N` key catches that.
+        Pins: the task's own record_cli entry is generated, each stubbed command is
+        RUN, and every must-match `file_matches_regex` criterion on the log matches
+        the real log lines the shim wrote, including the `"rule": N` key. Hazard:
+        the needle's spelling (`"rule": 0`, with the space) belongs to `json.dumps`'s
+        default separators in `invocation_log.record`, so never compare the YAML
+        against itself.
 
-        So this test does not compare the YAML against itself. It generates the
-        task's own record_cli entry, RUNS each stubbed command, and requires the
-        criteria's regexes to match the resulting real log lines -- because the
-        needle's exact spelling (`"rule": 0`, with the space) belongs to
-        `json.dumps`'s default separators in `invocation_log.record`, not to this
-        test. Switching the shim to compact separators would otherwise leave this
-        green while the blocking CI probe failed.
+        Rationale: .claude/notes/contracts.md § Why the record_cli probe reads a real shim log
         """
         task = self._task()
         entry = self._entry(task)

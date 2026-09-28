@@ -28,6 +28,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORK_DIR = REPO_ROOT / "tmp" / "harbor_e2e"
 AGENT_IMPORT_PATH = "coder_eval.harbor.agent:CoderEvalAgent"
+# Where a failing scenario's full export/ + jobs/ tree gets zipped for upload --
+# a print-statement diagnostic only shows what this script thought to ask for
+# (and dies with the runner). A zip preserves everything: docker/agent logs,
+# every task.json/trajectory.json, artifacts/ workspaces -- so a failure can be
+# inspected after the fact instead of guessed at from stdout.
+FAILURE_ARTIFACTS_DIR = REPO_ROOT / "tmp" / "harbor_e2e_failures"
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,6 @@ class Scenario:
 
     name: str
     task_file: Path
-    allow_credentials: bool = False
 
 
 SCENARIOS: list[Scenario] = [
@@ -45,14 +50,26 @@ SCENARIOS: list[Scenario] = [
     # export -> CoderEvalAgent -> --workspace-dir -> verifier round trip.
     Scenario("baseline", REPO_ROOT / "tests/harbor_e2e/fixtures/docker_baseline.yaml"),
     # llm_judge: real model call inside the VERIFIER phase, not just the agent.
-    Scenario("llm_judge", REPO_ROOT / "tests/harbor_e2e/fixtures/llm_judge.yaml", allow_credentials=True),
+    Scenario("llm_judge", REPO_ROOT / "tests/harbor_e2e/fixtures/llm_judge.yaml"),
     # Custom (BYOD) Docker image via dockerfile_path -- reuses the in-tree
     # byod_smoke_test task/image rather than duplicating it.
     Scenario("docker_custom_image", REPO_ROOT / "tasks/byod_smoke_test.yaml"),
     # template_sources: TemplateDirSource copy-in + rewritten path, plus
     # sandbox.python.env_packages surviving the agent-phase task.yaml merge.
     Scenario("template_sources", REPO_ROOT / "tests/harbor_e2e/fixtures/template_sources.yaml"),
+    # command_executed: catches a regression where the verifier phase grades
+    # against a directory with no trajectory data -- reward could still land on
+    # 1.0 "by luck" from unrelated criteria while this one silently scores 0.0,
+    # so `assert_scenario_artifacts` checks its own criterion score directly
+    # rather than trusting the aggregate reward alone.
+    Scenario("trajectory_criteria", REPO_ROOT / "tests/harbor_e2e/fixtures/trajectory_criteria.yaml"),
 ]
+
+# Criteria types that can only score correctly if the verifier phase actually
+# hydrated the agent phase's trajectory (see portability.py's NEEDS_TRAJECTORY
+# class). Checked by name per scenario below rather than globally, since only
+# `trajectory_criteria` declares one.
+_TRAJECTORY_CRITERION_TYPES = frozenset({"command_executed", "commands_efficiency", "skill_triggered"})
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -64,8 +81,6 @@ def export_task(scenario: Scenario, out_dir: Path) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     cmd = ["coder-eval", "export", str(scenario.task_file), "-o", str(out_dir)]
-    if scenario.allow_credentials:
-        cmd.append("--allow-credentials")
     result = _run(cmd)
     print(result.stdout)
     print(result.stderr, file=sys.stderr)
@@ -106,13 +121,82 @@ def run_harbor(scenario: Scenario, export_dir: Path, jobs_dir: Path) -> Path:
     return trial_dirs[0]
 
 
+def _read_json_best_effort(path: Path) -> object | str | None:
+    """Read and parse ``path`` as JSON, or a string describing why not.
+
+    Only used to build FAILURE diagnostics: a truncated/missing file must
+    degrade to a note rather than raise and replace the real reward/criteria
+    failure this exists to explain -- the same rule ``_zip_scenario_dir``
+    already states for itself.
+    """
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"unreadable ({exc})"
+
+
+def _criteria_detail(verifier_result: object) -> list[dict[str, object]] | None:
+    """Per-criterion score/detail from a parsed verifier ``task.json``."""
+    if not isinstance(verifier_result, dict):
+        return None
+    return [
+        {
+            "type": r.get("criterion_type"),
+            "score": r.get("score"),
+            "details": r.get("details"),
+            "error": r.get("error"),
+            "evaluation_status": r.get("evaluation_status"),
+            "result_kind": r.get("result_kind"),
+        }
+        for r in verifier_result.get("success_criteria_results", [])
+    ]
+
+
+def _agent_commands(agent_task_jsons: list[Path]) -> list[dict[str, object]] | str:
+    """The AGENT phase's own recorded tool calls, for a failure message.
+
+    Read directly rather than trusting the verifier's hydration of it: its
+    `iterations[].commands` is the raw telemetry criteria like
+    `command_executed` are supposed to hydrate from, so dumping it distinguishes
+    "no commands were ever recorded" (a hydration/telemetry bug) from "the
+    recorded commands just didn't match the pattern" (an agent/fixture issue).
+    """
+    if not agent_task_jsons:
+        return "no agent/task.json found"
+    agent_result = _read_json_best_effort(agent_task_jsons[0])
+    if not isinstance(agent_result, dict):
+        return f"unreadable: {agent_result!r}"
+    return [
+        {"tool_name": c.get("tool_name"), "parameters": c.get("parameters")}
+        for it in agent_result.get("iterations", [])
+        for c in it.get("commands", [])
+    ]
+
+
 def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     reward_path = trial_dir / "verifier" / "reward.json"
     if not reward_path.is_file():
         raise RuntimeError(f"[{scenario.name}] missing {reward_path}")
     reward = json.loads(reward_path.read_text(encoding="utf-8"))
+
+    # Read the per-criterion breakdown ONCE, before the reward gate below, so a
+    # failing reward's own root cause (which criterion, and why) is always in
+    # the failure message -- not only when an unrelated criterion happens to
+    # carry the aggregate to 1.0 "by luck" while this one silently failed.
+    verifier_task_json = trial_dir / "verifier" / "task.json"
+    if not verifier_task_json.is_file():
+        raise RuntimeError(f"[{scenario.name}] missing {verifier_task_json}")
+    verifier_result = _read_json_best_effort(verifier_task_json)
+    criteria_detail = _criteria_detail(verifier_result)
+    agent_task_jsons = sorted((trial_dir / "agent").glob("**/task.json"))
+
     if reward.get("reward") != 1.0:
-        raise RuntimeError(f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path})")
+        raise RuntimeError(
+            f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path}); "
+            + f"criteria: {criteria_detail!r}; agent-phase recorded commands: {_agent_commands(agent_task_jsons)!r}"
+        )
 
     trajectory_path = trial_dir / "agent" / "trajectory.json"
     if not trajectory_path.is_file():
@@ -121,17 +205,54 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     if "schema_version" not in trajectory:
         raise RuntimeError(f"[{scenario.name}] {trajectory_path} is missing 'schema_version'")
 
-    agent_task_jsons = list((trial_dir / "agent").glob("**/task.json"))
     if not agent_task_jsons:
         raise RuntimeError(f"[{scenario.name}] no task.json found under {trial_dir / 'agent'}")
-    verifier_task_json = trial_dir / "verifier" / "task.json"
-    if not verifier_task_json.is_file():
-        raise RuntimeError(f"[{scenario.name}] missing {verifier_task_json}")
+    if not isinstance(verifier_result, dict):
+        raise RuntimeError(f"[{scenario.name}] {verifier_task_json} did not parse as JSON: {verifier_result!r}")
+
+    # An overall reward of 1.0 does not prove a trajectory criterion was
+    # actually graded -- it could pass "by luck" from unrelated criteria while
+    # this one silently scored 0.0 against an ungraded/empty trajectory. Check
+    # each trajectory-dependent criterion's OWN score directly.
+    trajectory_results = [
+        r
+        for r in verifier_result.get("success_criteria_results", [])
+        if r.get("criterion_type") in _TRAJECTORY_CRITERION_TYPES
+    ]
+    for r in trajectory_results:
+        if r.get("score") != 1.0:
+            raise RuntimeError(
+                f"[{scenario.name}] {r.get('criterion_type')} criterion did not score 1.0 "
+                + f"(got {r.get('score')!r}); trajectory hydration likely broken: {r.get('details')!r}"
+            )
 
     print(
         f"[{scenario.name}] OK: reward=1.0, trajectory.json present, "
         + f"{len(agent_task_jsons)} agent task.json + verifier/task.json present"
+        + (f", {len(trajectory_results)} trajectory criterion/criteria verified" if trajectory_results else "")
     )
+
+
+def _zip_scenario_dir(scenario: Scenario) -> Path | None:
+    """Zip a failed scenario's whole ``export/`` + ``jobs/`` tree for upload.
+
+    Best-effort: a zip failure must never mask the real scenario failure it was
+    trying to preserve evidence for.
+    """
+    scenario_dir = WORK_DIR / scenario.name
+    if not scenario_dir.is_dir():
+        return None
+    try:
+        FAILURE_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        archive = shutil.make_archive(str(FAILURE_ARTIFACTS_DIR / scenario.name), "zip", root_dir=str(scenario_dir))
+    # Broad by intent: e.g. a pre-1980 mtime from a container image layer raises
+    # ValueError, not OSError, and an undecodable filename raises UnicodeEncodeError.
+    # Either would otherwise escape from inside main()'s own `except Exception`,
+    # killing the scenario loop and hiding every scenario after this one.
+    except Exception as exc:
+        print(f"[{scenario.name}] could not zip {scenario_dir} for upload: {exc}", file=sys.stderr)
+        return None
+    return Path(archive)
 
 
 def main() -> int:
@@ -148,6 +269,9 @@ def main() -> int:
         except Exception as exc:
             print(f"[{scenario.name}] FAILED: {exc}", file=sys.stderr)
             failures.append(scenario.name)
+            archive = _zip_scenario_dir(scenario)
+            if archive is not None:
+                print(f"[{scenario.name}] full export/+jobs/ tree zipped to {archive} for upload", file=sys.stderr)
 
     print("\n=== Summary ===")
     for scenario in SCENARIOS:

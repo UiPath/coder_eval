@@ -24,39 +24,20 @@ class ThreadedWatchdog:
     """OS-thread-based deadline enforcer.
 
     A ``threading.Timer`` fires at ``timeout_seconds`` and invokes ``on_timeout``
-    from the timer thread (NOT the asyncio event loop). After it fires,
-    ``fired`` is True (readable from any thread).
+    from the TIMER THREAD, not the event loop, so ``on_timeout`` MUST be
+    synchronous and thread-safe. Exceptions it raises are logged and swallowed, so
+    one bad callback never kills the timer thread without a trace. After it fires,
+    ``fired`` is True, readable from any thread.
 
-    ``on_timeout`` MUST be synchronous and thread-safe. Exceptions it raises
-    are logged and swallowed so one bad callback never kills the timer thread
-    without a trace.
+    ``timeout_seconds`` of None or <= 0 is a no-op watchdog, so a caller can write
+    a uniform ``with`` block whether or not a timeout is configured. When
+    ``asyncio_task_to_cancel`` is given, the timer thread also cancels it across
+    the thread boundary, so mock-based tests with no real subprocess still unwind
+    at the deadline.
 
-    Typical use in async code:
+    Each instance is SINGLE-USE: re-entering the ``with`` block is unsupported.
 
-        def _on_timeout() -> None:
-            kill_subprocess_by_pid(pid)  # sync, thread-safe
-
-        with ThreadedWatchdog(
-            timeout_seconds=1200,
-            on_timeout=_on_timeout,
-            asyncio_task_to_cancel=asyncio.current_task(),
-            label="turn timeout",
-        ) as wd:
-            async for message in query(...):
-                ...
-        if wd.fired:
-            raise TurnTimeoutError(...)
-
-    Notes:
-    - ``timeout_seconds`` of None or <= 0 → no-op watchdog (no timer started).
-      This lets callers write a uniform ``with`` block regardless of whether
-      a timeout is configured.
-    - When ``asyncio_task_to_cancel`` is provided, the timer thread also
-      calls ``loop.call_soon_threadsafe(task.cancel)`` after ``on_timeout``.
-      This delivers cancellation across the thread boundary so mock-based
-      tests (no real subprocess) still unwind at the deadline.
-    - Each instance is single-use. Re-entering the ``with`` block after exit
-      is not supported.
+    Rationale: .claude/notes/agents.md § The threaded watchdog
     """
 
     def __init__(

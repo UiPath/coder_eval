@@ -1,10 +1,14 @@
-"""HTML report generation for coder_eval runs.
+"""HTML report generation — the evalboard's STATIC TWIN.
 
-Produces self-contained HTML files (inline CSS/JS, no external fonts or
-images) that visualize a single task's conversation trace and success
-criteria, plus cross-variant experiment summaries.
+Produces SELF-CONTAINED files (inline CSS/JS, no external fonts or images) for
+offline viewing and CI artifact upload, covering a single task's conversation trace
+and criteria plus cross-variant experiment summaries.
 
-Designed for offline viewing and for upload as CI artifacts.
+This renderer and ``evalboard/`` show the same run and must agree, so a rule
+implemented on one side belongs on the other. The arithmetic itself lives in
+``reports_stats.py``; this module only formats it.
+
+Rationale: .claude/notes/reporting.md § Report rollups and the HTML twin
 """
 
 from __future__ import annotations
@@ -17,15 +21,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.formatting import format_ms
-from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
-
-from .reports import early_stop_gate_note
-from .reports_stats import format_score, is_env_table_key, turn_time_buckets
+from ..analysis import calculate_command_statistics
+from ..durations import format_ms
+from ..models import JUDGE_CRITERION_TYPES, FinalStatus, eval_result_total_cost, sum_costs
+from ..result_metrics import expected_turns_overage, turn_time_buckets
+from ..stats import stddev, welch_t_test
+from .helpers import (
+    collect_variant_series,
+    describe_prompt_config,
+    fmt_mean_sd,
+    fmt_p,
+    format_score,
+    is_env_table_key,
+    load_variant_eval_results,
+    paired_comparison,
+)
+from .markdown import (
+    SLOW_PARAMS_PREVIEW_CHARS,
+    collect_agent_settings_rows,
+    count_partials_by_outcome,
+    early_stop_gate_note,
+    group_consecutive_by_iteration,
+)
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import (
+    from ..models import (
         CommandTelemetry,
         CriterionResult,
         EarlyStopInfo,
@@ -39,9 +60,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Styling — fully inline; dark theme with light override via `.light` class.
-# ---------------------------------------------------------------------------
+# Styling -- fully inline; dark theme with a light override via `.light`.
 
 _CSS = """
 :root {
@@ -235,9 +254,7 @@ function toggleTheme() {
 """
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
+# Formatting helpers.
 
 
 _MAX_VALUE_LEN = 400
@@ -285,9 +302,8 @@ def _status_badge(status: Any) -> str:
     status_str = getattr(status, "value", None) or str(status)
     try:
         fs = status if isinstance(status, FinalStatus) else FinalStatus(str(status))
-        # "ungraded" -> neutral: the row carries no verdict, so it must render as
-        # neither green nor red. Same class an unrecognised status falls back to,
-        # reached deliberately here rather than by accident.
+        # "ungraded" -> neutral: no verdict, so neither green nor red. The same
+        # class an unrecognised status falls back to, reached deliberately.
         cls = {"succeeded": "success", "failed": "failure", "error": "error", "ungraded": "neutral"}[fs.category]
     except (ValueError, KeyError):
         cls = "neutral"  # unknown / non-FinalStatus input
@@ -318,14 +334,10 @@ def _format_params(params: dict[str, Any]) -> str:
         return repr(params)
 
 
-# ---------------------------------------------------------------------------
-# Section renderers
-# ---------------------------------------------------------------------------
+# Section renderers.
 
 
 def _render_header(result: EvaluationResult) -> str:
-    from .reports_stats import expected_turns_overage
-
     started = result.started_at.isoformat(timespec="seconds") if result.started_at else "—"
     duration = _format_duration(result.duration_seconds)
     score_badge = _score_pill(result.weighted_score) if result.weighted_score is not None else ""
@@ -428,7 +440,7 @@ def _render_judge_section(criteria: list[CriterionResult], heading: str = "Judge
     for cr in criteria:
         # criterion_type identifies judges; details/findings/transcript may all
         # be present (typed JudgeCriterionResult) or in model_extra (round-tripped).
-        if cr.criterion_type not in ("llm_judge", "agent_judge"):
+        if cr.criterion_type not in JUDGE_CRITERION_TYPES:
             continue
         findings_raw = getattr(cr, "findings", []) or []
         findings = [str(f).strip() for f in findings_raw if str(f).strip()]
@@ -686,7 +698,6 @@ def _group_turns_by_iteration(
     turns: list[TurnRecord],
 ) -> list[tuple[int, list[TurnRecord]]]:
     """Group consecutive TurnRecords by iteration as ``(iteration, group)`` tuples for the renderer."""
-    from .reports import group_consecutive_by_iteration
 
     groups = group_consecutive_by_iteration(turns, lambda t: t.iteration)
     return [(group[0].iteration, group) for group in groups]
@@ -802,7 +813,6 @@ def _render_command_stats(stats: Any | None) -> str:
     for tool, count in sorted((stats.commands_by_tool or {}).items(), key=lambda x: x[1], reverse=True):
         rows.append(f"<tr><td class='mono'>{_esc(tool)}</td><td>{count}</td></tr>")
     rows_html = "".join(rows) or "<tr><td colspan='2' class='muted'>No commands</td></tr>"
-    from .reports import SLOW_PARAMS_PREVIEW_CHARS
 
     slow_rows_list: list[str] = []
     for c in stats.slowest_commands or []:
@@ -871,9 +881,8 @@ def _render_error_details(result: EvaluationResult) -> str:
             if retryable
             else '<span class="badge neutral">non-retryable</span>'
         )
-    # Prefer the in-result tail captured at run time (sanitised, bounded). Fall
-    # back to the legacy stack_trace from error_details so reports regenerated
-    # against archived runs (pre-error_log_tail) still surface diagnostics.
+    # Prefer the in-result tail captured at run time; the legacy stack_trace keeps
+    # an archived run's diagnostics renderable.
     log_text = result.error_log_tail or ""
     if not log_text and isinstance(details, dict):
         stack = details.get("stack_trace")
@@ -939,7 +948,6 @@ def _format_signed_ms(ms: float | None) -> str:
 
 def _render_generation_metrics(result: EvaluationResult) -> str:
     """Render Generation Metrics — latency, turns, and the four wall-clock buckets."""
-    from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
     turns = result.iterations or []
     num_turns = len(turns)
@@ -956,10 +964,9 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
             f'<div class="stat"><div class="label">Crashed Partials</div>'
             f'<div class="value">{_esc(breakdown)}</div></div>'
         )
-    # The four wall-clock buckets. The arithmetic is in reports_stats; this
-    # only formats it. An unmeasured bucket renders as an em dash, never 0ms —
-    # a run predating the head/tail capture measured nothing, and a zero would
-    # claim it measured instantly (CE058).
+    # The arithmetic is in result_metrics; this only formats it. An unmeasured
+    # bucket renders as an em dash, never 0ms (CE058).
+    # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
     buckets = turn_time_buckets(result)
     startup = format_ms(buckets.startup_ms)
     generation = format_ms(buckets.generation_ms)
@@ -1014,7 +1021,6 @@ def _render_commands_efficiency(result: EvaluationResult) -> str:
 
 def _render_agent_settings(result: EvaluationResult) -> str:
     """Render Agent Settings section. Prefers sdk_options, falls back to agent_config."""
-    from .reports import collect_agent_settings_rows
 
     if result.sdk_options:
         settings: dict[str, Any] = result.sdk_options
@@ -1062,7 +1068,8 @@ def _render_installed_tools(result: EvaluationResult) -> str:
 _SIMULATION_STOP_REASON_LABELS = {
     "criteria_passed": ("success", "criteria passed"),
     "stop_token": ("neutral", "simulator ended dialog"),
-    "max_turns": ("failure", "turn cap reached"),
+    "max_turns": ("failure", "exchange cap reached"),
+    "agent_max_turns": ("failure", "agent max_turns reached"),
     "budget": ("failure", "token budget exhausted"),
     "error": ("failure", "simulator error"),
 }
@@ -1140,9 +1147,7 @@ def _wrap_document(title: str, body: str) -> str:
 """
 
 
-# ---------------------------------------------------------------------------
-# Variant / Experiment helpers
-# ---------------------------------------------------------------------------
+# Variant / experiment helpers.
 
 
 def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> str:
@@ -1152,7 +1157,6 @@ def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> s
     """
     if result is None:
         return ""
-    from .reports_stats import stddev
 
     vrs = [vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id]
     scores = [vr.weighted_score for vr in vrs if vr.weighted_score is not None]
@@ -1177,9 +1181,6 @@ def _variant_rich_sections(variant_id: str, result: ExperimentResult | None, run
     """
     if result is None or run_dir is None:
         return ""
-
-    from .analysis import calculate_command_statistics
-    from .reports_stats import load_variant_eval_results
 
     eval_results = load_variant_eval_results(run_dir, variant_id, result.task_summaries)
     if not eval_results:
@@ -1245,7 +1246,7 @@ def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
     output_tok = sum(u.output_tokens for u in usages)
     cache_write = sum(u.cache_creation_input_tokens for u in usages)
     cache_read = sum(u.cache_read_input_tokens for u in usages)
-    total = input_tok + output_tok + cache_write + cache_read
+    total = sum(u.total_tokens for u in usages)
     variant_cost = sum_costs(*(eval_result_total_cost(r) for r in eval_results))
     cost_str = f"${variant_cost:.4f}" if variant_cost is not None else "N/A"
     return f"""
@@ -1294,7 +1295,6 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
     actually specifies any mutations or overrides."""
     if experiment is None:
         return ""
-    from .reports_stats import describe_prompt_config
 
     has_config = bool(experiment.defaults and experiment.defaults.prompt_mutations) or any(
         v.prompt_mutations or v.initial_prompt or v.initial_prompt_file for v in experiment.variants
@@ -1318,10 +1318,9 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
 def _experiment_paired_comparison(result: ExperimentResult) -> str:
     """Render the Paired Comparison section — the HTML twin of the markdown one.
 
-    Both render the same ``reports_stats.paired_comparison`` result, so the two
+    Both render the same ``reports.helpers.paired_comparison`` result, so the two
     reports can never disagree about the paired numbers.
     """
-    from .reports_stats import fmt_p, paired_comparison
 
     pc = paired_comparison(result)
     if pc is None:
@@ -1360,7 +1359,6 @@ def _experiment_paired_comparison(result: ExperimentResult) -> str:
 
 def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     """Render the Aggregate Metrics table (with p-values when exactly 2 variants)."""
-    from .reports_stats import collect_variant_series, fmt_mean_sd, fmt_p, welch_t_test
 
     show_p = len(result.variant_ids) == 2
     vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p else ("", "")
@@ -1389,9 +1387,8 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     )
     rows.append(_row("Failed", [str(result.variant_aggregates[vid].tasks_failed) for vid in result.variant_ids], None))
     rows.append(_row("Errors", [str(result.variant_aggregates[vid].tasks_error) for vid in result.variant_ids], None))
-    # The fourth bucket, conditionally like its siblings elsewhere. Without it
-    # Tasks Run / Succeeded / Failed / Errors no longer sum to tasks_run on an
-    # ungraded run, with nothing on the page to say where the rest went.
+    # The fourth bucket, conditional like its siblings elsewhere.
+    # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
     if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
         rows.append(
             _row(
@@ -1528,9 +1525,7 @@ def _experiment_most_divergent(result: ExperimentResult) -> str:
 """
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# Public API.
 
 
 class HTMLReportGenerator:
@@ -1623,9 +1618,8 @@ class HTMLReportGenerator:
         )
         stddev_lines = _variant_stddev_lines(variant_id, result)
         rich_sections = _variant_rich_sections(variant_id, result, run_dir)
-        # Only rendered when non-zero, so an ordinary graded run's tile is
-        # unchanged — but a `coder-eval execute` run says where its tasks went
-        # instead of showing Succeeded/Failed/Errors all at zero.
+        # Non-zero only, so a graded run's tile is unchanged but an `execute` run
+        # says where its tasks went instead of showing three zeros.
         ungraded_stat = (
             '<div class="stat"><div class="label">Not Graded</div>'
             + f'<div class="value">{agg.tasks_not_graded}</div></div>'

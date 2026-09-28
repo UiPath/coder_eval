@@ -1,10 +1,10 @@
 task_id: "harbor_e2e_llm_judge"
 description: >
   Harbor E2E llm_judge case: a real claude-code agent turn, graded by a real
-  llm_judge call inside the Harbor verifier phase (--allow-credentials).
-  Catches regressions in judge-prompt construction / route resolution / JSON
-  verdict parsing when run through a Harbor-exported task, not just through
-  coder-eval's own `run`/`evaluate`.
+  llm_judge call inside the Harbor verifier phase (credentials are always
+  allowed at export). Catches regressions in judge-prompt construction / route
+  resolution / JSON verdict parsing when run through a Harbor-exported task,
+  not just through coder-eval's own `run`/`evaluate`.
 
 run_limits:
   max_turns: 2

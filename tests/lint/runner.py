@@ -18,7 +18,6 @@ from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
 from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
 from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
 from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
-from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
 from tests.lint.rules.ce024_discriminated_unions import DiscriminatedUnions
 from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
 from tests.lint.rules.ce037_no_dead_private_helper import NoDeadPrivateHelper
@@ -41,6 +40,7 @@ from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
 from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
 from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
 from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -57,11 +57,12 @@ from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 from tests.lint.violation import Violation
 
 
-# CE062 IS DELIBERATELY UNUSED and must stay that way — the ids above jump 061
-# to 063. It was claimed during the turn-timing work and then folded into CE063
-# rather than shipped. An id is a permanent documentation anchor: a suppression
-# comment carrying 062 in an older branch, review or commit message must never
-# start meaning something new. Claim 065 next.
+# CE062 and CE023 are RETIRED ids and must stay unused — the ids above jump 061 to
+# 063. An id is a permanent documentation anchor: a suppression comment carrying one
+# in an older branch or commit message must never start meaning something new.
+# Claim 069 next; 065 is taken without being in ALL_RULES. To see the whole space:
+# `grep -E '^class Test(CE[0-9]{3})' tests/test_custom_lint.py`.
+# Rationale: .claude/notes/lint-rules.md § The CE id space
 type RuleClass = type[BaseRule]
 
 ALL_RULES: list[RuleClass] = [
@@ -87,7 +88,6 @@ ALL_RULES: list[RuleClass] = [
     NoSdkTypedBaseAgentFields,
     GuardedEvaluationResultParse,
     SimulationDialogLoopStatementCap,
-    NoProxyShimImports,
     DiscriminatedUnions,
     CriteriaPathSeam,
     NoDeadPrivateHelper,
@@ -110,6 +110,7 @@ ALL_RULES: list[RuleClass] = [
     WindowViaCloseWindow,
     NoBusyMsInAgents,
     TurnBracketOnTheClock,
+    NoReportImportsInCore,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule
@@ -131,8 +132,8 @@ def _is_suppressed(source_lines: list[str], v: Violation) -> bool:
     """Honor `# noqa` placed on any line spanned by the offending AST node.
 
     AST nodes for multi-line statements report `lineno` at the start, so a
-    `# noqa: CE002` placed on a closing paren or inner argument line was
-    previously missed. We scan every physical line from `line` through
+    `# noqa: CE002` may sit on a closing paren or inner argument line.
+    We scan every physical line from `line` through
     `end_line` (inclusive) for a matching suppression marker.
     """
     if v.line == 0 or v.line > len(source_lines):

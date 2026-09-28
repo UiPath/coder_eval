@@ -1,44 +1,23 @@
 """CE033 — the plugin's bundled criteria reference is generated from the models.
 
-An installed Claude Code plugin is copied to ``~/.claude/plugins/cache/`` without
-its parent directories, so a skill cannot read ``docs/TASK_DEFINITION_GUIDE.md``
-from this repository at runtime — every reference a skill needs has to ship
-*inside* ``plugins/coder-eval/``. A bundled copy of the criterion vocabulary is
-exactly the kind of file that drifts: a criterion gains a field, or a whole 15th
-criterion lands, and the copy quietly keeps teaching the old schema to every
-plugin user.
+A skill in an installed plugin cannot read ``docs/``, so the criterion vocabulary ships
+inside the plugin. ``render_criteria()`` renders
+``plugins/coder-eval/reference/criteria.md`` from the ``SuccessCriterion`` union;
+``make plugin-reference`` calls ``write()``; CE033 (``check()``) re-renders and diffs
+against disk. There is no ``--check`` mode: CE033 is the checker.
 
-So the copy is not written by hand. The ``SuccessCriterion`` discriminated union
-in ``coder_eval.models`` is the single source of truth; ``render_criteria()``
-renders ``plugins/coder-eval/reference/criteria.md`` from it, ``make
-plugin-reference`` calls ``write()``, and CE033 (``check()``) re-renders and diffs
-against disk. There is deliberately **no ``--check`` mode and no arg parser** —
-CE033 *is* the checker; a second entry point would be untested duplication.
+Rendering rules:
 
-Two rendering rules keep this small and are load-bearing:
+- Inherited fields are rendered once, in their own section, from a COMPUTED set —
+  never a hardcoded name list.
+- Every field gets its full model description; required and optional fields go in
+  separate tables. Defaults and types are not rendered.
 
-- Fields inherited from ``BaseSuccessCriterion`` / ``LiveSuccessCriterion`` are
-  documented once, in their own section, and **computed** — never a hardcoded
-  name list, which would be a second declaration of the base schema. (When
-  ``stop_early:`` replaced ``stop_when`` + ``max_steps_to_decide``, a hardcoded
-  list would have started rendering the new field into all 14 per-criterion
-  sections and leaked two dead names; the computed set absorbed it with no edit.)
-- **Every** field gets its model description, required and optional alike, each in
-  a table of its own, the second group under an ``Optional:`` label. What a
-  field *means* is the half of the schema an authoring agent gets wrong (that
-  ``min_count: 0`` lets a criterion pass when nothing matched, that ``weight: 0``
-  makes a criterion informational), so it is rendered in full — never truncated,
-  never a curated subset, which would need a hardcoded name list and so a second
-  declaration of the schema. Defaults and types are still deliberately absent:
-  rendering defaults would mean handling ``default_factory`` (whose
-  ``FieldInfo.default`` is ``PydanticUndefined``) and rendering types would mean
-  normalizing ``X | None`` annotations — two helpers serving the half of the
-  reference an authoring agent needs least. ``coder-eval plan`` and the model
-  docstrings cover the rest.
-
-Like CE026-CE031 this is not a ``BaseRule`` in the AST runner; it reasons over
-Markdown and pydantic metadata, and is wired as
+Each criterion's summary is the first line of its ``src/`` class docstring, so editing
+that line changes the generated file. Wired as
 ``tests/test_custom_lint.py::TestCE033PluginReferenceParity``.
+
+Rationale: .claude/notes/lint-rules.md § CE033
 """
 
 from __future__ import annotations

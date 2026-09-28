@@ -1,26 +1,22 @@
 """CE028 — the flat doc-index surfaces are generated from the mkdocs nav.
 
-The docs overhaul's root cause was doc/code drift; the index surfaces
-(``README.md``'s Documentation table, ``docs/index.md``'s "Where to go next"
-table, and the ``## Docs`` / ``## Tutorials`` sections of ``docs/llms.txt``) drift
-the same way — a page is added to the nav and forgotten in the three flat lists,
-or a page is deleted and left dangling in them. This module makes ``nav`` (plus
-the ``extra.docs_index`` blurb map) in ``mkdocs.yml`` the single source of truth:
-``write()`` renders all three surfaces from it, ``make docs-indexes`` calls
-``write()``, and CE028 (``check()``) re-renders and diffs against disk. There is
-deliberately **no ``--check`` mode and no arg parser** — CE028 *is* the checker; a
-second entry point would be untested duplication.
+``nav`` plus the ``extra.docs_index`` blurb map in ``mkdocs.yml`` is the single source
+of truth for ``README.md``'s Documentation table and ``docs/index.md``'s "Where to go
+next" table (between ``docs-index:start`` / ``docs-index:end``), and for the
+``## Docs`` / ``## Tutorials`` sections of ``docs/llms.txt`` (between the ``:docs`` /
+``:tutorials`` marker pairs). ``write()`` fills the markers (``make docs-indexes``);
+``check()`` re-renders and diffs against disk. There is no ``--check`` mode: CE028 is
+the checker.
 
-CE028 also enforces the invariants the render depends on: every nav page has a
-blurb and every blurb has a nav page (bijection, tutorial leaves exempted), every
-published ``docs/*.md`` is in the nav (the check that would have caught this whole
-overhaul's bug class), and the hand-written ``docs/tutorials/README.md`` table
-stays in parity with the nav's tutorial pages (that table is **checked, not
-generated** — generating it would need a second per-page field).
+CE028 also checks that every nav page has a blurb and every blurb a nav page (tutorial
+leaves exempt), that every published ``docs/*.md`` is in the nav, and that the
+hand-written ``docs/tutorials/README.md`` table matches the nav's tutorial leaves
+(checked, not generated).
 
-Like CE027/CE029/CE030 this is not a ``BaseRule`` in the AST runner; it reasons
-over Markdown/YAML and is wired as
+Not a ``BaseRule``: it reasons over Markdown/YAML, and is wired as
 ``tests/test_custom_lint.py::TestCE028DocIndexParity``.
+
+Rationale: .claude/notes/lint-rules.md § CE028
 """
 
 from __future__ import annotations
