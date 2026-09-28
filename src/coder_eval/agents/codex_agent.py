@@ -11,6 +11,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    ProviderError,
     SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
@@ -274,6 +276,34 @@ _LOGIN_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".z
 _ZSH_PROFILE_NAMES = frozenset({".zshenv", ".zprofile", ".zshrc"})
 
 
+def _provider_error_from(payload: Any) -> ProviderError:
+    """Map a codex ``ErrorNotification`` payload onto a ``ProviderError``.
+
+    ``codexErrorInfo`` is either a bare category (enum) or a one-key object whose
+    key is the category and whose value may carry ``httpStatusCode``.
+    """
+    error = getattr(payload, "error", None)
+    kind: str | None = None
+    http_status: int | None = None
+    info = getattr(getattr(error, "codex_error_info", None), "root", None)
+    if isinstance(info, Enum):
+        kind = str(info.value)
+    elif hasattr(info, "model_dump"):
+        dumped = info.model_dump(by_alias=True, mode="json")
+        if len(dumped) == 1:
+            kind, body = next(iter(dumped.items()))
+            if isinstance(body, dict) and isinstance(body.get("httpStatusCode"), int):
+                http_status = body["httpStatusCode"]
+    return ProviderError(
+        at=datetime.now(),
+        message=str(getattr(error, "message", "") or ""),
+        kind=kind,
+        http_status=http_status,
+        will_retry=bool(getattr(payload, "will_retry", False)),
+        details=getattr(error, "additional_details", None),
+    )
+
+
 def _get_item_root(notification: Any) -> Any:
     """Extract the typed item root from a Codex SDK notification.
 
@@ -338,6 +368,7 @@ class _CodexTurnState:
         # Live pump scratch (set during streaming).
         self.turn_result: Any = None
         self.latest_token_usage: Any = None
+        self.provider_errors: list[ProviderError] = []
         self.agent_message_chunks: list[str] = []
         # Sequence per executable item, assigned at item/started and reused at
         # item/completed via this id->seq map.
@@ -546,7 +577,18 @@ class _CodexTurnState:
             self.on_token_usage_updated(notification)
         elif method == "turn/completed":
             return self.on_turn_completed(notification)
+        elif method == "error":
+            self.on_error(notification)
         return False
+
+    def on_error(self, notification: Any) -> None:
+        """Record a provider error; codex retries a stalled stream silently otherwise."""
+        err = _provider_error_from(notification.payload)
+        self.provider_errors.append(err)
+        self._agent._log.warning(
+            f"provider error (will_retry={err.will_retry}, kind={err.kind}, "
+            + f"http_status={err.http_status}): {err.message}"
+        )
 
     def on_item_started(self, notification: Any) -> None:
         """Emit ToolStartEvent + record the tool_use block for every tool-like item."""
@@ -765,6 +807,7 @@ class _CodexTurnState:
                 assistant_turn_count=1,
                 messages=self.messages,
                 num_turns=max(self.api_calls, 1),
+                provider_errors=list(self.provider_errors),
                 crashed=crashed,
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,

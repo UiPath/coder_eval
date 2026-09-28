@@ -224,6 +224,7 @@ class EventCollector:
             num_turns=end.num_turns,
             max_turns_exhausted=end.max_turns_exhausted,
             result_summary=end.result_summary,
+            provider_errors=end.provider_errors,
             crashed=end.crashed,
             crash_reason=end.crash_reason,
             harness_startup_ms=startup_ms,

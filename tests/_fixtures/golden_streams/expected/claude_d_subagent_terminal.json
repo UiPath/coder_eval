@@ -89,6 +89,7 @@
   ],
   "model_used": "mock-model",
   "num_turns": 1,
+  "provider_errors": [],
   "result_summary": {
     "is_error": false,
     "result": "done",

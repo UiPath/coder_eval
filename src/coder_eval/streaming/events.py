@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from coder_eval.models import (
     CommandTelemetry,
+    ProviderError,
     ResultSummary,
     TokenUsage,
     TranscriptMessage,
@@ -169,6 +170,7 @@ class AgentEndEvent(StreamEvent):
     num_turns: int | None = None
     max_turns_exhausted: bool = False
     result_summary: ResultSummary | None = None
+    provider_errors: list[ProviderError] = Field(default_factory=list)
     crashed: bool = False
     crash_reason: str | None = None
     duration_seconds: float = 0.0
