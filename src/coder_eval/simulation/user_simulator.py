@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.models import AgentKind, ApiRoute, SimulationConfig, parse_agent_config
+from coder_eval.simulation.utterance import extract_utterance
 
 
 if TYPE_CHECKING:
@@ -333,12 +334,15 @@ class UserSimulator:
         # Simulator emits one user utterance per call, so cap the inner loop at 1 turn.
         turn = await self._agent.communicate(prompt, max_turns=1)
         raw = turn.agent_output or ""
+        # agent_output is a tagged transcript (`[ASSISTANT] …` / `[RESULT - SUCCESS] …`
+        # repeating the same text), not the utterance. Send the agent the utterance.
+        utterance = extract_utterance(raw)
         usage = turn.token_usage
         input_tokens = usage.uncached_input_tokens if usage is not None else None
         output_tokens = usage.output_tokens if usage is not None else None
 
         stop_requested = self.config.stop_token in raw
-        cleaned = strip_stop_token(raw, self.config.stop_token) if stop_requested else raw.strip()
+        cleaned = strip_stop_token(utterance, self.config.stop_token) if stop_requested else utterance.strip()
 
         # The agent still needs SOMETHING to react to after the stop token is
         # stripped, and the dialog terminates on this turn anyway.

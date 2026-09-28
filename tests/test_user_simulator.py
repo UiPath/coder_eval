@@ -382,3 +382,30 @@ class TestLifecycle:
         await sim.start()
         assert not stub.started  # start() bails early when disabled
         await sim.stop()
+
+
+class TestTaggedTranscriptOutput:
+    """The real simulator is a ClaudeCodeAgent, whose ``agent_output`` is a tagged
+    transcript: the same text twice, under ``[ASSISTANT]`` and
+    ``[RESULT - SUCCESS]``. Plain-text stubs hid that every simulated-user turn
+    reached the coding agent in that raw form (seen in every simulated task of
+    adhoc-2026-09-28_16-14-30)."""
+
+    async def test_tagged_reply_reaches_the_agent_as_one_plain_utterance(self):
+        opener = "Hey! I need a flow that triages my inbox."
+        stub = TextStubAgent([f"[ASSISTANT] {opener}\n[RESULT - SUCCESS] {opener}"])
+        sim = await _make_started(
+            UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt=None, agent_override=stub)
+        )
+        r = await sim.next_user_message([])
+        assert r.text == opener
+        assert "[ASSISTANT]" in r.raw_text  # raw stays available for telemetry
+
+    async def test_tagged_stop_turn_is_detected_and_leaves_no_tags(self):
+        stub = TextStubAgent(["[ASSISTANT] <<<DONE>>>\n[RESULT - SUCCESS] <<<DONE>>>"])
+        sim = await _make_started(
+            UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start", agent_override=stub)
+        )
+        r = await sim.next_user_message([_pair("start", "Built it.")])
+        assert r.stop_requested is True
+        assert "[" not in r.text
