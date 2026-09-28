@@ -40,6 +40,7 @@
   ],
   "model_used": "mock-model",
   "num_turns": null,
+  "provider_errors": [],
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": null,
