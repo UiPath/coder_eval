@@ -26,6 +26,7 @@ from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
     ProviderCallCost,
+    ProviderError,
     TokenUsage,
     TranscriptMessage,
 )
@@ -415,6 +416,14 @@ class TurnRecord(BaseModel):
             "joined onto this turn by litellm_cost.apply_actual_cost. Empty on every other backend "
             "(the SDK reports cost/cache natively there). When present, total_cost_usd is the sum of "
             "these calls' cost_usd (the real bill), not the static rate-card estimate."
+        ),
+    )
+    provider_errors: list[ProviderError] = Field(
+        default_factory=list,
+        description=(
+            "Model-provider errors the agent's own client reported during this turn, in arrival "
+            "order, including ones it retried itself (will_retry=True). Filled by the codex "
+            "adapter from its `error` notification; empty on backends that do not surface them."
         ),
     )
     crashed: bool = Field(

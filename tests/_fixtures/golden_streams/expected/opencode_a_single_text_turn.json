@@ -40,6 +40,7 @@
   ],
   "model_used": "deepseek/deepseek-v4-pro",
   "num_turns": 1,
+  "provider_errors": [],
   "result_summary": {
     "is_error": false,
     "result": null,

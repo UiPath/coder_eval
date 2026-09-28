@@ -12,6 +12,7 @@
   "messages": [],
   "model_used": null,
   "num_turns": null,
+  "provider_errors": [],
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": null,

@@ -60,6 +60,7 @@
   ],
   "model_used": "gemini-3.5-flash",
   "num_turns": 1,
+  "provider_errors": [],
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": {

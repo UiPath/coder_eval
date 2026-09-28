@@ -138,6 +138,7 @@
   ],
   "model_used": "openrouter/moonshotai/kimi-k3",
   "num_turns": 3,
+  "provider_errors": [],
   "result_summary": {
     "is_error": false,
     "result": null,
