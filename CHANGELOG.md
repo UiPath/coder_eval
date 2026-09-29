@@ -2,6 +2,35 @@
 
 <!-- version list -->
 
+## v0.12.9 (2026-09-29)
+
+### Bug Fixes
+
+- **docker**: Mount plugins at /coder_eval/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **docker**: Mount plugins at /work/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Chores
+
+- **deps**: Bump pyjwt to 2.15.1 and ignore oauthlib CVE-2026-49265
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **deps**: Ignore oauthlib CVE-2026-49264 and drop the stale pyjwt ignore
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Refactoring
+
+- **docker**: Mount plugins under /work/plugins, not /coder_eval/plugins
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+
 ## v0.12.8 (2026-09-29)
 
 ### Bug Fixes
