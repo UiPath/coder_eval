@@ -18,6 +18,7 @@ from coder_eval import models
 from coder_eval.cli import app, run_task_internal_command
 from coder_eval.isolation.docker_runner import DockerRunner
 from coder_eval.models import (
+    CONTAINER_PLUGINS_DIR,
     AgentKind,
     ConfigLineageEntry,
     ContainerContext,
@@ -291,6 +292,36 @@ async def test_the_staged_task_yaml_says_tempdir(tmp_path: Path) -> None:
 
     staged, _ = load_task(input_dir / "task.yaml")
     assert staged.sandbox.driver == "tempdir"
+
+
+async def test_the_staged_task_yaml_points_plugins_at_their_container_mounts(tmp_path: Path) -> None:
+    # A relative plugin path resolves against the task-file dir on the host; the
+    # container gets the fixed mount path instead, since that host path (or its
+    # $VAR) need not exist inside. An unresolvable plugin is left as authored.
+    (tmp_path / "plugin" / "skills" / "demo").mkdir(parents=True)
+    plugins = [{"type": "local", "path": "plugin"}, {"type": "local", "path": "does/not/exist"}]
+    task = TaskDefinition.model_validate(
+        {
+            **_authored_docker_task().model_dump(),
+            "initial_prompt": "go",
+            "agent": {"type": "claude-code", "plugins": plugins},
+        }
+    )
+    rt = ResolvedTask(
+        task=task,
+        task_file=tmp_path / "t.yaml",
+        run_dir=tmp_path / "run",
+        variant_id="default",
+        original_task_id="staged",
+    )
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    await DockerRunner(rt)._stage_inputs(input_dir)
+
+    staged, _ = load_task(input_dir / "task.yaml")
+    assert [p["path"] for p in staged.agent.plugins] == [f"{CONTAINER_PLUGINS_DIR}/0", "does/not/exist"]
+    # The host-side task is untouched: argv rendering still needs the host path.
+    assert rt.task.agent.plugins[0]["path"] == "plugin"
 
 
 async def test_the_contract_carries_the_authored_sandbox(tmp_path: Path) -> None:
