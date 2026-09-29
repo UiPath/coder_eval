@@ -2730,3 +2730,88 @@ class TestTwoSpecGenerationContainingATool:
     def test_a_window_entirely_covered_by_its_tool_splits_zero_two_ways(self):
         published = self._published(window_ms=1000, tool_from_ms=0, tool_to_ms=1000, think_out=800, action_out=200)
         assert [m.generation_duration_ms for m in published] == [0.0, 0.0]
+
+
+class TestProviderErrorNotifications:
+    """Codex's `error` notification (incl. `willRetry`) reaches the TurnRecord.
+
+    Before this, `dispatch` dropped it: a provider stream that stalled for 9
+    minutes and was retried by codex read as pure model latency (coder_eval#151).
+    """
+
+    @staticmethod
+    def _state():
+        from coder_eval.agents.codex_agent import _CodexTurnState
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        collector = EventCollector()
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        st = _CodexTurnState(
+            agent,
+            emit=CompositeStreamCallback([collector]),
+            task_id="codex",
+            turn_id="codex-1",
+            collector=collector,
+            commands=[],
+            messages=[],
+            user_input="go",
+            iteration=1,
+            turn_start_time=time.monotonic(),
+        )
+        return st, collector
+
+    @staticmethod
+    def _notification(error: dict, *, will_retry: bool) -> SimpleNamespace:
+        from openai_codex.generated.v2_all import ErrorNotification
+
+        payload = ErrorNotification.model_validate(
+            {"error": error, "threadId": "t1", "turnId": "u1", "willRetry": will_retry}
+        )
+        return SimpleNamespace(method="error", payload=payload)
+
+    def test_retried_stream_error_is_recorded_with_kind_and_status(self):
+        from coder_eval.streaming.events import AgentEndStatus
+
+        st, collector = self._state()
+        note = self._notification(
+            {
+                "message": "stream disconnected before completion: idle timeout",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 504}},
+                "additionalDetails": "attempt 1/5",
+            },
+            will_retry=True,
+        )
+
+        assert st.dispatch(note) is False  # an error never ends the pump
+        st.finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="timeout")
+
+        record = collector.build_turn_record()
+        assert len(record.provider_errors) == 1
+        err = record.provider_errors[0]
+        assert err.will_retry is True
+        assert err.kind == "responseStreamDisconnected"
+        assert err.http_status == 504
+        assert err.details == "attempt 1/5"
+        assert "idle timeout" in err.message
+
+    def test_bare_category_and_missing_info(self):
+        from coder_eval.streaming.events import AgentEndStatus
+
+        st, collector = self._state()
+        st.dispatch(self._notification({"message": "slow down", "codexErrorInfo": "serverOverloaded"}, will_retry=True))
+        st.dispatch(self._notification({"message": "gave up"}, will_retry=False))
+        st.finalize(AgentEndStatus.COMPLETED)
+
+        errs = collector.build_turn_record().provider_errors
+        assert [(e.kind, e.http_status, e.will_retry) for e in errs] == [
+            ("serverOverloaded", None, True),
+            (None, None, False),
+        ]
+
+    def test_clean_turn_has_no_provider_errors(self):
+        from coder_eval.streaming.events import AgentEndStatus
+
+        st, collector = self._state()
+        st.finalize(AgentEndStatus.COMPLETED)
+        assert collector.build_turn_record().provider_errors == []

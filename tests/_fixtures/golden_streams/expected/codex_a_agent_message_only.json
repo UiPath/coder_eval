@@ -40,6 +40,7 @@
   ],
   "model_used": "gpt-5-codex",
   "num_turns": 1,
+  "provider_errors": [],
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": {

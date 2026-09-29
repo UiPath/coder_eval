@@ -210,7 +210,10 @@ token/cost budget breach, which fires only after every criterion is already scor
 cache buckets, captured proxy-side on the LiteLLM open-weight backend and rendered
 by the evalboard as a per-call table; empty on every other
 backend), `num_turns`, `max_turns_exhausted`,
-`result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
+`result_summary` (`{is_error, subtype, stop_reason, result}`), `provider_errors`
+(`list[ProviderError]` — `{at, message, kind, http_status, will_retry, details}`, one
+row per model-provider error the agent's own client reported, including errors it
+retried itself; filled by the codex adapter, empty on other backends), `crashed`,
 `crash_reason`.
 
 > **Token invariant.** Summing the four token buckets across `messages`

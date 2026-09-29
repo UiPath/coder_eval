@@ -134,6 +134,24 @@ class ProviderCallCost(BaseModel):
     output_tokens: int | None = Field(default=None, description="Completion tokens for this call.")
 
 
+class ProviderError(BaseModel):
+    """One model-provider error the agent's own client reported mid-turn.
+
+    Codex retries a stalled or failed provider stream internally and says so only
+    through its ``error`` notification (``willRetry``). Without this record a
+    9-minute provider stall reads as pure model latency.
+    """
+
+    at: datetime = Field(description="When the harness received the error notification.")
+    message: str = Field(description="The client's error message.")
+    kind: str | None = Field(
+        default=None, description="Client error category (codex `codexErrorInfo`), e.g. responseStreamDisconnected."
+    )
+    http_status: int | None = Field(default=None, description="Upstream HTTP status, when the client forwarded one.")
+    will_retry: bool = Field(description="True when the client retries the request itself after this error.")
+    details: str | None = Field(default=None, description="Extra detail the client attached, if any.")
+
+
 class ContentBlock(BaseModel):
     """One content block within a message, in emission order.
 

@@ -57,6 +57,7 @@
   ],
   "model_used": "openrouter/moonshotai/kimi-k3",
   "num_turns": 2,
+  "provider_errors": [],
   "result_summary": {
     "is_error": true,
     "result": "Pi error: provider returned 529 after 5 retries",
