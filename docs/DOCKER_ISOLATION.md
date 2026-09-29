@@ -361,9 +361,19 @@ reference window's posture above; neither contains an adversarial agent.
   read-write (a `:ro` mount rejects `rm` with EROFS). `prior.json` is kept: it is
   read later on the regrade path, and a regrade runs no agent so it is not a leak.
 
+- **Plugins mount at a fixed container path.** The `i`-th `agent.plugins[]` entry
+  is resolved on the host (a relative path against the task YAML's directory, `$VAR`
+  and `~` expanded) and mounted `:ro` at `/coder_eval/plugins/<i>`. The task YAML
+  staged into the container is rewritten to point at that path, so the in-container
+  agent loads the directory the host mounted, whatever form the authored path took
+  and whatever the container's cwd. (Before, the staged YAML kept the authored string:
+  a relative or `$VAR` path the container could not resolve loaded no skill, with only
+  a warning.) An entry that does not resolve to a host directory is neither mounted
+  nor rewritten.
+
 - **Auto-mounted plugin trees are default-deny masked.** An `agent.plugins[].path`
-  (or a `TemplateDirSource.path` that is itself a plugin root) is auto-mounted at
-  its host path `:ro` so the plugin loads. Eval material colocated under that tree
+  (at `/coder_eval/plugins/<i>`) or a `TemplateDirSource.path` that is itself a plugin
+  root (at its host path) is auto-mounted `:ro` so the plugin loads. Eval material colocated under that tree
   as siblings of the skills dir — sibling task YAMLs, reference solutions, test
   fixtures — would otherwise be readable. So the runner keeps the whole root
   mounted but layers an empty `--tmpfs` over every child dir OUTSIDE the keep-set

@@ -30,6 +30,7 @@ from coder_eval.models import (
     CONTAINER_GRADE_WORKSPACE,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_PLUGINS_DIR,
     CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
@@ -724,6 +725,17 @@ class DockerRunner:
         # Rationale: .claude/notes/orchestration.md § The host-side driver rewrite
         execution_sandbox = SandboxConfig.model_validate({**self.rt.task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
         execution_task = self.rt.task.model_copy(update={"sandbox": execution_sandbox})
+        # Point each mounted plugin at its container path; the host path (relative,
+        # $VAR, or absolute) need not exist inside the container.
+        plugin_mounts = self._plugin_mounts()
+        if plugin_mounts and execution_task.agent is not None:
+            plugins = [
+                {**plugin, "path": plugin_mounts[i][1]} if i in plugin_mounts else plugin
+                for i, plugin in enumerate(execution_task.agent.plugins or [])
+            ]
+            execution_task = execution_task.model_copy(
+                update={"agent": execution_task.agent.model_copy(update={"plugins": plugins})}
+            )
 
         def _dump_task_yaml() -> str:
             return yaml.safe_dump(execution_task.model_dump(mode="json"), sort_keys=False)
@@ -1236,13 +1248,34 @@ class DockerRunner:
             expanded = self.rt.task_file.parent / expanded
         return expanded.resolve()
 
-    def _append_auto_mounts(self, argv: list[str]) -> None:
-        """Bind-mount the plugin, template and system-prompt paths a task references, ``:ro`` at their host path.
+    def _plugin_mounts(self) -> dict[int, tuple[Path, str]]:
+        """``agent.plugins`` index -> (host dir, container path) for every plugin whose path resolves to a dir.
 
-        A plugin root also gets every non-skill child dir masked with an empty tmpfs. The
-        reference is deliberately NOT here: it has its own mount (``_reference_mount_args``).
+        Shared by ``_stage_inputs`` (rewrites the staged task.yaml) and
+        ``_append_auto_mounts`` (emits the binds), so the two cannot disagree.
         """
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        mounts: dict[int, tuple[Path, str]] = {}
+        for i, plugin in enumerate(plugins):
+            raw_path = plugin.get("path") if isinstance(plugin, dict) else None
+            if not raw_path:
+                continue
+            resolved = self._resolve_mount_path(raw_path)
+            if resolved.is_dir():
+                mounts[i] = (resolved, f"{CONTAINER_PLUGINS_DIR}/{i}")
+        return mounts
+
+    def _append_auto_mounts(self, argv: list[str]) -> None:
+        """Bind-mount the plugin, template and system-prompt paths a task references, ``:ro``.
+
+        Plugin ``i`` goes to ``CONTAINER_PLUGINS_DIR/i`` (see ``_plugin_mounts``); the
+        rest mount at their host path. A plugin root also gets every non-skill child dir
+        masked with an empty tmpfs. The reference is deliberately NOT here: it has its
+        own mount (``_reference_mount_args``).
+        """
+        # Host sources bound at their host path (dedupe), and every container dest bound.
         mounted: set[Path] = set()
+        dests: set[str] = set()
         # Warned, not refused: `plugin.path` / `reference.directory` /
         # `template_sources` are user-controlled strings, and legitimate uses exist.
         # Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
@@ -1251,9 +1284,25 @@ class DockerRunner:
         # Lazy: eval_material imports agents._skills, whose package imports this module.
         from coder_eval.isolation.eval_material import mask_dirs
 
-        # Masked dir -> its plugin root. Emitted only once every bind is known, so a
-        # nested plugin root's bind can win over its parent's mask of the same path.
-        mask_targets: dict[Path, Path] = {}
+        # Masked container dir -> its host plugin root. Emitted only once every bind is
+        # known, so a nested plugin root's bind can win over its parent's mask of the same path.
+        mask_targets: dict[str, Path] = {}
+
+        def _bind(target: Path, dest: str) -> None:
+            for sensitive in sensitive_sources:
+                if target == sensitive or sensitive in target.parents:
+                    logger.warning(
+                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
+                        target,
+                    )
+                    break
+            dests.add(dest)
+            argv.extend(["-v", f"{target}:{dest}:ro"])
+            masks = mask_dirs(target)
+            if not masks and (target / ".claude-plugin" / "plugin.json").is_file():
+                logger.warning(_MASK_STANDDOWN_WARNING, target)
+            for masked_dir in masks:
+                mask_targets.setdefault(str(Path(dest) / masked_dir.relative_to(target)), target)
 
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
@@ -1264,24 +1313,11 @@ class DockerRunner:
             target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
             if target in mounted or not target.is_dir():
                 return
-            for sensitive in sensitive_sources:
-                if target == sensitive or sensitive in target.parents:
-                    logger.warning(
-                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
-                        target,
-                    )
-                    break
             mounted.add(target)
-            argv.extend(["-v", f"{target}:{target}:ro"])
-            masks = mask_dirs(target)
-            if not masks and (target / ".claude-plugin" / "plugin.json").is_file():
-                logger.warning(_MASK_STANDDOWN_WARNING, target)
-            for masked_dir in masks:
-                mask_targets.setdefault(masked_dir, target)
+            _bind(target, str(target))
 
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+        for host_dir, dest in self._plugin_mounts().values():
+            _bind(host_dir, dest)
 
         from coder_eval.models import TemplateDirSource
 
@@ -1299,9 +1335,9 @@ class DockerRunner:
         # A deeper --tmpfs wins over the enclosing :ro bind regardless of argv order;
         # a mask that is also a bind would be a duplicate mount point, so the bind wins.
         for masked_dir, root in sorted(mask_targets.items()):
-            if masked_dir in mounted:
+            if masked_dir in dests:
                 continue
-            argv.extend(["--tmpfs", str(masked_dir)])
+            argv.extend(["--tmpfs", masked_dir])
             logger.warning(_MASK_WARNING, masked_dir, root)
 
     def _build_argv(
