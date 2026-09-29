@@ -39,17 +39,18 @@ On Windows, install into a short path. The interop binary sits deep inside `node
 
 | Variable | Purpose |
 |---|---|
-| `DELEGATE_ENV` | Cloud environment slug (`alpha` / `staging` / `production`), sent as the host's `env` init option. The host derives the backend URL from the org/tenant slugs. |
-| `DELEGATE_BACKEND_URL` | Pin the full agent-service URL directly (e.g. `https://cloud.uipath.com/<org>/<tenant>/delegate_`, or `http://localhost:5002` for a local backend). Wins over `DELEGATE_ENV` when both are set. |
+| `DELEGATE_SDK_ENV` | Cloud environment slug (`alpha` / `staging` / `production`), sent as the host's `env` init option. The host derives the backend URL from the org/tenant slugs. |
+| `BACKEND_URL` | Pin the full agent-service URL directly (e.g. `https://cloud.uipath.com/<org>/<tenant>/delegate_`, or `http://localhost:5002` for a local backend). The host reads it itself. Wins over `DELEGATE_SDK_ENV` when both are set. |
+| `INTEROP_URL` | Connect to an interop instance that is already running, instead of letting the SDK spawn its own. The host reads it itself. |
 
 ### 3. Authenticate
 
 Either:
 
-- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars. Each also accepts a `DELEGATE_`-namespaced spelling (`DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID`), which is checked first, because the bare names collide with what other tooling (npm, Vault, Terraform) commonly exports. When `DELEGATE_ENV` (not `DELEGATE_BACKEND_URL`) resolves the backend, also set `ORG_SLUG` and `TENANT_SLUG` (or `DELEGATE_ORG_SLUG` / `DELEGATE_TENANT_SLUG`). These are the human-readable org/tenant names, not the GUIDs. coder_eval exports all five values into the host's environment under the names the host reads (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`). Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `DELEGATE_BACKEND_URL` instead.
-- **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no `AUTH_TOKEN` is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `ORG_SLUG` / `TENANT_SLUG` are not needed.
+- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars. When `DELEGATE_SDK_ENV` (not `BACKEND_URL`) resolves the backend, also set `ORG_LOGICAL_NAME` and `TENANT_NAME`. These are the human-readable org/tenant names, not the GUIDs. All of these are the host's own names: coder_eval passes its environment to the host unchanged, and the host reads them itself. Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `BACKEND_URL` instead.
+- **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no `AUTH_TOKEN` is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `ORG_LOGICAL_NAME` / `TENANT_NAME` are not needed.
 
-The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh), `INTEROP_URL` and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
+The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh) and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
 
 For runs longer than the token's lifetime (about one hour), the host refreshes the token itself. It uses the token file when `DELEGATE_AUTH_TOKEN_FILE` (or the older `AUTH_TOKEN_FILE`) is set. If no token file is set, it uses the `LLMGW_CLIENT_ID` / `LLMGW_CLIENT_SECRET` / `LLMGW_URL` S2S pair. The agent's shell tools inherit the host's environment, so when a token file is set, coder_eval removes the `LLMGW_*` variables from that environment: the host does not need them, and the code under test cannot read the client secret. When no token file is set, the variables stay, because the host needs them to refresh the token.
 
@@ -67,7 +68,8 @@ coder-eval run tasks/delegate/hello_date_delegate.yaml --type delegate --model v
 agent:
   type: delegate
   model: virtuoso-1-5
-  effort: high        # low | medium | high | xhigh | max
+  sdk_options:
+    effort: high      # low | medium | high | xhigh | max
   project_id: invoice-approval  # client-side wiki-routing key; None means session-scoped wiki state
   session_id: abc-123           # pins the SDK session id a turn omits; project_id takes precedence
   enable_computer_use: false   # default; screen tools off, file/shell/Office/PDF unaffected
@@ -161,7 +163,7 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 1. **No multi-generation transcript splitting.** This agent builds one `AssistantMessage` per `communicate()` call, not one per backend round-trip. The host does send the signals a split needs (`isStepStart` on `message` events and per-round-trip `turnUsages` on `result`), but this agent does not use them yet.
 2. **`max_turns` is enforced by coder_eval, not by the host.** The host's `maxSteps` option on `send` does not stop the turn (confirmed live: `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true`), so this agent does not send it. See [Run-Limit Parity](HARNESS_PARITY.md).
 3. **Only three backend failures get a specific diagnosis.** A Cloudflare WAF block page is reported as a content-filter failure and is not retried: the same prompt or tool result is blocked again. An SSE connect timeout is reported as a connection failure and is retried. A session conflict ("A reply is already being generated") is retried in a new conversation. There is no first-response stall detection: a stalled turn ends at its turn timeout. Every other crash ends the turn as a retryable `AgentCrashError`.
-4. **No `sdk_options` passthrough.** Unlike Claude Code, there is no allowlisted escape hatch for arbitrary SDK fields — only `effort`, `project_id`, `session_id`, and `enable_computer_use` are exposed as typed config fields.
+4. **`sdk_options` accepts only `effort`.** Reasoning effort uses the same `sdk_options.effort` key as Claude Code, so `-D agent.sdk_options.effort=high` works for both agents. Any other key is a validation error. `project_id`, `session_id` and `enable_computer_use` are typed config fields.
 5. **`enable_computer_use: true` requires local permissions and is unavailable on Linux.** macOS needs Accessibility + Screen Recording grants; the SDK throws unconditionally on Linux when this is enabled.
 
 ## Testing

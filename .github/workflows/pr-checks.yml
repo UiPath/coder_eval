@@ -1373,16 +1373,15 @@ jobs:
         if: steps.gate.outputs.present == 'true'
         env:
           DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
-          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          DELEGATE_SDK_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
           ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          # Forwarded into `auth.organizationName` / `auth.tenantName` by
-          # DelegateAgent._build_init_options (see .claude/notes/agents.md §
-          # Delegate agent) — needed alongside the GUIDs above whenever
-          # `environment` (rather than `backendUrl`) resolves the backend.
-          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          # Read by the delegate-stdio host itself — needed alongside the GUIDs
+          # above whenever DELEGATE_SDK_ENV (rather than BACKEND_URL) resolves
+          # the backend (see .claude/notes/agents.md § Delegate agent).
+          ORG_LOGICAL_NAME: ${{ secrets.DELEGATE_ORG_SLUG }}
+          TENANT_NAME: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: .venv/bin/coder-eval run tasks/delegate/fizzbuzz_delegate.yaml --run-dir runs/delegate-live
 
       - name: Verify Delegate live run PASSED
@@ -1406,12 +1405,12 @@ jobs:
         if: steps.gate.outputs.present == 'true'
         env:
           DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
-          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          DELEGATE_SDK_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
           ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          ORG_LOGICAL_NAME: ${{ secrets.DELEGATE_ORG_SLUG }}
+          TENANT_NAME: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: |
           mkdir -p tmp
           .venv/bin/pytest tests/test_delegate_agent_live.py \

@@ -759,11 +759,16 @@ gone; git history has them.
 
 **Auth goes through the host's environment, not the init options.** The host reads `AUTH_TOKEN` /
 `TENANT_ID` / `ORG_ID` and, for an `env`-derived backend URL, `ORG_LOGICAL_NAME` / `TENANT_NAME`
-from its own environment. coder_eval keeps its user-facing names (`DELEGATE_`-namespaced first, then
-`AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` / `TENANT_SLUG`) and `_host_auth_env` re-exports
-them under the host's names. Confirmed live with no saved login: with the slugs the turn runs; without
-them init fails with `env="alpha" requires org/tenant slugs`. `DELEGATE_ENV` becomes the `env` init
-option; `DELEGATE_BACKEND_URL` becomes `backendUrl`, which the host ranks above `env`.
+from its own environment, and `BACKEND_URL` / `INTEROP_URL` too. coder_eval uses the host's names
+as its user-facing names and passes its environment through unchanged, so there is one set of names
+and no re-export table to drift, and `coder_eval_uipath` pipelines use the same names. Confirmed live with no saved login: with the slugs the
+turn runs; without them init fails with `env="alpha" requires org/tenant slugs`. The env slug is the
+one value the host takes only as an init option, so `DELEGATE_SDK_ENV` becomes `env`.
+
+**Effort rides `sdk_options.effort`.** It is the same key as Claude Code, so one
+`-D agent.sdk_options.effort=...` drives both agents, and the reports' Effort row reads it from
+`get_sdk_options()`. The `-D` gate admits any registered kind whose config class declares
+`sdk_options`; `DelegateAgentConfig` validates the keys against the host options it forwards.
 
 **`max_turns` stays client-side.** The host accepts `maxSteps` on `send`, but it does not stop the
 turn: live, `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true` in the `result`.

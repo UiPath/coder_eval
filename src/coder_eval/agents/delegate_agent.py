@@ -88,15 +88,6 @@ logger = logging.getLogger(__name__)
 _HOST_PACKAGE = "@uipath/delegate-stdio"
 _HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
 
-_HOST_AUTH_ENV: tuple[tuple[str, str], ...] = (
-    ("AUTH_TOKEN", "AUTH_TOKEN"),
-    ("TENANT_ID", "TENANT_ID"),
-    ("ORG_ID", "ORG_ID"),
-    ("ORG_LOGICAL_NAME", "ORG_SLUG"),
-    ("TENANT_NAME", "TENANT_SLUG"),
-)
-"""``(name the host reads, name coder_eval reads via _env)`` for each auth var."""
-
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "allowed_tools",
     "disallowed_tools",
@@ -124,22 +115,6 @@ _FAILED_TOOL_STATUSES = frozenset({"failed", "interrupted"})
 
 def _tool_id(event: dict[str, Any]) -> str:
     return str(event.get("toolId") or "")
-
-
-def _env(bare_name: str) -> str | None:
-    """Read a ``DELEGATE_``-namespaced auth var, falling back to the bare name.
-
-    The bare spellings (``AUTH_TOKEN``, ``TENANT_ID``, ...) collide with names
-    other tooling (npm, Vault, Terraform) commonly exports, so the namespaced
-    spelling is checked first. ``_host_auth_env`` re-exports the value under
-    the name the host itself reads.
-    """
-    return os.environ.get(f"DELEGATE_{bare_name}") or os.environ.get(bare_name)
-
-
-def _host_auth_env() -> dict[str, str]:
-    """The auth vars to set in the host's environment, keyed by the host's names."""
-    return {host_name: value for host_name, ours in _HOST_AUTH_ENV if (value := _env(ours))}
 
 
 _GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
@@ -448,7 +423,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         # Respect an operator's own telemetry choice; only default it off.
         env.setdefault("DELEGATE_TELEMETRY_DISABLED", "1")
-        env.update(_host_auth_env())
         if stripped := _strip_redundant_gateway_creds(env):
             logger.debug("delegate: a token file is configured; removed %s from the host env", ", ".join(stripped))
 
@@ -497,18 +471,14 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         }
         if self.config.model:
             options["model"] = self.config.model
-        if self.config.effort:
-            options["effort"] = self.config.effort
+        options.update(self.config.sdk_options)
         if self.config.project_id:
             options["projectId"] = self.config.project_id
         if self.config.session_id:
             options["sessionId"] = self.config.session_id
         if self._env_path_prepend:
             options["shellPathPrepend"] = list(self._env_path_prepend)
-        backend_url = os.environ.get("DELEGATE_BACKEND_URL")
-        if backend_url:
-            options["backendUrl"] = backend_url
-        environment = os.environ.get("DELEGATE_ENV")
+        environment = os.environ.get("DELEGATE_SDK_ENV")
         if environment:
             options["env"] = environment
         # list[LocalPluginConfig] is not list[dict[str, Any]] under list invariance.
@@ -598,21 +568,21 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         await self._cancel_drain_tasks()
         self._process = None
 
+    def get_sdk_options(self) -> dict[str, Any] | None:
+        return dict(self.config.sdk_options) or None
+
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             **super().get_environment_info(),
             "delegate_model": self.config.model,
         }
-        if self.config.effort:
-            info["delegate_effort"] = self.config.effort
         if self.config.enable_computer_use:
             info["delegate_enable_computer_use"] = True
-        # DELEGATE_BACKEND_URL wins over DELEGATE_ENV when both are set (see
-        # _build_init_options/docs/agents/DELEGATE.md), so recording delegate_env
-        # here too would assert a routing decision the SDK never made. Host only
-        # (never the full URL, which can carry embedded credentials).
-        backend_url = os.environ.get("DELEGATE_BACKEND_URL")
-        environment = os.environ.get("DELEGATE_ENV")
+        # The host ranks BACKEND_URL over the env slug (see docs/agents/DELEGATE.md),
+        # so recording delegate_env here too would assert a routing decision the SDK
+        # never made. Host only (never the full URL, which can carry embedded credentials).
+        backend_url = os.environ.get("BACKEND_URL")
+        environment = os.environ.get("DELEGATE_SDK_ENV")
         if backend_url:
             info["delegate_backend_url_host"] = urlparse(backend_url).hostname
         elif environment:

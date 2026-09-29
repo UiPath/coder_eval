@@ -219,10 +219,18 @@ class TestStart:
             await agent.start(str(tmp_path))
 
     async def test_effort_and_project_id_forwarded(self, patch_exec, tmp_path):
-        _agent, proc = await _started_agent(patch_exec, [], tmp_path, effort="high", project_id="proj-1")
+        agent, proc = await _started_agent(
+            patch_exec, [], tmp_path, sdk_options={"effort": "high"}, project_id="proj-1"
+        )
         options = proc.stdin.written[0]["options"]
         assert options["effort"] == "high"
         assert options["projectId"] == "proj-1"
+        assert agent.get_sdk_options() == {"effort": "high"}
+
+    async def test_no_sdk_options_reports_none(self, patch_exec, tmp_path):
+        agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        assert "effort" not in proc.stdin.written[0]["options"]
+        assert agent.get_sdk_options() is None
 
     async def test_enable_computer_use_default_false(self, patch_exec, tmp_path):
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
@@ -241,10 +249,20 @@ class TestStart:
         await _started_agent(patch_exec, [], tmp_path, system_prompt="be nice")
         assert any("has no Delegate SDK equivalent" in r.message for r in caplog.records)
 
-    async def test_delegate_env_becomes_the_env_option(self, patch_exec, tmp_path, monkeypatch):
-        monkeypatch.setenv("DELEGATE_ENV", "alpha")
+    async def test_delegate_sdk_env_becomes_the_env_option(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("DELEGATE_SDK_ENV", "alpha")
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
         assert proc.stdin.written[0]["options"]["env"] == "alpha"
+
+    async def test_backend_url_is_left_for_the_host_to_read(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("BACKEND_URL", "https://user:secret@backend.example/delegate_")
+        monkeypatch.setenv("DELEGATE_SDK_ENV", "alpha")
+        agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        assert "backendUrl" not in proc.stdin.written[0]["options"]
+        assert proc.spawn_kwargs["env"]["BACKEND_URL"] == "https://user:secret@backend.example/delegate_"
+        info = agent.get_environment_info()
+        assert info["delegate_backend_url_host"] == "backend.example"
+        assert "delegate_env" not in info
 
     async def test_skills_enabled_only_with_a_plugin(self, patch_exec, tmp_path):
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
@@ -259,21 +277,21 @@ class TestStart:
         assert options["enableSkills"] is True
         assert options["bundledSkillsPath"] == str(plugin_dir / "skills")
 
-    async def test_auth_is_exported_under_the_hosts_own_env_names(self, patch_exec, tmp_path, monkeypatch):
+    async def test_auth_reaches_the_host_under_its_own_env_names(self, patch_exec, tmp_path, monkeypatch):
         """The host reads auth from its environment, so nothing auth-shaped goes into init options."""
-        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "tok-1")
-        monkeypatch.setenv("AUTH_TOKEN", "stray-npm-token")
-        monkeypatch.setenv("TENANT_ID", "tenant-guid")
-        monkeypatch.setenv("ORG_ID", "org-guid")
-        monkeypatch.setenv("ORG_SLUG", "my-org")
-        monkeypatch.setenv("DELEGATE_TENANT_SLUG", "my-tenant")
+        auth = {
+            "AUTH_TOKEN": "tok-1",
+            "TENANT_ID": "tenant-guid",
+            "ORG_ID": "org-guid",
+            "ORG_LOGICAL_NAME": "my-org",
+            "TENANT_NAME": "my-tenant",
+        }
+        for name, value in auth.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "old-namespaced-token")
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
         env = proc.spawn_kwargs["env"]
-        assert env["AUTH_TOKEN"] == "tok-1"
-        assert env["TENANT_ID"] == "tenant-guid"
-        assert env["ORG_ID"] == "org-guid"
-        assert env["ORG_LOGICAL_NAME"] == "my-org"
-        assert env["TENANT_NAME"] == "my-tenant"
+        assert {name: env[name] for name in auth} == auth
         assert "auth" not in proc.stdin.written[0]["options"]
 
     @pytest.mark.parametrize(

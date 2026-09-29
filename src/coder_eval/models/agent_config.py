@@ -393,6 +393,9 @@ class PiAgentConfig(BaseAgentConfig):
     )
 
 
+_DELEGATE_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})
+
+
 class DelegateAgentConfig(BaseAgentConfig):
     """Delegate agent configuration (UiPath Autopilot's Delegate agent).
 
@@ -413,13 +416,13 @@ class DelegateAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.DELEGATE]  # type: ignore[assignment]
 
-    effort: str | None = Field(
-        default=None,
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
         description=(
-            "Reasoning-effort tier forwarded to the backend as-is (documented values: "
-            "low/medium/high/xhigh/max). Not validated against a closed set here — the SDK "
-            "itself ignores a value it does not recognize, and a strict Literal would reject a "
-            "tier a future SDK release adds."
+            "Pass-through dict of delegate-stdio init options that coder_eval does not own "
+            f"directly. Allowed keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)}. 'effort' is the "
+            "reasoning-effort tier (documented values: low/medium/high/xhigh/max), forwarded "
+            "as-is: the SDK ignores a value it does not recognize."
         ),
     )
     project_id: str | None = Field(
@@ -447,6 +450,17 @@ class DelegateAgentConfig(BaseAgentConfig):
             "grants that a CI runner does not have, and throws unconditionally on Linux."
         ),
     )
+
+    @field_validator("sdk_options")
+    @classmethod
+    def _validate_sdk_options_keys(cls, v: dict[str, Any]) -> dict[str, Any]:
+        unknown = sorted(set(v) - _DELEGATE_SDK_OPTION_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"sdk_options keys {unknown} are not delegate-stdio init options coder_eval forwards "
+                + f"(valid keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)})"
+            )
+        return v
 
 
 class NoneAgentConfig(BaseAgentConfig):
