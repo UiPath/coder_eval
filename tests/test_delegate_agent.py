@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from coder_eval.agents import delegate_agent as agent_module
-from coder_eval.agents.delegate_agent import DelegateAgent, _resolve_sdk_entry
+from coder_eval.agents.delegate_agent import DelegateAgent, _resolve_host_bundle
 from coder_eval.agents.registry import AgentRegistry, create_agent
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, DelegateAgentConfig
@@ -25,6 +26,29 @@ from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStar
 
 def _line(obj: dict[str, Any]) -> bytes:
     return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+def _ev(**event: Any) -> bytes:
+    """One ``event`` frame wrapping an SDK event, as ``delegate-stdio`` writes it."""
+    return _line({"type": "event", "event": event})
+
+
+def _result(**fields: Any) -> bytes:
+    return _line({"type": "result", **fields})
+
+
+def _tool_call(tool_id: str, name: str = "shell", **args: Any) -> bytes:
+    return _ev(type="tool_call", toolId=tool_id, toolName=name, toolArgs=args, toolStatus="pending")
+
+
+def _tool_result(tool_id: str, content: str = "ok", *, status: str = "completed") -> bytes:
+    return _ev(
+        type="tool_result",
+        toolId=tool_id,
+        toolName="shell",
+        toolResult={"responseType": "success", "content": content},
+        toolStatus=status,
+    )
 
 
 class _FakeStreamReader:
@@ -68,6 +92,8 @@ class _FakeProcess:
         self.returncode: int | None = None
         self.pid = 4242
         self._killed = False
+        self.spawn_args: tuple[Any, ...] = ()
+        self.spawn_kwargs: dict[str, Any] = {}
 
     async def wait(self) -> int:
         while self.returncode is None:
@@ -96,11 +122,13 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
         proc = _FakeProcess(stdout_lines, stderr_lines, hang_after=hang_after)
 
         async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+            proc.spawn_args = args
+            proc.spawn_kwargs = kwargs
             return proc
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/node")
-        monkeypatch.setattr(agent_module, "_resolve_sdk_entry", lambda: agent_module._HOST_SCRIPT)
+        monkeypatch.setattr(agent_module, "_resolve_host_bundle", lambda: Path("/opt/delegate_stdio.mjs"))
         # raising=False: os.killpg does not exist on Windows, where the sweep is a
         # no-op -- the stub must still install so the fixture works on every platform.
         monkeypatch.setattr(os, "killpg", lambda pgid, sig: None, raising=False)
@@ -122,42 +150,42 @@ async def _started_agent(
     return agent, proc
 
 
-class TestResolveSdkEntry:
+class TestResolveHostBundle:
     def test_explicit_path_env_var(self, tmp_path, monkeypatch):
-        entry = tmp_path / "index.mjs"
-        entry.write_text("export const DelegateAgent = class {};")
-        monkeypatch.setenv("DELEGATE_SDK_PATH", str(entry))
-        assert _resolve_sdk_entry() == entry.resolve()
+        entry = tmp_path / "delegate_stdio.mjs"
+        entry.write_text("#!/usr/bin/env node")
+        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(entry))
+        assert _resolve_host_bundle() == entry.resolve()
 
     def test_explicit_path_missing_file_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("DELEGATE_SDK_PATH", str(tmp_path / "nope.mjs"))
+        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(tmp_path / "nope.mjs"))
         with pytest.raises(AgentConfigError, match="does not point to a file"):
-            _resolve_sdk_entry()
+            _resolve_host_bundle()
 
     def test_node_modules_override(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
-        entry = tmp_path / "node_modules" / "@uipath" / "delegate-sdk" / "dist" / "index.mjs"
+        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
+        monkeypatch.setenv("DELEGATE_STDIO_NODE_MODULES", str(tmp_path))
+        entry = tmp_path / "node_modules" / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
         entry.parent.mkdir(parents=True)
-        entry.write_text("export const DelegateAgent = class {};")
-        assert _resolve_sdk_entry() == entry.resolve()
+        entry.write_text("#!/usr/bin/env node")
+        assert _resolve_host_bundle() == entry.resolve()
 
     def test_node_modules_override_missing_raises(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
+        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
+        monkeypatch.setenv("DELEGATE_STDIO_NODE_MODULES", str(tmp_path))
         with pytest.raises(AgentConfigError, match="not found"):
-            _resolve_sdk_entry()
+            _resolve_host_bundle()
 
     def test_no_config_and_not_found_raises_with_search_list(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.delenv("DELEGATE_SDK_NODE_MODULES", raising=False)
+        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
+        monkeypatch.delenv("DELEGATE_STDIO_NODE_MODULES", raising=False)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))
         # A real npm install under the developer's actual home directory must
         # not make this test flaky -- pin every search root to tmp_path.
         monkeypatch.setattr(agent_module, "_candidate_install_roots", lambda: [tmp_path])
         with pytest.raises(AgentConfigError, match="Searched the cwd"):
-            _resolve_sdk_entry()
+            _resolve_host_bundle()
 
 
 class TestStart:
@@ -173,12 +201,14 @@ class TestStart:
         sent = proc.stdin.written[0]
         assert sent["cmd"] == "init"
         assert sent["options"]["workingDirectory"] == str(tmp_path)
+        assert proc.spawn_args == ("node", str(Path("/opt/delegate_stdio.mjs")))
 
     async def test_init_error_raises_agent_config_error(self, patch_exec, tmp_path):
-        patch_exec([_line({"type": "init_error", "message": "backendUrl is required"})])
+        patch_exec([_line({"type": "error", "message": "backendUrl is required", "stack": "Error: ..."})])
         agent = DelegateAgent(_config())
         with pytest.raises(AgentConfigError, match="backendUrl is required"):
             await agent.start(str(tmp_path))
+        assert agent._process is None
 
     async def test_eof_during_init_raises_crash(self, patch_exec, tmp_path):
         patch_exec([])  # EOF immediately
@@ -209,76 +239,109 @@ class TestStart:
         await _started_agent(patch_exec, [], tmp_path, system_prompt="be nice")
         assert any("has no Delegate SDK equivalent" in r.message for r in caplog.records)
 
-    async def test_auth_token_forwards_ids_but_not_slugs_by_default(self, patch_exec, tmp_path, monkeypatch):
-        monkeypatch.setenv("AUTH_TOKEN", "tok-1")
-        monkeypatch.setenv("TENANT_ID", "tenant-guid")
-        monkeypatch.setenv("ORG_ID", "org-guid")
-        monkeypatch.delenv("ORG_SLUG", raising=False)
-        monkeypatch.delenv("TENANT_SLUG", raising=False)
+    async def test_delegate_env_becomes_the_env_option(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("DELEGATE_ENV", "alpha")
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        auth = proc.stdin.written[0]["options"]["auth"]
-        assert auth == {"accessToken": "tok-1", "tenantId": "tenant-guid", "organizationId": "org-guid"}
+        assert proc.stdin.written[0]["options"]["env"] == "alpha"
 
-    async def test_org_and_tenant_slug_forwarded_into_auth(self, patch_exec, tmp_path, monkeypatch):
-        """Regression test: the SDK's `environment` resolution reads
-        organizationName/tenantName off the `auth` object it's given, NOT
-        ORG_SLUG/TENANT_SLUG from process.env directly (confirmed live against
-        the installed @uipath/delegate-sdk) -- so these two env vars must be
-        translated into `auth` fields here, or `environment: "alpha"` fails
-        init with "--env alpha needs org/tenant slugs" even with a valid
-        AUTH_TOKEN/TENANT_ID/ORG_ID triple.
-        """
-        monkeypatch.setenv("AUTH_TOKEN", "tok-1")
+    async def test_skills_enabled_only_with_a_plugin(self, patch_exec, tmp_path):
+        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        assert proc.stdin.written[0]["options"]["enableSkills"] is False
+
+        plugin_dir = tmp_path / "plugin"
+        plugin_dir.mkdir()
+        _agent, proc = await _started_agent(
+            patch_exec, [], tmp_path, plugins=[{"type": "local", "path": str(plugin_dir)}]
+        )
+        options = proc.stdin.written[0]["options"]
+        assert options["enableSkills"] is True
+        assert options["bundledSkillsPath"] == str(plugin_dir / "skills")
+
+    async def test_auth_is_exported_under_the_hosts_own_env_names(self, patch_exec, tmp_path, monkeypatch):
+        """The host reads auth from its environment, so nothing auth-shaped goes into init options."""
+        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "tok-1")
+        monkeypatch.setenv("AUTH_TOKEN", "stray-npm-token")
         monkeypatch.setenv("TENANT_ID", "tenant-guid")
         monkeypatch.setenv("ORG_ID", "org-guid")
         monkeypatch.setenv("ORG_SLUG", "my-org")
-        monkeypatch.setenv("TENANT_SLUG", "my-tenant")
+        monkeypatch.setenv("DELEGATE_TENANT_SLUG", "my-tenant")
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        auth = proc.stdin.written[0]["options"]["auth"]
-        assert auth == {
-            "accessToken": "tok-1",
-            "tenantId": "tenant-guid",
-            "organizationId": "org-guid",
-            "organizationName": "my-org",
-            "tenantName": "my-tenant",
-        }
+        env = proc.spawn_kwargs["env"]
+        assert env["AUTH_TOKEN"] == "tok-1"
+        assert env["TENANT_ID"] == "tenant-guid"
+        assert env["ORG_ID"] == "org-guid"
+        assert env["ORG_LOGICAL_NAME"] == "my-org"
+        assert env["TENANT_NAME"] == "my-tenant"
+        assert "auth" not in proc.stdin.written[0]["options"]
 
 
 class TestCommunicate:
     async def test_happy_path_text_and_tool(self, patch_exec, tmp_path):
         events = [
-            _line({"type": "thinking", "content": "let me think"}),
-            _line({"type": "message", "content": "here is my answer"}),
-            _line({"type": "tool_call", "toolName": "Bash", "toolId": "tool-1", "input": {"command": "ls"}}),
-            _line({"type": "tool_result", "toolId": "tool-1", "output": "file.txt"}),
-            _line({"type": "send_ok", "result": "here is my answer", "sessionId": "sess-1"}),
+            _ev(type="session_start", sessionId="sess-1"),
+            _ev(type="thinking", content="let me think"),
+            _tool_call("tool-1", "ExecutePowershellCommand", command="ls"),
+            _tool_result("tool-1", "file.txt"),
+            _ev(type="thinking", content=""),
+            _ev(type="message", content="here is my answer", isStepStart=True),
+            _ev(type="done", sessionId="sess-1"),
+            _result(response="here is my answer", sessionId="sess-2", model="virtuoso-1-5"),
         ]
         agent, proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("do something")
 
         assert record.agent_output == "here is my answer"
+        assert record.model_used == "virtuoso-1-5"
         assert not record.crashed
         assert len(record.commands) == 1
-        assert record.commands[0].tool_name == "Bash"
-        assert record.commands[0].result_status == "success"
+        command = record.commands[0]
+        assert command.tool_name == "ExecutePowershellCommand"
+        assert command.parameters == {"command": "ls"}
+        assert command.result_status == "success"
+        assert command.result_summary == "file.txt"
         sent = proc.stdin.written[1]
         assert sent == {"cmd": "send", "prompt": "do something", "sessionId": None}
-        # Session id from send_ok is remembered for the NEXT turn.
-        assert agent._session_id == "sess-1"
+        # The result's session id is remembered for the NEXT turn.
+        assert agent._session_id == "sess-2"
+
+    async def test_streamed_message_deltas_form_one_text_block(self, patch_exec, tmp_path):
+        events = [
+            _ev(type="message", content="P", isStepStart=True),
+            _ev(type="message", content="ONG", isStepStart=False),
+            _result(response="PONG"),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        (message,) = record.messages
+        text_blocks = [b for b in message.content_blocks if b.block_type == "text"]
+        assert [b.text for b in text_blocks] == ["PONG"]
+        assert record.assistant_turn_count == 1
+
+    async def test_turn_usages_length_is_the_call_count(self, patch_exec, tmp_path):
+        usage = {"input_tokens": 1, "output_tokens": 1}
+        events = [
+            _tool_call("a"),
+            _tool_result("a"),
+            _ev(type="message", content="done", isStepStart=True),
+            _result(response="done", usage=usage, turnUsages=[usage, usage, usage]),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        assert record.num_turns == 3
 
     async def test_send_error_raises_crash(self, patch_exec, tmp_path):
-        events = [_line({"type": "send_error", "message": "network blip"})]
-        agent, _ = await _started_agent(patch_exec, events, tmp_path)
-        with pytest.raises(AgentCrashError, match="network blip"):
+        events = [
+            _ev(type="error", error="There was a problem with your request."),
+            _ev(type="done", sessionId="s"),
+            _line({"type": "error", "message": "Delegate backend error: HTTP 422", "stack": "Error: ..."}),
+        ]
+        agent, proc = await _started_agent(patch_exec, events, tmp_path)
+        with pytest.raises(AgentCrashError, match="HTTP 422"):
             await agent.communicate("hi")
         assert agent.pending_turn is not None
         assert agent.pending_turn.crashed is True
-
-    async def test_fatal_raises_crash(self, patch_exec, tmp_path):
-        events = [_line({"type": "fatal", "message": "uncaught exception: boom"})]
-        agent, _ = await _started_agent(patch_exec, events, tmp_path)
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("hi")
+        assert proc._killed
+        assert agent._process is None
 
     async def test_eof_mid_turn_raises_crash(self, patch_exec, tmp_path):
         agent, _ = await _started_agent(patch_exec, [], tmp_path)
@@ -288,7 +351,7 @@ class TestCommunicate:
     async def test_non_json_stdout_line_is_skipped_not_fatal(self, patch_exec, tmp_path):
         events = [
             b"[backendUrl] Module loaded - VITE_USE_CLOUD_URL: undefined\n",
-            _line({"type": "send_ok", "result": "done"}),
+            _result(response="done"),
         ]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
@@ -296,9 +359,9 @@ class TestCommunicate:
 
     async def test_tool_error_marks_error_status(self, patch_exec, tmp_path):
         events = [
-            _line({"type": "tool_call", "toolName": "Bash", "toolId": "t1", "input": {}}),
-            _line({"type": "tool_result", "toolId": "t1", "error": "command not found"}),
-            _line({"type": "send_ok", "result": "done"}),
+            _tool_call("t1"),
+            _tool_result("t1", "command not found", status="failed"),
+            _result(response="done"),
         ]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
@@ -306,18 +369,15 @@ class TestCommunicate:
         assert record.commands[0].error_message == "command not found"
 
     async def test_orphaned_tool_call_is_force_closed(self, patch_exec, tmp_path):
-        events = [
-            _line({"type": "tool_call", "toolName": "Bash", "toolId": "t1", "input": {}}),
-            _line({"type": "send_ok", "result": "done"}),
-        ]
+        events = [_tool_call("t1"), _result(response="done")]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
         assert record.commands[0].result_status == "unknown"
 
     async def test_cooperative_stop_ends_cleanly(self, patch_exec, tmp_path):
         events = [
-            _line({"type": "message", "content": "partial"}),
-            _line({"type": "message", "content": "more"}),
+            _ev(type="message", content="partial", isStepStart=True),
+            _ev(type="message", content="more", isStepStart=False),
         ]
         agent, proc = await _started_agent(patch_exec, events, tmp_path)
         calls = {"n": 0}
@@ -332,18 +392,18 @@ class TestCommunicate:
         assert agent._process is None  # dropped so the next turn respawns
 
     async def test_cooperative_stop_then_next_turn_respawns_and_completes(self, patch_exec, tmp_path):
-        events = [_line({"type": "message", "content": "partial"})]
+        events = [_ev(type="message", content="partial", isStepStart=True)]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
 
         await agent.communicate("hi", should_stop=lambda: True)
 
-        patch_exec([_line({"type": "init_ok"}), _line({"type": "send_ok", "result": "resumed cleanly"})])
+        patch_exec([_line({"type": "init_ok"}), _result(response="resumed cleanly")])
         record = await agent.communicate("hi again")
         assert record.agent_output == "resumed cleanly"
         assert record.crashed is False
 
     async def test_should_stop_not_polled_means_full_completion(self, patch_exec, tmp_path):
-        events = [_line({"type": "send_ok", "result": "done"})]
+        events = [_result(response="done")]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
         assert record.agent_output == "done"
@@ -376,18 +436,14 @@ class TestCommunicate:
 
         # A fresh host is spawned for the NEXT turn -- no cross-wiring with
         # the abandoned "send" from the timed-out one.
-        patch_exec([_line({"type": "init_ok"}), _line({"type": "send_ok", "result": "clean turn"})])
+        patch_exec([_line({"type": "init_ok"}), _result(response="clean turn")])
         record = await agent.communicate("hi again")
         assert record.agent_output == "clean turn"
 
     @staticmethod
     def _round_trip(n: int) -> list[bytes]:
         """One backend round-trip: an empty reply, then its tool call and result."""
-        return [
-            _line({"type": "message", "content": ""}),
-            _line({"type": "tool_call", "toolId": f"t{n}", "toolName": "shell", "input": {}}),
-            _line({"type": "tool_result", "toolId": f"t{n}", "output": "ok"}),
-        ]
+        return [_ev(type="message", content="", isStepStart=True), _tool_call(f"t{n}"), _tool_result(f"t{n}")]
 
     async def test_max_turns_exhausted(self, patch_exec, tmp_path):
         events = [*self._round_trip(0), *self._round_trip(1), *self._round_trip(2)]
@@ -401,10 +457,10 @@ class TestCommunicate:
         """The SDK streams a reply as several message events; they are one round-trip."""
         events = [
             *self._round_trip(0),
-            _line({"type": "thinking", "content": "wrap up"}),
-            _line({"type": "message", "content": "all "}),
-            _line({"type": "message", "content": "done"}),
-            _line({"type": "send_ok", "result": "all done"}),
+            _ev(type="thinking", content="wrap up"),
+            _ev(type="message", content="all ", isStepStart=True),
+            _ev(type="message", content="done", isStepStart=False),
+            _result(response="all done"),
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
@@ -414,12 +470,8 @@ class TestCommunicate:
     async def test_max_turns_stops_a_tool_only_reply_before_its_tool_runs(self, patch_exec, tmp_path):
         """A tool-only reply streams no text event, only its tool call."""
         events = [
-            _line({"type": "message", "content": "on it"}),
-            *[
-                _line({"type": kind, "toolId": f"t{n}", "toolName": "shell", "output": "ok"})
-                for n in range(3)
-                for kind in ("tool_call", "tool_result")
-            ],
+            _ev(type="message", content="on it", isStepStart=True),
+            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
@@ -429,13 +481,13 @@ class TestCommunicate:
 
     async def test_max_turns_counts_a_batched_reply_once(self, patch_exec, tmp_path):
         events = [
-            _line({"type": "message", "content": ""}),
-            _line({"type": "tool_call", "toolId": "a", "toolName": "shell"}),
-            _line({"type": "tool_call", "toolId": "b", "toolName": "shell"}),
-            _line({"type": "tool_result", "toolId": "a", "output": "ok"}),
-            _line({"type": "tool_result", "toolId": "b", "output": "ok"}),
-            _line({"type": "message", "content": "done"}),
-            _line({"type": "send_ok", "result": "done"}),
+            _ev(type="message", content="", isStepStart=True),
+            _tool_call("a"),
+            _tool_call("b"),
+            _tool_result("a"),
+            _tool_result("b"),
+            _ev(type="message", content="done", isStepStart=True),
+            _result(response="done"),
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
@@ -445,14 +497,10 @@ class TestCommunicate:
     async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
         """Tool b never returns, so the next call opens on its first new tool call."""
         events = [
-            _line({"type": "tool_call", "toolId": "a", "toolName": "shell"}),
-            _line({"type": "tool_call", "toolId": "b", "toolName": "shell"}),
-            _line({"type": "tool_result", "toolId": "a", "output": "ok"}),
-            *[
-                _line({"type": kind, "toolId": f"t{n}", "toolName": "shell", "output": "ok"})
-                for n in range(3)
-                for kind in ("tool_call", "tool_result")
-            ],
+            _tool_call("a"),
+            _tool_call("b"),
+            _tool_result("a"),
+            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
@@ -472,12 +520,12 @@ class TestCommunicate:
         await agent.discard_pending_turn()
 
         # A fresh host is spawned for the retry.
-        patch_exec([_line({"type": "init_ok"}), _line({"type": "send_ok", "result": "recovered"})])
+        patch_exec([_line({"type": "init_ok"}), _result(response="recovered")])
         record = await agent.communicate("hi again")
         assert record.agent_output == "recovered"
 
     async def test_emits_exactly_one_start_and_end_event(self, patch_exec, tmp_path):
-        events = [_line({"type": "send_ok", "result": "done"})]
+        events = [_result(response="done")]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         seen: list[Any] = []
 
@@ -495,10 +543,15 @@ class TestCommunicate:
     @pytest.mark.parametrize(
         ("usage_payload", "expected_uncached_input", "expected_output", "expected_cache_read", "expected_cache_write"),
         [
-            ({"promptTokens": 10, "completionTokens": 5}, 10, 5, 0, 0),
-            ({"promptTokens": 10, "completionTokens": 5, "promptTokensCached": 4}, 6, 5, 4, 0),
+            ({"input_tokens": 10, "output_tokens": 5}, 10, 5, 0, 0),
+            ({"input_tokens": 6, "output_tokens": 5, "cache_read_input_tokens": 4}, 6, 5, 4, 0),
             (
-                {"promptTokens": 10, "completionTokens": 5, "promptTokensCached": 4, "cacheCreationTokens": 3},
+                {
+                    "input_tokens": 6,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 4,
+                    "cache_creation_input_tokens": 3,
+                },
                 6,
                 5,
                 4,
@@ -516,7 +569,7 @@ class TestCommunicate:
         expected_cache_read,
         expected_cache_write,
     ):
-        events = [_line({"type": "send_ok", "result": "done", "usage": usage_payload})]
+        events = [_result(response="done", usage=usage_payload)]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi")
         assert record.token_usage is not None
@@ -526,7 +579,7 @@ class TestCommunicate:
         assert record.token_usage.cache_creation_input_tokens == expected_cache_write
 
     async def test_usage_all_zero_is_none_and_warns(self, patch_exec, tmp_path, caplog):
-        events = [_line({"type": "send_ok", "result": "done", "usage": {"weird_bucket": 3}})]
+        events = [_result(response="done", usage={"weird_bucket": 3})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         with caplog.at_level("WARNING"):
             record = await agent.communicate("hi")
@@ -534,15 +587,7 @@ class TestCommunicate:
         assert any("usage payload matched none" in r.message for r in caplog.records)
 
     async def test_cost_wired_into_record_for_configured_model(self, patch_exec, tmp_path):
-        events = [
-            _line(
-                {
-                    "type": "send_ok",
-                    "result": "done",
-                    "usage": {"promptTokens": 1_000_000, "completionTokens": 1_000_000},
-                }
-            )
-        ]
+        events = [_result(response="done", usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path, model="virtuoso-1-5")
         record = await agent.communicate("hi")
         assert record.model_used == "virtuoso-1-5"
@@ -550,7 +595,7 @@ class TestCommunicate:
         assert record.token_usage.total_cost_usd == pytest.approx(0.95 + 4.0)
 
     async def test_send_error_delivers_end_events_to_stream_callback(self, patch_exec, tmp_path):
-        events = [_line({"type": "send_error", "message": "network blip"})]
+        events = [_line({"type": "error", "message": "network blip"})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
         seen: list[Any] = []
 
@@ -642,10 +687,7 @@ class TestRegistration:
         assert isinstance(agent, DelegateAgent)
 
 
-def test_host_script_ships_with_the_package():
-    """Every test above patches the fixture to return ``_HOST_SCRIPT`` without
-    ever checking the file exists on disk -- a build-config change that dropped
-    it from the wheel would surface only as a runtime MODULE_NOT_FOUND inside a
-    live run, never here.
-    """
-    assert agent_module._HOST_SCRIPT.is_file()
+def test_install_target_names_the_host_package():
+    """``agents/delegate/package.json`` is the documented ``npm install`` target the resolver finds."""
+    package_json = Path(agent_module.__file__).parent / "delegate" / "package.json"
+    assert agent_module._HOST_PACKAGE in json.loads(package_json.read_text())["dependencies"]

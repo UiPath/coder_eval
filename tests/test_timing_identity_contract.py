@@ -263,11 +263,13 @@ def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     state = _TurnState(iteration=1, user_input="go", model="m")
 
     _SteppedDatetime.at_ms = 700
-    agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "input": {}}, state, emit)
+    agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "toolArgs": {}}, state, emit)
     _SteppedDatetime.at_ms = 1200
-    agent._handle_tool_result({"type": "tool_result", "toolId": "c1", "output": "ok"}, state, emit)
+    agent._handle_tool_result(
+        {"type": "tool_result", "toolId": "c1", "toolResult": {"content": "ok"}, "toolStatus": "completed"}, state, emit
+    )
     _SteppedDatetime.at_ms = 1800
-    agent._handle_event({"type": "message", "content": "done"}, state, emit)
+    agent._handle_event({"type": "message", "content": "done", "isStepStart": True}, state, emit)
 
     _SteppedDatetime.at_ms = 2000  # last flush: the single window closes here
     agent._finalize_turn(state, AgentEndStatus.COMPLETED, emit)

@@ -396,11 +396,11 @@ class PiAgentConfig(BaseAgentConfig):
 class DelegateAgentConfig(BaseAgentConfig):
     """Delegate agent configuration (UiPath Autopilot's Delegate agent).
 
-    Drives a Node host subprocess this framework ships (``agents/delegate/delegate_host.mjs``)
-    that wraps the public ``@uipath/delegate-sdk`` npm package's ``DelegateAgent`` class in a
-    stdio JSON-Lines protocol. The SDK's reasoning runs in the UiPath backend; its tools
-    (shell, file, Office, PDF) execute locally through a bundled interop process, so file-based
-    success criteria work as usual. See ``docs/agents/DELEGATE.md``.
+    Drives the Node host that the public ``@uipath/delegate-stdio`` npm package ships, which
+    runs the ``@uipath/delegate-sdk`` agent behind a stdio JSON-Lines protocol. The SDK's
+    reasoning runs in the UiPath backend; its tools (shell, file, Office, PDF) execute locally
+    through a bundled interop process, so file-based success criteria work as usual. See
+    ``docs/agents/DELEGATE.md``.
 
     ``allowed_tools`` / ``disallowed_tools`` / ``system_prompt`` / ``system_prompt_file``
     have no Delegate SDK equivalent and are warned about, not enforced, at ``start()``.

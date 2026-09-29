@@ -1175,8 +1175,8 @@ jobs:
           retention-days: 7
 
   delegate-live-tests:
-    # Live Delegate e2e: spawns the real Node host (agents/delegate/delegate_host.mjs)
-    # wrapping the public @uipath/delegate-sdk against a real UiPath backend. Runs on
+    # Live Delegate e2e: spawns the real Node host from the public
+    # @uipath/delegate-stdio package against a real UiPath backend. Runs on
     # every PR/push like the other live-test jobs (codex-live-tests, byoa-live-tests)
     # now that the DELEGATE_ROPC_* secrets are provisioned; the presence-check gate
     # below skips cleanly ONLY on a fork PR (no secrets available there) and fails
@@ -1260,7 +1260,7 @@ jobs:
         if: steps.gate.outputs.present == 'true'
         run: uv sync --frozen --extra dev
 
-      - name: Install @uipath/delegate-sdk (public npm, no token needed)
+      - name: Install @uipath/delegate-stdio (public npm, no token needed)
         if: steps.gate.outputs.present == 'true'
         working-directory: src/coder_eval/agents/delegate
         # --safe-chain-skip-minimum-package-age (not a growing exclusion-list entry
@@ -1372,7 +1372,7 @@ jobs:
       - name: Run fizzbuzz delegate task (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
@@ -1405,7 +1405,7 @@ jobs:
       - name: Run Delegate live unit tests (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}

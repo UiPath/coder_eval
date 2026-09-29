@@ -744,88 +744,74 @@ release adding an unclassified field fails loudly instead of silently passing th
 ## Delegate agent
 
 `DelegateAgent` drives UiPath Autopilot's Delegate agent — reasoning in the UiPath backend,
-tools executing locally through the SDK's bundled interop process. Unlike every other CLI-driven
-agent in this file, there is no vendor-provided stdio protocol host to spawn: `@uipath/delegate-stdio`,
-the internal package a UiPath-only sibling plugin (`coder_eval_uipath`) drives, is not public. Only
-`@uipath/delegate-sdk` (a programmatic library exposing a `DelegateAgent` class with
-`initialize()`/`onEvent()`/`sendMessage()`/`destroy()`) and `@uipath/delegate-cli` (a terminal wrapper
-around it) are. So this agent ships its own first-party Node host, `agents/delegate/delegate_host.mjs`,
-which wraps the SDK class in a newline-JSON stdio protocol this framework designed, not one it had to
-reverse-engineer — verified live against a real `@uipath/delegate-sdk@0.1.12` install with no token,
-confirming both the plain-public-install story and that the SDK's own event vocabulary
-(`session_start`/`thinking`/`message`/`tool_call`/`tool_result`/`error`/`done`/`step`) substantially
-matches the internal sibling's protocol.
+tools executing locally through the SDK's bundled interop process. It spawns the host that the
+public `@uipath/delegate-stdio` npm package ships (`dist/delegate_stdio.mjs`); that package depends
+on `@uipath/delegate-sdk` and the platform's `@uipath/delegate-runtime-*` interop binaries, so one
+`npm install` is the whole prerequisite. The package README is the wire-protocol SSOT; every frame
+shape the adapter reads (`event` wrapper, `toolArgs`/`toolResult`/`toolStatus`, `isStepStart`,
+`result.usage`/`turnUsages`/`model`, top-level `error`, `destroyed`) was confirmed against a live
+`1.202.1` transcript before the port, and `tests/test_delegate_agent.py`'s frame builders replay
+those shapes.
 
-**No multi-generation transcript splitting.** The internal sibling reconstructs one `AssistantMessage`
-per backend round-trip from an `isStepStart` flag and a `turnUsages` array on the host's terminal
-message. Neither is present on `DelegateAgent.onEvent`'s payloads (confirmed absent by grepping the
-installed SDK bundle's string literals), so there is no reliable per-round-trip boundary signal at this
-API layer. `DelegateAgent` builds exactly ONE `AssistantMessage` per `communicate()` call instead — a
-deliberate simplification, not an oversight; richer segmentation can be added once a real boundary
-signal is confirmed against a live backend. `timing.close_window` still opens that one window from the
-turn's own start (there is nothing to tile from), so the head and tail both measure ~0.
+An earlier version of this agent wrapped `@uipath/delegate-sdk` in a first-party host
+(`delegate_host.mjs`) because `delegate-stdio` was not yet public. That host and its protocol are
+gone; git history has them.
 
-**Deferred, not ported speculatively.** The internal sibling's module docstring documents several
-hard-won failure-signature-specific recoveries: a Cloudflare WAF-block-page rewrite, an SSE-connect-
-timeout rewrite, session-conflict fresh-host recovery, and first-response stall-timeout+resend. None
-are ported here — porting a marker tuned to the internal sibling's own observed failures risks matching
-nothing (or the wrong thing) against the public SDK/backend's actual error surface. A crash still ends
-the turn correctly as a retryable `AgentCrashError`; it is just not specially diagnosed. Port these once
-the same failures are actually observed running this agent for real.
+**Auth goes through the host's environment, not the init options.** The host reads `AUTH_TOKEN` /
+`TENANT_ID` / `ORG_ID` and, for an `env`-derived backend URL, `ORG_LOGICAL_NAME` / `TENANT_NAME`
+from its own environment. coder_eval keeps its user-facing names (`DELEGATE_`-namespaced first, then
+`AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` / `TENANT_SLUG`) and `_host_auth_env` re-exports
+them under the host's names. Confirmed live with no saved login: with the slugs the turn runs; without
+them init fails with `env="alpha" requires org/tenant slugs`. `DELEGATE_ENV` becomes the `env` init
+option; `DELEGATE_BACKEND_URL` becomes `backendUrl`, which the host ranks above `env`.
 
-**The process handle must be cleared on every path that leaves the host dead or dying** — EOF, a host
-`fatal` message, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
+**`max_turns` stays client-side.** The host accepts `maxSteps` on `send`, but it does not stop the
+turn: live, `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true` in the `result`.
+Forwarding it would suggest a cap that does not exist, so the adapter keeps counting calls from the
+event stream and abandons the host when call N+1 opens. Once the `result` arrives, `len(turnUsages)`
+(one entry per backend round-trip, confirmed equal to `assistantStepCount`) replaces the running
+estimate as `num_turns`.
+
+**`enableSkills` must be sent explicitly.** The host's default is `false`, so a `bundledSkillsPath`
+alone loads nothing; the adapter sets `enableSkills` to whether a plugin resolved.
+
+**No multi-generation transcript splitting (yet).** `DelegateAgent` builds exactly ONE
+`AssistantMessage` per `communicate()` call. The host now carries what a per-round-trip split needs —
+`isStepStart` on `message` events and per-round-trip `turnUsages` on `result` — but the adapter only
+uses `isStepStart` to merge streamed deltas into one text block. `timing.close_window` opens that one
+window from the turn's own start, so the head and tail both measure ~0.
+
+**Deferred, not ported speculatively.** The out-of-tree `delegate-sdk` adapter carries
+failure-signature-specific recoveries: a Cloudflare WAF-block-page rewrite, an SSE-connect-timeout
+rewrite, session-conflict fresh-host recovery, first-response stall-timeout+resend, and an S2S
+token-file refresher. None are ported here. A crash still ends the turn correctly as a retryable
+`AgentCrashError`; it is just not specially diagnosed. Port each once its failure is observed here.
+
+**The process handle must be cleared on every path that leaves the host dead or dying** — EOF, an
+`error` frame, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
 `asyncio.wait_for`), cooperative stop, and `max_turns` exhaustion. A real bug shipped once during this
 agent's own development: a timeout elapsing mid-read fell through to the generic crash path instead of
 `TurnTimeoutError`, and left the process handle set, so the NEXT `communicate()` call reused a host with
 a `"send"` still nominally in flight instead of respawning — risking a stale response being consumed as
 the new turn's. `tests/test_delegate_agent.py`'s `test_timeout_elapsing_mid_read_still_raises_turn_timeout_error`
-pins the fix.
+pins the fix. The host survives a failed `send` (it answers the next `destroy` with `destroyed`), but
+the adapter still does not reuse it, so no late event from the failed turn can leak into the retry.
 
 **Skills mapping is deliberately NOT the shared `agents/_skills.py` resolver.** That resolver enumerates
 individual skill directories for a repeated `--skill <dir>`-style CLI argument (OpenCode/Pi's shape).
 The Delegate SDK's `bundledSkillsPath` wants exactly ONE parent directory whose children are skill
-folders — a genuinely different shape — so `_resolve_bundled_skills_path` mirrors the internal sibling's
-own mapping (`<plugin.path>/skills`, first plugin wins) instead of force-fitting the shared helper.
+folders — a genuinely different shape — so `_resolve_bundled_skills_path` maps `<plugin.path>/skills`,
+first plugin wins, instead of force-fitting the shared helper.
 
 **Registered unconditionally**, exactly like `codex`/`antigravity` — there is no conditional-registration
 gate keyed on an optional-dependency extra anywhere in this codebase; `opencode`/`pi` declare an EMPTY
 extra purely as packaging-metadata documentation, and `delegate` follows that same shape (no new pip
-package — Node/`@uipath/delegate-sdk` is the real prerequisite, resolved lazily in `start()`).
+package — Node/`@uipath/delegate-stdio` is the real prerequisite, resolved lazily in `start()`).
 
-**`environment` resolution needs org/tenant SLUGS, not just IDs — confirmed by reading the installed
-SDK's own bundle, not by guessing from its error message.** When `DELEGATE_BACKEND_URL` is absent and
-`DELEGATE_ENV` (-> `environment` init option) is used instead, the SDK resolves the backend URL from
-`organizationName`/`orgLogicalName` and `tenantName` fields on the `auth` object passed to
-`initialize()` — NOT from `ORG_SLUG`/`TENANT_SLUG` read off `process.env` directly, despite that being
-exactly what the SDK's own thrown error suggests ("set ORG_SLUG and TENANT_SLUG env vars alongside
-ORG_ID/TENANT_ID"). That advice describes the separate `@uipath/delegate-cli`/`delegate-stdio` wrapper's
-own env-var-driven bootstrapping, not the `DelegateAgent` class itself, which we drive directly. So
-`_build_init_options` forwards `ORG_SLUG`/`TENANT_SLUG` (when set) into `auth.organizationName`/
-`auth.tenantName` itself — confirmed against `node_modules/@uipath/delegate-sdk/dist/index.mjs`'s own
-`yie()` resolver function live in CI (`pyright`/tests can't catch this class of bug; it only surfaces
-against a real backend). `tests/test_delegate_agent.py::TestStart::test_org_and_tenant_slug_forwarded_into_auth`
-pins it. Passing `DELEGATE_BACKEND_URL` directly instead of `DELEGATE_ENV` skips this whole path.
-
-**Token usage comes from two getters called after `sendMessage()` resolves, not from any event or the
-resolved value itself — confirmed by reading the installed SDK's bundle, not by guessing.** A first
-pass guessed at a flat `usage` dict carried on the resolved `sendMessage()` value or on a forwarded
-event, tried several plausible snake_case/camelCase bucket-name spellings, and silently returned zero
-tokens every turn against a real backend (`tests/test_delegate_agent_live.py::test_delegate_live_token_usage_populated`
-failed live: `record.crashed is False`, real text/tool output, `token_usage=None`). Reading
-`node_modules/@uipath/delegate-sdk/dist/index.mjs` directly settled it: `sendMessage()` always resolves
-to a plain string (never an object), and no event this host forwards via `agent.onEvent()` ever carries
-a `usage` field — the SDK's own internal event vocabulary has no `"usage"` member (that name IS used
-internally, but only inside the SDK's own Zustand store reducer that updates its "Token usage" UI
-panel, never re-emitted through the public `onEvent` bus). The only way to reach it is
-`DelegateAgent.getLastTurnUsage(sessionId?)` (defaults to the just-used session), so
-`delegate_host.mjs`'s `handleSend` calls it — and `getSessionId()` — right after `sendMessage()`
-resolves, and attaches both to the `send_ok` message itself. That getter's shape, read straight off the
-SDK's own `setUsage` store action, is `{promptTokens, completionTokens, promptTokensCached,
-cacheCreationTokens, turnTokenUnits, contextBreakdown}` — `promptTokens` is the TOTAL input token count
-(OpenAI-style, cached + uncached), `promptTokensCached` the cache-READ subset of it, so
-`_parse_usage` computes `uncached_input_tokens = promptTokens - promptTokensCached`. This is now
-CONFIRMED, not a guess, so `_parse_usage`'s docstring no longer marks it `# UNVERIFIED`.
+**Windows path length.** The interop binary sits deep under `node_modules/@uipath/delegate-runtime-win32-x64/`;
+an install root long enough to push that path past 260 characters makes the SDK's spawn fail with
+`ENOENT` even though the file exists. Seen live from a scratch directory; the docs tell users to
+install into a short path.
 
 ### Delegate agent pricing
 
@@ -859,10 +845,9 @@ introduced or should silently "fix" by picking one number over the other.
 
 `AgentKind.DELEGATE` is excluded from `tests/test_agent_golden_master.py`'s `_NO_GOLDEN_COVERAGE`
 allowlist rather than given fixture scenarios: a golden snapshot pins a byte-identical `TurnRecord`
-for a scripted event stream, and every event field name below the confirmed `type`/`content`/
-`toolName`/`sessionId`/`model`/`usage` set is a guess (see this file's own "Delegate agent" section
-above and `delegate_agent.py`'s module docstring). Snapshotting a guess would make it look verified.
-Add real scenarios once the fields are confirmed against a live backend.
+for a scripted event stream. The frame shapes are now confirmed against a live `delegate-stdio`
+transcript (see "Delegate agent" above), so this exemption can be lifted by recording real scenarios;
+until then `tests/test_delegate_agent.py` replays those shapes directly.
 
 This does NOT extend to `tests/test_timing_identity_contract.py::test_delegate_buckets_tile_the_turn`,
 which IS a real, unexempted case: the ms-exact four-bucket identity depends only on this agent's own

@@ -1,7 +1,7 @@
 ---
 description: >-
   Run UiPath Autopilot's Delegate agent as the agent under evaluation in Coder
-  Eval — installing the public @uipath/delegate-sdk, authentication, task
+  Eval — installing the public @uipath/delegate-stdio host, authentication, task
   configuration, and how Delegate telemetry maps to sandboxed, weighted scoring.
 ---
 
@@ -11,41 +11,45 @@ description: >-
 
 Coder Eval can run UiPath Autopilot's **Delegate agent** as the agent under evaluation. Its reasoning runs in the UiPath backend, but its tools (shell, file, Office, PDF) execute locally through the SDK's bundled interop process — so file-based success criteria work as usual. `DelegateAgent` plugs into the same sandbox, scoring, and telemetry pipeline as every other agent: set `agent.type: delegate` in a task and the rest of the framework works unchanged.
 
-Under the hood, this agent spawns a small first-party Node host, `agents/delegate/delegate_host.mjs`, that wraps the public `@uipath/delegate-sdk` package's `DelegateAgent` class in a newline-JSON stdio protocol. That host exists because `@uipath/delegate-stdio` — a ready-made protocol host UiPath's internal-only tooling drives — is not a public package; only `@uipath/delegate-sdk` (a programmatic library) and `@uipath/delegate-cli` (a terminal wrapper around it) are.
+Under the hood, this agent spawns the host that the public [`@uipath/delegate-stdio`](https://www.npmjs.com/package/@uipath/delegate-stdio) package ships (`dist/delegate_stdio.mjs`). The host runs the Delegate agent as a subprocess that speaks newline-delimited JSON over stdio. `@uipath/delegate-sdk` and your platform's `@uipath/delegate-runtime-*` interop binaries are dependencies of that package, so one install is the complete install.
 
 ## Setup
 
-### 1. Install Node and the Delegate SDK
+### 1. Install Node and the Delegate host
 
 1. **Node.js** on your `PATH`.
-2. **`@uipath/delegate-sdk`**, a genuinely public npm package (verified: no token, no custom registry) — install it plain:
+2. **`@uipath/delegate-stdio`**, a public npm package (no token, no custom registry). Install it plain:
 
 ```bash
-npm install @uipath/delegate-sdk
+npm install @uipath/delegate-stdio
 ```
 
-**You usually don't need to set anything about where.** When neither `DELEGATE_SDK_NODE_MODULES` nor `DELEGATE_SDK_PATH` is set, coder_eval auto-locates the install by walking up from the current directory through its ancestors (and home) — the same way Node resolves modules. Running the install inside `src/coder_eval/agents/delegate/` (this agent's own directory, which ships a `package.json` naming the dependency) is a convenient default location.
+**You usually don't need to set anything about where.** When neither `DELEGATE_STDIO_NODE_MODULES` nor `DELEGATE_STDIO_PATH` is set, coder_eval auto-locates the install by walking up from the current directory through its ancestors (and home) — the same way Node resolves modules. Running the install inside `src/coder_eval/agents/delegate/` (this agent's own directory, which ships a `package.json` naming the dependency) is a convenient default location.
 
 To override the auto-search, set **one** of:
 
 | Variable | Purpose |
 |---|---|
-| `DELEGATE_SDK_NODE_MODULES` | Install root that holds `node_modules/@uipath/...`. |
-| `DELEGATE_SDK_PATH` | Absolute path straight to `dist/index.mjs`. |
+| `DELEGATE_STDIO_NODE_MODULES` | Install root that holds `node_modules/@uipath/...`. |
+| `DELEGATE_STDIO_PATH` | Absolute path straight to `@uipath/delegate-stdio/dist/delegate_stdio.mjs`. |
+
+On Windows, install into a short path. The interop binary sits deep inside `node_modules`, and a path longer than 260 characters makes its spawn fail with `ENOENT`.
 
 ### 2. Choose a backend
 
 | Variable | Purpose |
 |---|---|
-| `DELEGATE_ENV` | Cloud environment slug (`alpha` / `staging` / `production` / `localhost`). Derives the backend URL from the auth record's org/tenant slugs. |
+| `DELEGATE_ENV` | Cloud environment slug (`alpha` / `staging` / `production`), sent as the host's `env` init option. The host derives the backend URL from the org/tenant slugs. |
 | `DELEGATE_BACKEND_URL` | Pin the full agent-service URL directly (e.g. `https://cloud.uipath.com/<org>/<tenant>/delegate_`, or `http://localhost:5002` for a local backend). Wins over `DELEGATE_ENV` when both are set. |
 
 ### 3. Authenticate
 
 Either:
 
-- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars (each also accepts a `DELEGATE_`-namespaced spelling — `DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID` — checked first, since the bare names collide with what other tooling like npm/Vault/Terraform commonly exports). Confirmed live: when `DELEGATE_ENV` (rather than `DELEGATE_BACKEND_URL`) resolves the backend, also set `ORG_SLUG` and `TENANT_SLUG` (or `DELEGATE_ORG_SLUG`/`DELEGATE_TENANT_SLUG`; the human-readable org/tenant names, not the GUIDs above) — the SDK's `environment` resolution reads `organizationName`/`tenantName` off the `auth` object passed to `initialize()`, not off `process.env` directly (its own error message's "set ORG_SLUG and TENANT_SLUG env vars" advice describes the separate `delegate-cli` wrapper's behavior, not this SDK class), so this agent forwards them into `auth.organizationName`/`auth.tenantName` itself. Without them, init fails with `--env alpha needs org/tenant slugs`. Skip both by setting `DELEGATE_BACKEND_URL` directly instead.
-- **Saved login** — a prior `delegate-sdk` `runLoginFlow` / `delegate-cli login` that wrote `~/.aria/sdk-auth.json`. The Node host reads this itself (via the SDK's own `loadAndRefreshAuth()`) when no `AUTH_TOKEN` is supplied — this agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. This path already carries the slugs, so `ORG_SLUG`/`TENANT_SLUG` aren't needed.
+- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars. Each also accepts a `DELEGATE_`-namespaced spelling (`DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID`), which is checked first, because the bare names collide with what other tooling (npm, Vault, Terraform) commonly exports. When `DELEGATE_ENV` (not `DELEGATE_BACKEND_URL`) resolves the backend, also set `ORG_SLUG` and `TENANT_SLUG` (or `DELEGATE_ORG_SLUG` / `DELEGATE_TENANT_SLUG`). These are the human-readable org/tenant names, not the GUIDs. coder_eval exports all five values into the host's environment under the names the host reads (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`). Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `DELEGATE_BACKEND_URL` instead.
+- **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no `AUTH_TOKEN` is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `ORG_SLUG` / `TENANT_SLUG` are not needed.
+
+The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh), `INTEROP_URL` and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
 
 ## Usage
 
@@ -81,7 +85,7 @@ success_criteria:
 
 ### Skills
 
-A `plugins:` entry with `type: local` and a `path` is mounted as `<path>/skills` (the Delegate SDK's `bundledSkillsPath`, which expects one directory whose direct children are skill folders). If more than one plugin is configured, the first wins and a warning is logged.
+A `plugins:` entry with `type: local` and a `path` is mounted as `<path>/skills` (the Delegate SDK's `bundledSkillsPath`, which expects one directory whose direct children are skill folders), and turns on `enableSkills`. With no plugin, skills stay off. If more than one plugin is configured, the first wins and a warning is logged.
 
 ## Architecture
 
@@ -90,15 +94,15 @@ A `plugins:` entry with `type: local` and a `path` is mounted as `<path>/skills`
 ```
 Agent (ABC)
 └── DelegateAgent
-    ├── Node host subprocess (agents/delegate/delegate_host.mjs)
+    ├── Node host subprocess (@uipath/delegate-stdio's dist/delegate_stdio.mjs)
     │   └── @uipath/delegate-sdk's DelegateAgent class
     └── Streaming telemetry (commands, token usage, agent text)
 ```
 
 ### Key Methods
 
-- **`start(working_directory)`** — resolve the Node/SDK install, spawn the host, send the `init` command.
-- **`communicate(user_input, timeout, stream_callback)`** — send one `"send"` command and drain the host's forwarded events until `send_ok`/`send_error`/`fatal` or EOF.
+- **`start(working_directory)`** — resolve the host install, spawn the host, send the `init` command and wait for `init_ok`.
+- **`communicate(user_input, timeout, stream_callback)`** — send one `"send"` command and drain the host's `event` frames until `result`, `error` or EOF.
 - **`stop()`** — send `destroy`, wait bounded, then SIGKILL.
 - **`kill()` / `kill_sync()`** — force-terminate the host subprocess (the latter safe to call from the orchestrator's watchdog thread).
 
@@ -108,8 +112,9 @@ Each turn returns a `TurnRecord` with:
 - `agent_output` — the SDK's final response, falling back to accumulated streamed text.
 - `commands` — one `CommandTelemetry` per `tool_call`/`tool_result` pair.
 - `messages` — exactly **one** `AssistantMessage` per turn (see Known Limitations).
-- `token_usage` — best-effort parse of the SDK's `usage` payload (see Known Limitations).
-- `model_used` — the SDK-reported model, falling back to the pinned `agent.model`.
+- `token_usage` — the `result` frame's `usage` (Anthropic convention: `input_tokens` excludes cache reads and writes).
+- `num_turns` — the length of the `result` frame's `turnUsages` (one entry per backend round-trip).
+- `model_used` — the `result` frame's `model`, falling back to the pinned `agent.model`.
 
 ## Implementation Details
 
@@ -119,7 +124,7 @@ A wall-clock deadline (`timeout`) is enforced both between reads (a top-of-loop 
 
 ### Error Recovery
 
-On any crash (host death, a `send_error`/`fatal` protocol message, or an unexpected exception), the agent:
+On any crash (host death, an `error` frame during a turn, or an unexpected exception), the agent:
 1. Sets `pending_turn` to a `crashed=True` TurnRecord with captured telemetry.
 2. Raises `AgentCrashError` (retryable) or `AgentConfigError` (non-retryable — missing Node/SDK install, or an SDK init rejection such as a missing `backendUrl`).
 3. The orchestrator reads `pending_turn` and calls `discard_pending_turn()` to roll back state.
@@ -132,13 +137,13 @@ A dead host is always detected and its handle cleared, so a retried `communicate
 
 ### Non-JSON stdout tolerance
 
-Importing `@uipath/delegate-sdk` can itself write a non-JSON diagnostic line to stdout (confirmed live) before this agent's own host script produces any output. The Python-side reader skips a line that fails to parse as JSON rather than treating it as a protocol violation, mirroring every other CLI-driven agent's tolerance for interleaved non-JSON notices.
+The host writes some non-JSON diagnostic lines to stdout (confirmed live), for example `[backendUrl] Module loaded ...` and `[DelegateAgent] Using model: ...`. The Python-side reader skips a line that fails to parse as JSON rather than treating it as a protocol violation, mirroring every other CLI-driven agent's tolerance for interleaved non-JSON notices.
 
 ## Differences from Claude Code Agent
 
 | Feature | Claude Code | Delegate |
 |---------|------------|----------|
-| **SDK Type** | Subprocess (CLI via JSON generator) | Subprocess (a first-party Node host wrapping a programmatic SDK class) |
+| **SDK Type** | Subprocess (CLI via JSON generator) | Subprocess (the `@uipath/delegate-stdio` Node host) |
 | **Reasoning location** | Local process | UiPath backend |
 | **Tool execution** | Local | Local, through the SDK's bundled interop process |
 | **System prompt** | `system_prompt` appended to the default prompt | No SDK equivalent — warned about, not enforced |
@@ -151,9 +156,9 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Known Limitations
 
-1. **No multi-generation transcript splitting.** The SDK's event stream carries no round-trip boundary signal (no `isStepStart`/`turnUsages` equivalent), so this agent builds one `AssistantMessage` per `communicate()` call rather than one per backend round-trip.
-2. **Token-bucket field names are best-effort.** The SDK confirms an event-level `usage` field exists, but not its exact internal bucket names; several plausible spellings are tried and unrecognized shapes fall back to zero rather than raising.
-3. **No WAF-block-page rewrite, SSE-connect-timeout rewrite, session-conflict fresh-host recovery, or first-response stall-timeout+resend.** These are hard-won failure-signature-specific recoveries UiPath's internal tooling has needed against its own CI; they are not ported here until the same failures are observed against the public SDK/backend from this agent. A crash still ends the turn correctly as a retryable `AgentCrashError` — it is just not specially diagnosed.
+1. **No multi-generation transcript splitting.** This agent builds one `AssistantMessage` per `communicate()` call, not one per backend round-trip. The host does send the signals a split needs (`isStepStart` on `message` events and per-round-trip `turnUsages` on `result`), but this agent does not use them yet.
+2. **`max_turns` is enforced by coder_eval, not by the host.** The host's `maxSteps` option on `send` does not stop the turn (confirmed live: `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true`), so this agent does not send it. See [Run-Limit Parity](HARNESS_PARITY.md).
+3. **No WAF-block-page rewrite, SSE-connect-timeout rewrite, session-conflict fresh-host recovery, or first-response stall-timeout+resend.** These are recoveries for specific failure signatures. They are not ported until the same failures are observed from this agent. A crash still ends the turn correctly as a retryable `AgentCrashError` — it is just not specially diagnosed.
 4. **No `sdk_options` passthrough.** Unlike Claude Code, there is no allowlisted escape hatch for arbitrary SDK fields — only `effort`, `project_id`, `session_id`, and `enable_computer_use` are exposed as typed config fields.
 5. **`enable_computer_use: true` requires local permissions and is unavailable on Linux.** macOS needs Accessibility + Screen Recording grants; the SDK throws unconditionally on Linux when this is enabled.
 
@@ -171,7 +176,7 @@ Registration/pricing tests:
 uv run pytest tests/test_delegate_agent_registration.py
 ```
 
-Live integration tests (drive a real `@uipath/delegate-sdk` install against a real backend; skipped unless credentials are configured):
+Live integration tests (drive a real `@uipath/delegate-stdio` install against a real backend; skipped unless credentials are configured):
 
 ```bash
 uv run pytest -m live tests/test_delegate_agent_live.py
@@ -187,6 +192,7 @@ are provisioned.
 
 ## References
 
-- SDK package: [`@uipath/delegate-sdk`](https://www.npmjs.com/package/@uipath/delegate-sdk)
+- Host package: [`@uipath/delegate-stdio`](https://www.npmjs.com/package/@uipath/delegate-stdio) — its README is the wire-protocol reference
+- SDK package (installed by the host package): [`@uipath/delegate-sdk`](https://www.npmjs.com/package/@uipath/delegate-sdk)
 - CLI package (not required by this agent, but shares the same auth file): [`@uipath/delegate-cli`](https://www.npmjs.com/package/@uipath/delegate-cli)
 - Task examples: `tasks/delegate/*.yaml`
