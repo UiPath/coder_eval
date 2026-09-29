@@ -91,7 +91,7 @@ CONTAINER_REFERENCE_DIR = "/work/references"
 # Rationale: .claude/notes/isolation.md § Why the grading container gets a private scratch directory
 CONTAINER_GRADE_WORKSPACE = "/work/workspace"
 
-CONTAINER_PLUGINS_DIR = "/coder_eval/plugins"  # agent.plugins[i] mounts :ro at <dir>/<i>; see DOCKER_ISOLATION.md
+CONTAINER_PLUGINS_DIR = "/work/plugins"  # agent.plugins[i] mounts :ro at <dir>/<i>; see DOCKER_ISOLATION.md
 
 # Paths a task's WORKDIR must never collide with. Consumed by SandboxConfig's
 # working_dir validator and re-asserted host-side in docker_runner.

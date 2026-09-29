@@ -363,16 +363,17 @@ reference window's posture above; neither contains an adversarial agent.
 
 - **Plugins mount at a fixed container path.** The `i`-th `agent.plugins[]` entry
   is resolved on the host (a relative path against the task YAML's directory, `$VAR`
-  and `~` expanded) and mounted `:ro` at `/coder_eval/plugins/<i>`. The task YAML
+  and `~` expanded) and mounted `:ro` at `/work/plugins/<i>`. The task YAML
   staged into the container is rewritten to point at that path, so the in-container
   agent loads the directory the host mounted, whatever form the authored path took
   and whatever the container's cwd. (Before, the staged YAML kept the authored string:
   a relative or `$VAR` path the container could not resolve loaded no skill, with only
   a warning.) An entry that does not resolve to a host directory is neither mounted
-  nor rewritten.
+  nor rewritten. It sits under `/work`, so a `sandbox.docker.extra_mounts` destination
+  cannot shadow it (those are refused anywhere under `/work/`).
 
 - **Auto-mounted plugin trees are default-deny masked.** An `agent.plugins[].path`
-  (at `/coder_eval/plugins/<i>`) or a `TemplateDirSource.path` that is itself a plugin
+  (at `/work/plugins/<i>`) or a `TemplateDirSource.path` that is itself a plugin
   root (at its host path) is auto-mounted `:ro` so the plugin loads. Eval material colocated under that tree
   as siblings of the skills dir — sibling task YAMLs, reference solutions, test
   fixtures — would otherwise be readable. So the runner keeps the whole root
