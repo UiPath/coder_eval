@@ -9,3 +9,7 @@
 [[IgnoredVulns]]
 id = "PYSEC-2025-183"
 reason = "pyjwt 2.12.1 weak-encryption — disputed by supplier (key length is application-chosen). No fix available on PyPI; revisit quarterly."
+
+[[IgnoredVulns]]
+id = "CVE-2026-49265"
+reason = "oauthlib 3.3.1 PKCE timing side channel in the server-side code_challenge check, which coder-eval never runs (oauthlib is transitive via azure-monitor-opentelemetry-exporter -> msrest -> requests-oauthlib). The fix, 4.0.0, is a major bump still inside the safe-chain minimum package age; revisit next month."
