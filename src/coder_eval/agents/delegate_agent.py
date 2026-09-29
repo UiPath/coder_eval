@@ -31,6 +31,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import time
@@ -258,6 +259,48 @@ def _parse_usage(raw: Any) -> TokenUsage | None:
             logger.warning("delegate: usage payload matched none of the known bucket spellings: %r", sorted(raw))
         return None
     return usage
+
+
+_WAF_BLOCK_PAGE_MARKERS = ("continue with uipath platform", "not available in your country")
+"""Fingerprints of UiPath's Cloudflare block page, served as a 403 when a WAF managed
+rule matches shell-like text in the REQUEST BODY. It is not a geo or auth block."""
+
+_SESSION_CONFLICT_MARKER = "already being generated"
+"""The backend's 409 for a send into a conversation whose previous generation still runs."""
+
+_SSE_CONNECT_TIMEOUT_MARKER = "sse connect timeout"
+"""The SDK's error once its SSE connect watchdog has failed all of its internal retries."""
+
+
+def _describe_host_error(message: str) -> str | None:
+    """A correctly categorized crash reason for a known host failure, or ``None``.
+
+    The raw message would mis-route under ``errors/categorization.py``: a WAF
+    block reads as geo/auth but is deterministic per payload (stamped "content
+    filter", non-retryable), and an SSE connect failure says "timeout" but is a
+    transient backend window (stamped "connection", retryable, "timeout" defanged).
+    A session conflict keeps its raw message; the caller handles it.
+
+    Rationale: .claude/notes/agents.md § Delegate agent
+    """
+    lowered = message.lower()
+    if any(marker in lowered for marker in _WAF_BLOCK_PAGE_MARKERS):
+        prefix = message.split("<", 1)[0].strip().rstrip(":").strip()
+        return (
+            "Delegate backend request blocked by the Cloudflare WAF content filter in front of the UiPath "
+            + "backend (the generic 'not available in your country' 403 page, not a geo or auth problem): "
+            + "shell-like text in the prompt or a tool result matched a managed rule, and the same payload "
+            + f"would be blocked again on retry. [{prefix}]"
+        )
+    if _SSE_CONNECT_TIMEOUT_MARKER in lowered and _SESSION_CONFLICT_MARKER not in lowered:
+        original = message[lowered.find(_SSE_CONNECT_TIMEOUT_MARKER) :]
+        defanged = re.sub("timeout", "time-out", original, flags=re.IGNORECASE)
+        return (
+            "Delegate backend connection failure: the turn's request got no response headers within the "
+            + "SDK's SSE connect watchdog, on every internal attempt. This is a transient backend "
+            + f"availability window, not a task-budget breach. [{defanged}]"
+        )
+    return None
 
 
 class _TurnState:
@@ -571,9 +614,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
         if self._process is None or self._process.returncode is not None:
             # A prior cooperative stop or crash left no live host: respawn
-            # fresh rather than fail fast. Session-conflict-specific recovery
-            # is deferred (see .claude/notes/agents.md); this simpler policy covers
-            # both "the previous turn stopped cleanly" and "it crashed".
+            # fresh rather than fail fast.
             try:
                 await self._spawn_and_init()
             except AgentConfigError as exc:
@@ -638,12 +679,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     self._handle_result(msg, state)
                     break
                 if mtype == "error":
-                    # The host may survive a failed send, but it is not reused:
-                    # force-kill so the next communicate() respawns onto a fresh
-                    # queue rather than risk consuming a stale event from this turn.
-                    await self._abandon_host_and_crash(
-                        state, collector, emit, f"Delegate send failed: {msg.get('message', 'unknown error')}"
-                    )
+                    await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
                 event = msg.get("event")
                 if mtype != "event" or not isinstance(event, dict):
                     logger.debug("delegate: ignoring host message %r", mtype)
@@ -944,6 +980,34 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         await self._force_kill_host()
         self._process = None
         self._crash_turn(state, collector, emit, f"{message}. stderr tail:\n{self._stderr_tail()}")
+
+    async def _crash_on_host_error(
+        self,
+        state: _TurnState,
+        collector: EventCollector,
+        emit: Callable[[StreamEvent], None],
+        message: str,
+    ) -> NoReturn:
+        """Crash the turn on a host ``error`` frame; the host is never reused.
+
+        A rewritten reason goes out without the stderr tail, which can itself
+        say "timeout" and so undo the rewrite's categorization; the tail is
+        logged instead. A session conflict also drops the remembered session id,
+        because a retry into the same conversation can only conflict again.
+        """
+        reason = _describe_host_error(message)
+        if reason is None:
+            if _SESSION_CONFLICT_MARKER in message.lower():
+                logger.warning(
+                    "delegate: session %s is still generating a reply; the retry starts a new conversation",
+                    self._session_id,
+                )
+                self._session_id = None
+            await self._abandon_host_and_crash(state, collector, emit, f"Delegate send failed: {message}")
+        logger.warning("delegate: %s stderr tail:\n%s", reason, self._stderr_tail())
+        await self._force_kill_host()
+        self._process = None
+        self._crash_turn(state, collector, emit, reason)
 
     def _crash_turn(
         self,

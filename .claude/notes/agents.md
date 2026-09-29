@@ -781,11 +781,36 @@ alone loads nothing; the adapter sets `enableSkills` to whether a plugin resolve
 uses `isStepStart` to merge streamed deltas into one text block. `timing.close_window` opens that one
 window from the turn's own start, so the head and tail both measure ~0.
 
-**Deferred, not ported speculatively.** The out-of-tree `delegate-sdk` adapter carries
-failure-signature-specific recoveries: a Cloudflare WAF-block-page rewrite, an SSE-connect-timeout
-rewrite, session-conflict fresh-host recovery, first-response stall-timeout+resend, and an S2S
-token-file refresher. None are ported here. A crash still ends the turn correctly as a retryable
-`AgentCrashError`; it is just not specially diagnosed. Port each once its failure is observed here.
+**Known host failures are recategorized.** The out-of-tree `delegate-sdk` adapter drove this same
+`delegate-stdio` host against this same backend, so three of its failure signatures are ported, in
+`_describe_host_error` / `_crash_on_host_error`. Each routes a host `error` frame to the category
+`errors/categorization.py` should give it:
+
+- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>`, "not available in
+  your country"). A 403 from a managed WAF rule that matched shell-like text in the request body —
+  for example a skill doc's `python -c "...open(...,'w')..."` echoed back by a file read. It is not a
+  geo or auth block. The same payload is blocked again on retry, so the reason is rewritten to carry
+  "content filter" (`AGENT_INVALID_OUTPUT`, not retried). Two markers, because the host truncates its
+  message near 50 KB and the country sentence sits after ~48 KB of inline font CSS; the `<title>` is
+  in the first ~300 bytes.
+- **SSE connect timeout.** The request got no response headers inside the SDK's connect watchdog
+  (30 s) on each of its three internal attempts. The raw "timeout" would route to `AGENT_TIMEOUT`,
+  which is not retried, but no headers means the backend never started the turn — a transient
+  availability window. The rewrite carries "connection" (`AGENT_API_ERROR`, retried with backoff) and
+  defangs "timeout".
+- **Session conflict** ("A reply is already being generated"). A backend 409 for a send into a
+  conversation whose previous generation still runs. A retry into that conversation can only
+  conflict again, so the remembered `_session_id` is dropped and the retry starts a new one. The host
+  is replaced either way. A `session_id` pinned in config still reaches the new host as an init
+  option, so a pinned run does not recover from this.
+
+A rewritten reason omits the stderr tail — the tail logs the SDK's own watchdog lines, and one
+"timeout" in it would re-route the crash to `AGENT_TIMEOUT` (the `timeout` rule runs before both
+"content filter" and "connection"). The tail is logged at WARNING instead.
+
+Not ported: the first-response stall-timeout+resend (opt-in, and a stall already ends as a turn
+timeout) and the S2S token-file refresher (it depends on a token-file seam this host has not been
+confirmed to read). Port either once its failure is observed here.
 
 **The process handle must be cleared on every path that leaves the host dead or dying** — EOF, an
 `error` frame, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
