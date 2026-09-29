@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,17 @@ from coder_eval.path_utils import PRIOR_RESULT_FILENAME
 
 
 logger = logging.getLogger(__name__)
+
+
+def _scrub_staged_inputs(task_yaml: Path, context_json: Path) -> None:
+    """Delete the staged ``task.yaml`` and ``context.json`` once loaded, inside a container only.
+
+    Both carry the task's ``success_criteria``, and the agent runs in this same container.
+    ``prior.json`` is left for the regrade path, which reads it later and runs no agent.
+    """
+    if os.environ.get(IN_CONTAINER_ENV) == "1":
+        task_yaml.unlink(missing_ok=True)
+        context_json.unlink(missing_ok=True)
 
 
 def heartbeat_is_alive(current: str, last_counter: str, current_mtime: float, last_mtime: float) -> bool:
@@ -176,6 +188,7 @@ def run_task_internal_command(
     # `task_file` is then pointed under the task_dir mount, so the `TASK_DIR` the
     # Orchestrator exposes to `run_command` criteria resolves there, not /work/input.
     task, _ = load_task(task_yaml)
+    _scrub_staged_inputs(task_yaml, context_json)
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.
     runtime_task_file = task_dir / "task.yaml" if task_dir.is_dir() else task_yaml
 

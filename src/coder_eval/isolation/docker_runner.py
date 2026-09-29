@@ -140,6 +140,13 @@ HEARTBEAT_STALE_SECONDS = 20
 # Rationale: .claude/notes/isolation.md § The stdout line limit
 STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
+_MASK_WARNING = "Masking non-skill path %s under plugin root %s (anti-cheat: only skills stay readable)."
+_MASK_STANDDOWN_WARNING = (
+    "Anti-cheat mask stood down for plugin root %s: its whole tree is the declared skill surface "
+    '(e.g. manifest `skills: "."`), so nothing is masked. Any eval material colocated here is READABLE '
+    "to the agent — move it outside the plugin root."
+)
+
 
 async def _heartbeat_loop(heartbeat_path: Path) -> None:
     """Write a monotonic counter to ``heartbeat_path`` every interval until cancelled.
@@ -656,8 +663,9 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
             # AFTER staging, BEFORE the container starts: the DAC caps are dropped, so
             # every framework-owned mount must be reachable through its `other` bits.
+            # Writable so the entry point can delete the staged task.yaml/context.json.
             # Rationale: .claude/notes/isolation.md § grant_container_access
-            await asyncio.to_thread(grant_container_access, input_dir, writable=False)
+            await asyncio.to_thread(grant_container_access, input_dir, writable=True)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
             if self.grade_workspace is not None:
                 # The one mount whose files the harness did NOT create, so the owner
@@ -1218,6 +1226,84 @@ class DockerRunner:
         # every turn, which a `:ro` mount rejects with EROFS.
         return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
+    def _resolve_mount_path(self, raw_path: str) -> Path:
+        """Resolve an auto-mount source to an absolute host path.
+
+        A relative path resolves against the task-file dir, as CE068 resolves it, not the CWD.
+        """
+        expanded = Path(os.path.expandvars(os.path.expanduser(raw_path)))
+        if not expanded.is_absolute() and self.rt.task_file is not None:
+            expanded = self.rt.task_file.parent / expanded
+        return expanded.resolve()
+
+    def _append_auto_mounts(self, argv: list[str]) -> None:
+        """Bind-mount the plugin, template and system-prompt paths a task references, ``:ro`` at their host path.
+
+        A plugin root also gets every non-skill child dir masked with an empty tmpfs. The
+        reference is deliberately NOT here: it has its own mount (``_reference_mount_args``).
+        """
+        mounted: set[Path] = set()
+        # Warned, not refused: `plugin.path` / `reference.directory` /
+        # `template_sources` are user-controlled strings, and legitimate uses exist.
+        # Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
+        sensitive_sources = self._sensitive_source_paths()
+
+        # Lazy: eval_material imports agents._skills, whose package imports this module.
+        from coder_eval.isolation.eval_material import mask_dirs
+
+        # Masked dir -> its plugin root. Emitted only once every bind is known, so a
+        # nested plugin root's bind can win over its parent's mask of the same path.
+        mask_targets: dict[Path, Path] = {}
+
+        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
+            if not raw_path:
+                return
+            resolved = self._resolve_mount_path(raw_path)
+            # File paths get mounted as the parent dir so a single -v covers
+            # the file; container-side reads still resolve at the same path.
+            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+            if target in mounted or not target.is_dir():
+                return
+            for sensitive in sensitive_sources:
+                if target == sensitive or sensitive in target.parents:
+                    logger.warning(
+                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
+                        target,
+                    )
+                    break
+            mounted.add(target)
+            argv.extend(["-v", f"{target}:{target}:ro"])
+            masks = mask_dirs(target)
+            if not masks and (target / ".claude-plugin" / "plugin.json").is_file():
+                logger.warning(_MASK_STANDDOWN_WARNING, target)
+            for masked_dir in masks:
+                mask_targets.setdefault(masked_dir, target)
+
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        for plugin in plugins:
+            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+
+        from coder_eval.models import TemplateDirSource
+
+        sandbox_cfg = self.rt.task.sandbox
+        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
+            if isinstance(source, TemplateDirSource):
+                _auto_mount(source.path)
+
+        # Defensive: normally inlined into system_prompt by load_task / experiment
+        # resolution, but a variant could inject an absolute path that survives.
+        agent_cfg = self.rt.task.agent
+        if agent_cfg and agent_cfg.system_prompt_file:
+            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+
+        # A deeper --tmpfs wins over the enclosing :ro bind regardless of argv order;
+        # a mask that is also a bind would be a duplicate mount point, so the bind wins.
+        for masked_dir, root in sorted(mask_targets.items()):
+            if masked_dir in mounted:
+                continue
+            argv.extend(["--tmpfs", str(masked_dir)])
+            logger.warning(_MASK_WARNING, masked_dir, root)
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1300,7 +1386,9 @@ class DockerRunner:
         # Rationale: .claude/notes/isolation.md § Environment forwarding
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
-        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
+        # Read-WRITE: the entry point deletes the staged task.yaml and context.json
+        # after load, and `rm` fails with EROFS on a `:ro` bind mount.
+        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}"]
         # The host run_dir at the container's standard output location, so the
         # in-container Orchestrator writes straight to the host filesystem.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
@@ -1330,51 +1418,7 @@ class DockerRunner:
             host_claude_dir = Path.home() / ".claude"
             argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
-        # Host paths the task references (plugin dirs, resolved template dirs), at
-        # the SAME path inside the container. The reference is deliberately NOT
-        # here -- it has its own mount and is masked out of the task_dir mount.
-        # ``mounted`` dedupes overlapping entries.
-        mounted: set[Path] = set()
-        # Warned, not refused: `plugin.path` / `reference.directory` /
-        # `template_sources` are user-controlled strings, and legitimate uses exist.
-        # Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
-        sensitive_sources = self._sensitive_source_paths()
-
-        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
-            if not raw_path:
-                return
-            resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
-            # File paths get mounted as the parent dir so a single -v covers
-            # the file; container-side reads still resolve at the same path.
-            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
-            if target in mounted or not target.is_dir():
-                return
-            for sensitive in sensitive_sources:
-                if target == sensitive or sensitive in target.parents:
-                    logger.warning(
-                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
-                        target,
-                    )
-                    break
-            mounted.add(target)
-            argv.extend(["-v", f"{target}:{target}:ro"])
-
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
-
-        from coder_eval.models import TemplateDirSource
-
-        sandbox_cfg = self.rt.task.sandbox
-        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
-            if isinstance(source, TemplateDirSource):
-                _auto_mount(source.path)
-
-        # Defensive: normally inlined into system_prompt by load_task / experiment
-        # resolution, but a variant could inject an absolute path that survives.
-        agent_cfg = self.rt.task.agent
-        if agent_cfg and agent_cfg.system_prompt_file:
-            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+        self._append_auto_mounts(argv)
 
         # HAZARD: task.reference.directory is deliberately NOT auto-mounted at its
         # host path. That would bind the REAL tree in beside the shielded copy, so

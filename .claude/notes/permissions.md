@@ -29,10 +29,6 @@ read-write throwaway copy; when it was bind-mounted `:ro` the chmod returned ERO
 no tmpfs mask and has not been one since: see
 [isolation.md](isolation.md) § Why the framework mounts are writable copies.
 
-What the window does NOT hide is the task DEFINITION. `task.yaml` is also staged at
-`/work/input` for the in-container orchestrator and that mount is untouched, so hiding the
-criteria from the agent remains a separate, unsolved problem.
-
 Criteria address reference files with the `$REFERENCE_DIR` token (same resolver as
 `$TASK_DIR`) and the `REFERENCE_DIR` env var for `run_command`; `reference_comparison` names
 one file via `reference_file`.
@@ -63,10 +59,6 @@ is unreadable exactly while the agent is executing, and readable again by the ti
 criteria and judges run. The task directory is shielded by the same window: under docker
 it is mounted as a throwaway COPY at a fixed container path, which is what makes it
 chmod-able without touching the user's checked-out `tasks/` tree.
-
-It shields grading MATERIAL that happens to live in the task directory (a `reference/`
-subdirectory, fixtures), not the task DEFINITION: `task.yaml` is separately staged at
-`/work/input`, which the agent can still read.
 
 ### Why a stack and not a refcount
 

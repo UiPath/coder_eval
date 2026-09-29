@@ -24,7 +24,7 @@ _DEFAULT_PLUGIN_SKILLS_SUBDIR = "skills"
 _SKILL_FILE = "SKILL.md"
 
 
-def _manifest_skill_dirs(root: Path) -> list[Path]:
+def manifest_skill_dirs(root: Path) -> list[Path]:
     """Skill directories a Claude-plugin root declares, in manifest order.
 
     Reads the ``skills`` field of ``<root>/.claude-plugin/plugin.json`` (a string
@@ -81,7 +81,7 @@ def _plugin_skill_dirs(
                 hint,
             )
             continue
-        candidates = [directory for directory in _manifest_skill_dirs(root) if directory.is_dir()]
+        candidates = [directory for directory in manifest_skill_dirs(root) if directory.is_dir()]
         # A path that is ALREADY a bare skills directory has no `skills/` subdir,
         # so use it as-is. Deliberately NOT a fallback for a root that HAS one.
         # Rationale: .claude/notes/agents.md § Skills, per harness

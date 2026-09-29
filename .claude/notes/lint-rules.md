@@ -667,7 +667,7 @@ shipped. An id is a permanent documentation anchor: a suppression comment carryi
 an older branch, review or commit message must never start meaning something new. CE023 is
 retired the same way, after the rule was deleted with the package it guarded.
 
-Claim 068 next, and note 065 IS TAKEN without being in `ALL_RULES`: doc-surface and
+Claim 069 next, and note 065 IS TAKEN without being in `ALL_RULES`: doc-surface and
 whole-tree rules are `@pytest.mark.lint` classes in `tests/test_custom_lint.py` rather than
 `BaseRule`s, so `runner.py`'s uniqueness assert cannot see them. Enumerating them in a
 comment is how that note fell behind CE044, so grep instead:

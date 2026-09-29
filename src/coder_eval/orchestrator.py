@@ -1957,8 +1957,8 @@ class Orchestrator:
         # ANTI-CHEAT WINDOW. The reference and the task dir sit at mode 000 for every
         # communicate attempt, retries included (this wrapper is outside
         # execute_with_retry), and are restored on every exit path. The SANDBOX owns
-        # whether a chmod window means anything for its driver. It does NOT hide the
-        # task DEFINITION: task.yaml is also staged at /work/input, an unsolved gap.
+        # whether a chmod window means anything for its driver. The task DEFINITION
+        # staged at /work/input is not windowed; the entry point deletes it after load.
         # Rationale: .claude/notes/permissions.md § Reference solutions and the anti-cheat window
         assert self.sandbox is not None
         async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):

@@ -60,7 +60,7 @@ from tests.lint.violation import Violation
 # CE062 and CE023 are RETIRED ids and must stay unused — the ids above jump 061 to
 # 063. An id is a permanent documentation anchor: a suppression comment carrying one
 # in an older branch or commit message must never start meaning something new.
-# Claim 068 next; 065 is taken without being in ALL_RULES. To see the whole space:
+# Claim 069 next; 065 is taken without being in ALL_RULES. To see the whole space:
 # `grep -E '^class Test(CE[0-9]{3})' tests/test_custom_lint.py`.
 # Rationale: .claude/notes/lint-rules.md § The CE id space
 type RuleClass = type[BaseRule]
