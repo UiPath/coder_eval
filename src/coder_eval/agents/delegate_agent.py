@@ -117,6 +117,8 @@ _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 # Event types (inside the host's `event` frames) that carry model-turn content.
 # `session_start` / `done` are informational; anything else is logged and ignored.
 _TEXT_EVENT_TYPES = frozenset({"thinking", "message"})
+_FAILED_TOOL_STATUSES = frozenset({"failed", "interrupted"})
+"""``toolStatus`` values the SDK's ``tool_result`` carries for a tool that did not complete."""
 
 
 def _tool_id(event: dict[str, Any]) -> str:
@@ -797,7 +799,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             telemetry.result_summary = json.dumps(output)
         else:
             telemetry.result_summary = None
-        if event.get("toolStatus") == "failed":
+        if event.get("toolStatus") in _FAILED_TOOL_STATUSES:
             status = ToolEndStatus.ERROR
             telemetry.result_status = "error"
             telemetry.error_message = telemetry.result_summary or "tool failed"

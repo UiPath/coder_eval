@@ -357,10 +357,11 @@ class TestCommunicate:
         record = await agent.communicate("hi")
         assert record.agent_output == "done"
 
-    async def test_tool_error_marks_error_status(self, patch_exec, tmp_path):
+    @pytest.mark.parametrize("status", ["failed", "interrupted"])
+    async def test_tool_error_marks_error_status(self, patch_exec, tmp_path, status):
         events = [
             _tool_call("t1"),
-            _tool_result("t1", "command not found", status="failed"),
+            _tool_result("t1", "command not found", status=status),
             _result(response="done"),
         ]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
