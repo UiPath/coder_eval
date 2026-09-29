@@ -808,9 +808,18 @@ A rewritten reason omits the stderr tail — the tail logs the SDK's own watchdo
 "timeout" in it would re-route the crash to `AGENT_TIMEOUT` (the `timeout` rule runs before both
 "content filter" and "connection"). The tail is logged at WARNING instead.
 
+**`LLMGW_*` leaves the host env only when a token file is configured.** The host's shells inherit
+its env, so the gateway client secret there is readable by the code under test. But the host's own
+`selectTokenSource` uses that S2S pair as its refresh source whenever no token file is set, so
+stripping it unconditionally would end token refresh an hour into a long run. With a token file
+the file wins and the pair is dead weight, so `_strip_redundant_gateway_creds` removes it — mirroring
+the host's lookup exactly (`DELEGATE_AUTH_TOKEN_FILE ?? AUTH_TOKEN_FILE`, split on the path
+delimiter, blank entries ignored; an empty `DELEGATE_AUTH_TOKEN_FILE` shadows the legacy name).
+Removing it in every case needs the out-of-tree adapter's S2S token-file refresher, which mints
+adapter-side and hands the host a file.
+
 Not ported: the first-response stall-timeout+resend (opt-in, and a stall already ends as a turn
-timeout) and the S2S token-file refresher (it depends on a token-file seam this host has not been
-confirmed to read). Port either once its failure is observed here.
+timeout) and that S2S token-file refresher. Port either once its need is observed here.
 
 **The process handle must be cleared on every path that leaves the host dead or dying** — EOF, an
 `error` frame, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside

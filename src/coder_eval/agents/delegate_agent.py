@@ -142,6 +142,27 @@ def _host_auth_env() -> dict[str, str]:
     return {host_name: value for host_name, ours in _HOST_AUTH_ENV if (value := _env(ours))}
 
 
+_GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
+
+
+def _strip_redundant_gateway_creds(env: dict[str, str]) -> tuple[str, ...]:
+    """Remove the ``LLMGW_*`` S2S pair from ``env`` when the host would not use it.
+
+    The agent's shell tools inherit the host env, so a live client secret there is
+    exposed to the code under test. The host refreshes its token from that pair
+    only when no token file is configured; a token file wins. This mirrors the
+    host's own lookup (``DELEGATE_AUTH_TOKEN_FILE``, else ``AUTH_TOKEN_FILE``,
+    split on ``os.pathsep``) and keeps the pair when it is the refresh source.
+    Returns the names removed.
+    """
+    raw = env.get("DELEGATE_AUTH_TOKEN_FILE")
+    if raw is None:
+        raw = env.get("AUTH_TOKEN_FILE", "")
+    if not any(entry.strip() for entry in raw.split(os.pathsep)):
+        return ()
+    return tuple(name for name in _GATEWAY_S2S_ENV_VARS if env.pop(name, None) is not None)
+
+
 def _candidate_install_roots() -> list[Path]:
     """Ancestor-walk search roots: cwd, its ancestors, and home.
 
@@ -428,6 +449,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         # Respect an operator's own telemetry choice; only default it off.
         env.setdefault("DELEGATE_TELEMETRY_DISABLED", "1")
         env.update(_host_auth_env())
+        if stripped := _strip_redundant_gateway_creds(env):
+            logger.debug("delegate: a token file is configured; removed %s from the host env", ", ".join(stripped))
 
         await self._cancel_drain_tasks()
         self._stdout_queue = asyncio.Queue()

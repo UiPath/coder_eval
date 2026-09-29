@@ -51,6 +51,8 @@ Either:
 
 The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh), `INTEROP_URL` and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
 
+For runs longer than the token's lifetime (about one hour), the host refreshes the token itself. It uses the token file when `DELEGATE_AUTH_TOKEN_FILE` (or the older `AUTH_TOKEN_FILE`) is set. If no token file is set, it uses the `LLMGW_CLIENT_ID` / `LLMGW_CLIENT_SECRET` / `LLMGW_URL` S2S pair. The agent's shell tools inherit the host's environment, so when a token file is set, coder_eval removes the `LLMGW_*` variables from that environment: the host does not need them, and the code under test cannot read the client secret. When no token file is set, the variables stay, because the host needs them to refresh the token.
+
 ## Usage
 
 ### Command Line

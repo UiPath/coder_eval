@@ -276,6 +276,32 @@ class TestStart:
         assert env["TENANT_NAME"] == "my-tenant"
         assert "auth" not in proc.stdin.written[0]["options"]
 
+    @pytest.mark.parametrize(
+        ("token_file_env", "stripped"),
+        [
+            ({}, False),
+            ({"DELEGATE_AUTH_TOKEN_FILE": "/run/token"}, True),
+            ({"AUTH_TOKEN_FILE": "/run/token"}, True),
+            ({"DELEGATE_AUTH_TOKEN_FILE": f" {os.pathsep} "}, False),
+            ({"DELEGATE_AUTH_TOKEN_FILE": "", "AUTH_TOKEN_FILE": "/run/token"}, False),
+        ],
+        ids=["no-token-file", "token-file", "legacy-token-file", "blank-entries", "empty-shadows-legacy"],
+    )
+    async def test_gateway_creds_leave_the_host_env_only_when_a_token_file_wins(
+        self, patch_exec, tmp_path, monkeypatch, token_file_env, stripped
+    ):
+        """The host refreshes from LLMGW_* only without a token file, so only then must they stay."""
+        for name in ("DELEGATE_AUTH_TOKEN_FILE", "AUTH_TOKEN_FILE"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in token_file_env.items():
+            monkeypatch.setenv(name, value)
+        for name in ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL"):
+            monkeypatch.setenv(name, "value")
+        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        env = proc.spawn_kwargs["env"]
+        for name in ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL"):
+            assert (name in env) is not stripped
+
 
 class TestCommunicate:
     async def test_happy_path_text_and_tool(self, patch_exec, tmp_path):
