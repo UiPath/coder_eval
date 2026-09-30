@@ -237,7 +237,18 @@ class TestCounts:
             min_count=0,
             max_count=0,
         )
-        assert SuccessChecker(sandbox).check(forbidden).score == 1.0
+        result = SuccessChecker(sandbox).check(forbidden)
+        assert result.score == 1.0
+        assert "guard unproven" in (result.details or "")
+        assert "satisfies" not in (result.details or "")
+
+    def test_positive_match_keeps_satisfies_wording(self, sandbox_with_log):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "rename", "proj-1"])])
+        criterion = CliCalledCriterion(description="renamed the field", log=LOG, verb="ixp fields rename")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 1.0
+        assert result.details == "1 invocation(s) matched (verb='ixp fields rename'); satisfies min_count=1"
 
     def test_max_count_zero_fails_when_called(self, sandbox_with_log):
         sandbox, sandbox_dir = sandbox_with_log

@@ -170,7 +170,12 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             facets.append(f"flags={sorted(criterion.flags)}")
         wanted = ", ".join(facets)
 
-        if score == 1.0:
+        if score == 1.0 and count == 0 and criterion.max_count == 0:
+            details = (
+                f"0 invocation(s) matched ({wanted}); guard unproven: a typo in verb, tool or flags "
+                "would also match nothing"
+            )
+        elif score == 1.0:
             details = f"{count} invocation(s) matched ({wanted}); satisfies {bound}"
         elif not within_lower:
             # A bare count sends the reader to the sandbox; this criterion exists
