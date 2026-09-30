@@ -2,6 +2,88 @@
 
 <!-- version list -->
 
+## v0.12.9 (2026-09-29)
+
+### Bug Fixes
+
+- **docker**: Mount plugins at /coder_eval/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **docker**: Mount plugins at /work/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Chores
+
+- **deps**: Bump pyjwt to 2.15.1 and ignore oauthlib CVE-2026-49265
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **deps**: Ignore oauthlib CVE-2026-49264 and drop the stale pyjwt ignore
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Refactoring
+
+- **docker**: Mount plugins under /work/plugins, not /coder_eval/plugins
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+
+## v0.12.8 (2026-09-29)
+
+### Bug Fixes
+
+- Also delete context.json in-container (source_yaml leaked criteria)
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **anti-cheat**: Apply multi-model review findings M1/M2/M3 + doc drift
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **anti-cheat**: Apply review Low findings L1/L2/L3
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **antigravity**: Read token usage from the conversation, not the Step
+  ([#201](https://github.com/UiPath/coder_eval/pull/201),
+  [`101bb5c`](https://github.com/UiPath/coder_eval/commit/101bb5c85c5af97f8027388611dd70e7e7e0ecc8))
+
+- **codex**: Record provider error notifications on the turn
+  ([#203](https://github.com/UiPath/coder_eval/pull/203),
+  [`894f742`](https://github.com/UiPath/coder_eval/commit/894f74282c8f32918cc995fb4b2517f8984c4ed2))
+
+- **docker**: Close two driver:docker channels that leaked grading material to the agent
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **simulation**: Send the simulated user's utterance, not its tagged transcript
+  ([#204](https://github.com/UiPath/coder_eval/pull/204),
+  [`ffb9a81`](https://github.com/UiPath/coder_eval/commit/ffb9a8198a1af73904fabb0c8b3251a978351ab0))
+
+### Documentation
+
+- **harness**: Log deferred Low findings from anti-cheat review
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+### Features
+
+- **lint**: 3/3 — CE065 flags eval material inside a skill dir
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **sandbox**: 1/3 — delete staged task.yaml in-container after load (anti-cheat)
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+- **sandbox**: 2/3 — allowlist tmpfs-mask of auto-mounted plugin trees
+  ([#179](https://github.com/UiPath/coder_eval/pull/179),
+  [`ddf63e9`](https://github.com/UiPath/coder_eval/commit/ddf63e9b356a6c40a83ca5771a3ffd3a1e8dfd68))
+
+
 ## v0.12.7 (2026-09-25)
 
 ### Bug Fixes

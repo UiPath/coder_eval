@@ -25,6 +25,7 @@ from coder_eval.isolation.docker_runner import (
     CLAUDE_COPY_MAX_ATTEMPTS,
     CONTAINER_ENTRYPOINT,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_PLUGINS_DIR,
     CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     DockerRunError,
@@ -790,18 +791,18 @@ class TestAutoMountAllowlistMask:
         argv = self._argv(runner, tmp_path)
 
         tmpfs = self._tmpfs(argv)
-        # The whole root is :ro-mounted so the plugin loads.
-        assert f"{root.resolve()}:{root.resolve()}:ro" in self._mounts(argv)
+        # The whole root is :ro-mounted at plugin 0's container path so the plugin loads.
+        assert f"{root.resolve()}:{CONTAINER_PLUGINS_DIR}/0:ro" in self._mounts(argv)
         # Non-skill children masked; skill surface + manifest not.
-        assert str((root / "tests").resolve()) in tmpfs
-        assert str((root / "reference").resolve()) in tmpfs
-        assert str((root / "node_modules").resolve()) in tmpfs
-        assert str((root / "skills").resolve()) not in tmpfs
-        assert str((root / ".claude-plugin").resolve()) not in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/tests" in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/reference" in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/node_modules" in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/skills" not in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/.claude-plugin" not in tmpfs
 
-    def test_tmpfs_targets_are_under_mounted_host_root(self, tmp_path: Path):
-        # Codex symlinks / Antigravity search paths dereference the ORIGINAL
-        # mounted host path, so the mask must sit on that path, not a copy.
+    def test_tmpfs_targets_are_under_mounted_container_root(self, tmp_path: Path):
+        # Codex symlinks / Antigravity search paths dereference the container path
+        # the staged task.yaml names, so the mask must sit under that path.
         root = self._plugin_root(tmp_path / "plugin")
         (root / "skills" / "demo").mkdir(parents=True)
         (root / "tests").mkdir()
@@ -810,7 +811,7 @@ class TestAutoMountAllowlistMask:
         argv = self._argv(runner, tmp_path)
 
         for masked in self._tmpfs(argv):
-            assert Path(masked).is_relative_to(root.resolve())
+            assert Path(masked).is_relative_to(f"{CONTAINER_PLUGINS_DIR}/0")
 
     def test_template_source_plugin_root_is_masked(self, tmp_path: Path):
         from coder_eval.models import TemplateDirSource
@@ -860,12 +861,14 @@ class TestAutoMountAllowlistMask:
         argv = self._argv(runner, tmp_path)
         mounts, tmpfs = self._mounts(argv), self._tmpfs(argv)
 
-        # B is bind-mounted (so it loads) and NOT tmpfs-masked (no duplicate dest).
-        assert f"{b.resolve()}:{b.resolve()}:ro" in mounts
-        assert str(b.resolve()) not in tmpfs
-        # A's own non-skill child is still masked; B masks its own.
-        assert str((a / "tests").resolve()) in tmpfs
-        assert str((b / "tests").resolve()) in tmpfs
+        # B is bind-mounted at its own container path (so it loads) and NOT
+        # tmpfs-masked there (no duplicate dest).
+        assert f"{b.resolve()}:{CONTAINER_PLUGINS_DIR}/1:ro" in mounts
+        assert f"{CONTAINER_PLUGINS_DIR}/1" not in tmpfs
+        # A's own non-skill children (B included) are masked in A's view; B masks its own.
+        assert f"{CONTAINER_PLUGINS_DIR}/0/tests" in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/0/nested_b" in tmpfs
+        assert f"{CONTAINER_PLUGINS_DIR}/1/tests" in tmpfs
         # No --tmpfs target collides with a bind destination (the M2 crash).
         bind_dests = {m.split(":")[1] for m in mounts if m.count(":") >= 2}
         assert not (set(tmpfs) & bind_dests)
