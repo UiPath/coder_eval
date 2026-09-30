@@ -12,7 +12,8 @@ Wire protocol (one JSON object per line; the package README is the SSOT)::
     stdin                                   stdout
     {"cmd":"init","options":{...}}      ->  {"type":"init_ok"}
     {"cmd":"send","prompt":..,              {"type":"event","event":{...}}  (zero or more)
-            "sessionId":..}             ->  {"type":"result","response":..,"sessionId":..,
+            "sessionId":..}                 {"type":"usage","usage":{..}}   (one per model call)
+                                        ->  {"type":"result","response":..,"sessionId":..,
                                              "usage":{..},"turnUsages":[..],"model":..}
     {"cmd":"destroy"}                   ->  {"type":"destroyed"}
                                             {"type":"error","message":..}   (any command)
@@ -226,14 +227,17 @@ def _resolve_bundled_skills_path(plugins: list[dict[str, Any]] | None) -> str | 
     return str(Path(first["path"]) / "skills")
 
 
+_USAGE_BUCKETS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
 def _parse_usage(raw: Any) -> TokenUsage | None:
-    """Parse the host's ``result.usage`` payload into ``TokenUsage``.
+    """Parse a host ``usage`` payload (a ``usage`` frame's, or the ``result``'s) into ``TokenUsage``.
 
     The host follows the Anthropic convention: ``input_tokens`` excludes cache
     reads and writes, which arrive separately as ``cache_read_input_tokens`` /
     ``cache_creation_input_tokens``. An absent or invalid bucket reads as 0, and
-    a payload with no recognised bucket returns ``None`` with a warning — a
-    renamed field degrades to zero tokens, never a crash.
+    an all-zero payload returns ``None``. One with no recognised bucket also
+    warns — a renamed field degrades to zero tokens, never a crash.
     """
     if not isinstance(raw, dict):
         return None
@@ -251,7 +255,7 @@ def _parse_usage(raw: Any) -> TokenUsage | None:
         cache_read_input_tokens=_int("cache_read_input_tokens"),
     )
     if usage.is_empty():
-        if raw:
+        if raw and not any(bucket in raw for bucket in _USAGE_BUCKETS):
             logger.warning("delegate: usage payload matched none of the known bucket spellings: %r", sorted(raw))
         return None
     return usage
@@ -329,6 +333,7 @@ class _TurnState:
         self.results_incomplete = False
 
         self.model_used: str | None = model
+        # The sum of the per-call `usage` frames, until the `result` replaces it with the turn total.
         self.usage: TokenUsage | None = None
         self.final_response: str | None = None
         self.error_message: str | None = None
@@ -673,6 +678,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     break
                 if mtype == "error":
                     await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
+                if mtype == "usage":
+                    self._add_call_usage(msg, state)
+                    continue
                 event = msg.get("event")
                 if mtype != "event" or not isinstance(event, dict):
                     logger.debug("delegate: ignoring host message %r", mtype)
@@ -695,6 +703,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 status = AgentEndStatus.MAX_TURNS_EXHAUSTED
             else:
                 status = AgentEndStatus.COMPLETED
+            self._warn_if_usage_missing(state, status)
             self._finalize_turn(state, status, emit)
             record = collector.build_turn_record()
             self._end_turn_ok()
@@ -837,11 +846,49 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             telemetry.result_status = "success"
         emit(ToolEndEvent(task_id=self.task_id, turn_id=state.turn_id, tool=telemetry, status=status))
 
+    @staticmethod
+    def _add_call_usage(msg: dict[str, Any], state: _TurnState) -> None:
+        """Add one model call's ``usage`` frame to the turn's running total.
+
+        The host writes a call's frame before any tool result that call caused,
+        so a turn cut at ``max_turns`` or by an early stop keeps the usage of
+        every call that finished.
+        """
+        usage = _parse_usage(msg.get("usage"))
+        if usage is not None:
+            state.usage = usage if state.usage is None else state.usage + usage
+
+    @staticmethod
+    def _warn_if_usage_missing(state: _TurnState, status: AgentEndStatus) -> None:
+        """Warn when model calls finished but no usage arrived, so the turn books no tokens or cost.
+
+        A cut turn's in-flight call is not finished, so it is not counted.
+        """
+        if state.usage is not None:
+            return
+        if status is AgentEndStatus.COMPLETED:
+            if state.api_calls > 0:
+                logger.warning(
+                    "delegate: the host reported no token usage for a turn with %d model call(s); "
+                    + "its tokens and cost are unknown",
+                    state.api_calls,
+                )
+        elif state.api_calls > 1:
+            logger.warning(
+                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for its %d "
+                + "finished model call(s) are unknown (a @uipath/delegate-stdio without per-call usage "
+                + "frames reports usage only on its result frame, which a cut turn never gets)",
+                status.value,
+                state.api_calls - 1,
+            )
+
     def _handle_result(self, msg: dict[str, Any], state: _TurnState) -> None:
         """Fold the host's terminal ``result`` frame into the turn state.
 
-        ``turnUsages`` has one entry per backend round-trip, so its length is the
-        authoritative call count and replaces the running estimate.
+        Its ``usage`` is the turn total, so it replaces the running sum of the
+        ``usage`` frames. ``turnUsages`` has one entry per backend round-trip, so
+        its length is the authoritative call count and replaces the running
+        estimate.
         """
         response = msg.get("response")
         if isinstance(response, str):

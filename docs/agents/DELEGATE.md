@@ -116,7 +116,7 @@ Each turn returns a `TurnRecord` with:
 - `agent_output` — the SDK's final response, falling back to accumulated streamed text.
 - `commands` — one `CommandTelemetry` per `tool_call`/`tool_result` pair.
 - `messages` — exactly **one** `AssistantMessage` per turn (see Known Limitations).
-- `token_usage` — the `result` frame's `usage` (Anthropic convention: `input_tokens` excludes cache reads and writes).
+- `token_usage` — the `result` frame's `usage` (Anthropic convention: `input_tokens` excludes cache reads and writes). A turn cut before that frame keeps the sum of the `usage` frames that the host sends for each model call.
 - `num_turns` — the length of the `result` frame's `turnUsages` (one entry per backend round-trip).
 - `model_used` — the `result` frame's `model`, falling back to the pinned `agent.model`.
 
@@ -162,6 +162,7 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 
 1. **No multi-generation transcript splitting.** This agent builds one `AssistantMessage` per `communicate()` call, not one per backend round-trip. The host does send the signals a split needs (`isStepStart` on `message` events and per-round-trip `turnUsages` on `result`), but this agent does not use them yet.
 2. **`max_turns` is enforced by coder_eval, not by the host.** The host's `maxSteps` option on `send` does not stop the turn (confirmed live: `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true`), so this agent does not send it. See [Run-Limit Parity](HARNESS_PARITY.md).
+   A turn cut at `max_turns`, or by a cooperative early stop, keeps the token usage and cost of every model call that finished before the cut, as on the other agents. The host sends a `usage` frame for each call before that call's tool results. The call in progress at the cut has no usage. A host that does not send `usage` frames reports usage only on its final `result` frame, which a cut turn never gets: that turn has no usage, and the agent logs a warning.
 3. **Only three backend failures get a specific diagnosis.** A Cloudflare WAF block page is reported as a content-filter failure and is not retried: the same prompt or tool result is blocked again. An SSE connect timeout is reported as a connection failure and is retried. A session conflict ("A reply is already being generated") is retried in a new conversation. There is no first-response stall detection: a stalled turn ends at its turn timeout. Every other crash ends the turn as a retryable `AgentCrashError`.
 4. **`sdk_options` accepts only `effort`.** Reasoning effort uses the same `sdk_options.effort` key as Claude Code, so `-D agent.sdk_options.effort=high` works for both agents. Any other key is a validation error. `project_id`, `session_id` and `enable_computer_use` are typed config fields.
 5. **`enable_computer_use: true` requires local permissions and is unavailable on Linux.** macOS needs Accessibility + Screen Recording grants; the SDK throws unconditionally on Linux when this is enabled.

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,11 @@ def _ev(**event: Any) -> bytes:
 
 def _result(**fields: Any) -> bytes:
     return _line({"type": "result", **fields})
+
+
+def _usage(input_tokens: int, output_tokens: int) -> bytes:
+    """One model call's ``usage`` frame, written before any tool result that call caused."""
+    return _line({"type": "usage", "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})
 
 
 def _tool_call(tool_id: str, name: str = "shell", **args: Any) -> bytes:
@@ -243,8 +249,6 @@ class TestStart:
         assert proc.stdin.written[0]["options"]["shellPathPrepend"] == ["/mocks/bin"]
 
     async def test_unsupported_fields_warn(self, patch_exec, tmp_path, caplog):
-        import logging
-
         caplog.set_level(logging.WARNING)
         await _started_agent(patch_exec, [], tmp_path, system_prompt="be nice")
         assert any("has no Delegate SDK equivalent" in r.message for r in caplog.records)
@@ -548,6 +552,83 @@ class TestCommunicate:
         assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0"]
         assert record.num_turns == 2
 
+    @staticmethod
+    def _billed_round_trip(n: int) -> list[bytes]:
+        """A round-trip as the host writes it: the call's usage frame precedes its tool call and result."""
+        return [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10 * (n + 1), n + 1),
+            _tool_call(f"t{n}"),
+            _tool_result(f"t{n}"),
+        ]
+
+    async def test_max_turns_cut_keeps_the_usage_of_the_calls_under_the_cap(self, patch_exec, tmp_path, caplog):
+        events = [
+            *self._billed_round_trip(0),
+            *self._billed_round_trip(1),
+            *self._billed_round_trip(2),
+            _result(response="done", usage={"input_tokens": 60, "output_tokens": 6}),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path, model="virtuoso-1-5")
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is True
+        assert record.num_turns == 3
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (30, 3)
+        assert record.token_usage.total_cost_usd is not None
+        assert not any("usage" in r.message for r in caplog.records)
+
+    async def test_early_stop_keeps_the_usage_of_the_finished_calls(self, patch_exec, tmp_path):
+        events = [*self._billed_round_trip(0), _ev(type="message", content="next", isStepStart=True)]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        seen = {"n": 0}
+
+        def should_stop() -> bool:
+            seen["n"] += 1
+            return seen["n"] == 4
+
+        record = await agent.communicate("hi", should_stop=should_stop)
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (10, 1)
+
+    async def test_result_usage_replaces_the_frame_sum(self, patch_exec, tmp_path):
+        """The result's usage is the turn total, so adding it to the frames would count each call twice."""
+        events = [
+            *self._billed_round_trip(0),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(20, 2),
+            _result(response="done", usage={"input_tokens": 30, "output_tokens": 3}),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (30, 3)
+
+    async def test_cut_turn_from_a_host_without_usage_frames_warns(self, patch_exec, tmp_path, caplog):
+        events = [*self._round_trip(0), *self._round_trip(1), _result(response="done", usage={"output_tokens": 5})]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi", max_turns=1)
+        assert record.max_turns_exhausted is True
+        assert record.token_usage is None
+        assert any("1 finished model call(s)" in r.message for r in caplog.records)
+
+    async def test_early_stop_before_any_finished_call_does_not_warn(self, patch_exec, tmp_path, caplog):
+        events = [_ev(type="message", content="partial", isStepStart=True)]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            await agent.communicate("hi", should_stop=lambda: True)
+        assert not any("usage" in r.message for r in caplog.records)
+
+    async def test_completed_turn_without_usage_warns(self, patch_exec, tmp_path, caplog):
+        events = [_ev(type="message", content="hi", isStepStart=True), _result(response="hi", usage=None)]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi")
+        assert record.token_usage is None
+        assert any("no token usage for a turn with 1 model call(s)" in r.message for r in caplog.records)
+
     async def test_max_turns_counts_round_trips_not_text_chunks(self, patch_exec, tmp_path):
         """The SDK streams a reply as several message events; they are one round-trip."""
         events = [
@@ -680,6 +761,15 @@ class TestCommunicate:
             record = await agent.communicate("hi")
         assert record.token_usage is None
         assert any("usage payload matched none" in r.message for r in caplog.records)
+
+    async def test_zero_usage_frame_in_known_buckets_does_not_warn(self, patch_exec, tmp_path, caplog):
+        """A call can report zero tokens; that is not a renamed bucket."""
+        events = [_usage(0, 0), _result(response="done")]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level("WARNING"):
+            record = await agent.communicate("hi")
+        assert record.token_usage is None
+        assert not any("usage payload matched none" in r.message for r in caplog.records)
 
     async def test_cost_wired_into_record_for_configured_model(self, patch_exec, tmp_path):
         events = [_result(response="done", usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000})]

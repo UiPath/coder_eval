@@ -777,6 +777,21 @@ event stream and abandons the host when call N+1 opens. Once the `result` arrive
 (one entry per backend round-trip, confirmed equal to `assistantStepCount`) replaces the running
 estimate as `num_turns`.
 
+**A cut turn keeps the usage of its finished calls.** The host has no interrupt command, so a turn
+ended at `max_turns` or by a cooperative stop never gets its `result` frame. The host therefore
+also writes one `usage` frame per backend round-trip, and the adapter sums them; the `result`'s
+`usage` (their total) replaces that sum when it arrives. The order is what makes this work, and it
+comes from reading the SDK and backend source, not from a live transcript: the backend sends a
+request's `usage` chunk before its stream closes, the client runs the returned tools only after the
+stream closes, and the host flushes new `usage` entries before it writes each event. So call N's
+frame always precedes the `tool_result` that opens call N+1 and fires the cap. The in-flight call at
+the cut has no usage, as on the other harnesses. A host from before the frame existed sends none,
+and the adapter warns when a cut turn had finished calls but no usage.
+
+The frame is not a call boundary. It arrives before its call's tools run, so a cap that fired on
+frame N would stop call N's tools, and one that waited for frame N+1 would let call N+1 run to its end.
+The cap stays on "the previous call's tools have all returned".
+
 **`enableSkills` must be sent explicitly.** The host's default is `false`, so a `bundledSkillsPath`
 alone loads nothing; the adapter sets `enableSkills` to whether a plugin resolved.
 
