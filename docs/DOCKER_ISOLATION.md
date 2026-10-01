@@ -77,17 +77,19 @@ You can also set it per run: `-D sandbox.docker.network=llm_only` and
 
 For each task the host creates:
 
-1. A per-task `docker network create --internal` network with
-   `com.docker.network.bridge.inhibit_ipv4=true`. The network has no route out and no gateway
+1. A per-task `docker network create --internal --ipv6=false` network with
+   `com.docker.network.bridge.inhibit_ipv4=true`. The network has no route out and no IPv4 gateway
    address on the host, so the task container cannot reach the internet or a host service.
 2. An egress-proxy sidecar from the framework image `coder-eval-agent:<version>`. It joins the
    internal network (DNS alias `coder-eval-egress`) and the default `bridge`. It runs the host's
    own `egress_proxy.py`, bind-mounted read-only, as uid 65534 with all capabilities dropped and a
-   read-only root file system. It forwards only to exact `host:port` targets.
+   read-only root file system. It opens TCP connections only to exact `host:port` targets.
 3. The task container, on the internal network only, with `HTTPS_PROXY` / `HTTP_PROXY` (both
    cases) set to `http://coder-eval-egress:3128`, `NO_PROXY=localhost,127.0.0.1,::1`,
    `NODE_USE_ENV_PROXY=1` and `LITELLM_LOCAL_MODEL_COST_MAP=True`. A host value of a proxy
-   variable is never forwarded.
+   variable (`*_PROXY`, `NO_PROXY`, `NODE_USE_ENV_PROXY`) is never forwarded. Its upstream DNS
+   server is `192.0.2.1`, an address that is never routed: Docker's own DNS still resolves the
+   sidecar, but an external name does not resolve.
 
 Before the task container starts, the host sends one `CONNECT` per allowlisted target through
 the sidecar. If one fails, the task is an `ERROR` row that names the failing targets. The host
@@ -111,7 +113,8 @@ You do not list the model APIs yourself. The host derives them:
 | `egress_allowlist` | your entries |
 
 The judges (`llm_judge`, `agent_judge`) and the dialog simulator use the API backend, so the
-backend row covers them. A Pi provider other than the four above, and every OpenCode or Delegate
+backend row covers them, unless the task sets `checker_context.api_route` to another route or
+endpoint: add that host to `egress_allowlist`. A Pi provider other than the four above, and every OpenCode or Delegate
 provider, needs its host in `egress_allowlist`.
 
 ### Extra egress hosts
@@ -132,6 +135,7 @@ Typical additions:
 | `apt` (Ubuntu) | `archive.ubuntu.com:80`, `security.ubuntu.com:80` (amd64) or `ports.ubuntu.com:80` (arm64) |
 | `apk` (Alpine) | `dl-cdn.alpinelinux.org` |
 | A remote MCP server or a run-time plugin install | its host |
+| `uv` downloading a managed Python not in the image | `github.com`, `objects.githubusercontent.com` (or bake the Python into the image) |
 
 ### Tool compatibility
 
@@ -155,7 +159,10 @@ The sidecar always runs the Debian framework image, so the task image's distribu
 change the boundary. Debian, Ubuntu, Rocky Linux, Fedora and Alpine task images were tested as
 clients. A runtime-kit image needs the framework image too (`make docker-images` builds both).
 
-**Docker versions.** Docker 20.10 or later (`host-gateway` first shipped there). Tested on Docker
+**Docker versions.** Docker 20.10 or later (`host-gateway` first shipped there). Docker 26.0,
+25.0.5 or 23.0.11 or later is recommended: older daemons forward the DNS queries of an internal
+network from the host (CVE-2024-29018). The black-hole upstream DNS server above stops that
+forward, but a patched daemon removes the cause. Tested on Docker
 Desktop 29 (macOS) and on Linux dockerd 20.10, 24 and 29, with both the `iptables` and the
 `nftables` firewall backends. On Linux, `host.docker.internal` resolves to the `docker0` address,
 so a LiteLLM proxy on the host must listen on `docker0` or `0.0.0.0`, as under `bridge`.
@@ -179,6 +186,11 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 - **No upstream proxy.** The sidecar connects directly. A host that can reach the internet only
   through a corporate proxy cannot use `llm_only`.
 - **Not exfiltration-proof.** The agent can still send data to an allowlisted host.
+- **An exact host is a TCP destination, not a site.** A host behind a shared CDN front (for
+  example `files.pythonhosted.org` or `deb.debian.org`) can serve other sites that the agent names
+  in its `Host` header or TLS SNI.
+- **`extra_mounts` can defeat the boundary.** Mounting the Docker socket, for example, gives the
+  agent the daemon.
 - **Exact hosts only.** No wildcards and no CIDR ranges.
 - **podman and rootless Docker** are not tested.
 - **Harbor export** refuses an `llm_only` task.
@@ -192,7 +204,7 @@ sidecar could not reach), or `BAD …` (a request the proxy refused to parse). T
 task needed:
 
 ```bash
-grep -E "^(ALLOW|DENY|FAIL)" runs/latest/**/docker.log | sort | uniq -c
+grep -rhE "^(ALLOW|DENY|FAIL)" --include=docker.log runs/latest | sort | uniq -c
 ```
 
 Add each needed `DENY` host to `egress_allowlist`. If the host process was killed, remove the

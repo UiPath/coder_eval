@@ -1075,6 +1075,17 @@ the sidecar's netns, so a task container with `NET_ADMIN` could try to route thr
 config field grants the task container run-time capabilities, and the measured route did not
 reach the internet, but the sysctl costs nothing.
 
+### Why a black-hole DNS server and --ipv6=false
+
+The spikes ran on dind, which has no loopback resolver, so they could not show CVE-2024-29018:
+on daemons before 26.0 / 25.0.5 / 23.0.11 the embedded DNS forwards an internal network's
+queries from the host namespace when the host resolver is loopback (systemd-resolved), which is a
+DNS tunnel out. The task container's `--dns 192.0.2.1` (TEST-NET-1, never routed) keeps the
+embedded DNS answering the sidecar alias while every external forward goes nowhere.
+`inhibit_ipv4` removes only the IPv4 gateway, so `--ipv6=false` keeps a daemon whose
+`default-network-opts` enable IPv6 from giving the internal bridge an IPv6 gateway. IPv6
+link-local reach to a host service was not measured.
+
 ### Why the framework image and a bind-mounted module
 
 The sidecar image is the framework image, never the task image: a task image is task-authored and

@@ -1032,3 +1032,7 @@ re-derive from scratch.
   stayed at 1 so `max_turns` never tripped — all silently, with `make verify` green.
   A static rule cannot see an SDK field go dead; a live-telemetry smoke (one real turn,
   assert `token_usage` is non-empty) in the harness-bump checklist would have.
+- [ ] Validation regexes anchored with `$` and applied with `.match` (not `.fullmatch`) accept a trailing newline — `"evil.com\n:443"` passed `normalize_egress_target` until it moved to `fullmatch`. A lint rule needs to tell a validation regex from a search regex; not cheap — caught in the network: llm_only Phase 1 review.
+- [ ] `raise X(...) from exc` where `exc` came from parsing an env/URL value leaks the value through `__cause__` in a traceback (urlsplit put a URL password in its port error). Needs data-flow from env reads; not cheap — caught in the network: llm_only Phase 3 review.
+- [ ] `await asyncio.to_thread(subprocess.run, ...)` that CREATES a resource inside a try whose `finally` removes it: a cancel leaves the worker thread running, so teardown races the create and leaks it (fixed in `isolation/egress.py` by `_run_to_completion`). Detecting "creates a resource" is not mechanical — caught in the network: llm_only Phase 4 review.
+- [ ] The single-`asyncio.shield` join in `fs_permissions.set_permissions` does not survive a SECOND cancel of the caller; `isolation/egress._run_to_completion` loops on the shield. Promote that helper to a shared module and use it in both places — caught in the network: llm_only Phase 4 review.

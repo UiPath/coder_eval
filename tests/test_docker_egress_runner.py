@@ -137,6 +137,7 @@ class TestLlmOnlyTaskArgv:
         argv = runner._build_argv(*dirs, container_name="c", egress=_HANDLE)
         assert argv[argv.index("--network") + 1] == "c-net"
         assert argv.count("--network") == 1
+        assert argv[argv.index("--dns") + 1] == "192.0.2.1"
         env = _env_pairs(argv)
         for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
             assert f"{name}={PROXY_URL}" in env
@@ -168,6 +169,7 @@ class TestSidecarArgv:
         argv = build_network_create_argv("n")
         assert argv[:2] == ["network", "create"]
         assert "--internal" in argv
+        assert "--ipv6=false" in argv
         assert argv[argv.index("-o") + 1] == "com.docker.network.bridge.inhibit_ipv4=true"
         assert argv[argv.index("--label") + 1] == f"{EGRESS_LABEL}=1"
         assert argv[-1] == "n"

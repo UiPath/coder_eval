@@ -141,8 +141,22 @@ PROXY_URL = f"http://{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}"
 NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"
 # Never forwarded from the host under llm_only: a host value would shadow the sidecar's.
 PROXY_ENV_NAMES = frozenset(
-    {"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"}
+    {
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "NODE_USE_ENV_PROXY",
+    }
 )
+# TEST-NET-1 (RFC 5737): never routed. As the task container's upstream resolver it keeps
+# Docker's embedded DNS answering the sidecar alias while external lookups go nowhere, even on
+# a daemon that forwards internal-network queries from the host namespace (CVE-2024-29018).
+BLACKHOLE_DNS = "192.0.2.1"
 EGRESS_LOG_HEADER = "=== egress proxy (network: llm_only) ==="
 PRUNE_HINT = (
     f"docker rm -f $(docker ps -aq --filter label={EGRESS_LABEL}); "
@@ -165,13 +179,14 @@ class EgressHandle:
     targets: tuple[str, ...]
 
 
-def proxy_env_argv() -> list[str]:
-    """Explicit (non-secret) ``--env`` pairs for the task container under ``network: llm_only``.
+def task_container_egress_argv() -> list[str]:
+    """``docker run`` arguments the task container gets under ``network: llm_only``.
 
-    The proxy variables point every tool at the sidecar; ``LITELLM_LOCAL_MODEL_COST_MAP``
-    stops litellm fetching its cost map from a host that is not allowlisted.
+    A black-hole upstream resolver, and explicit (non-secret) ``--env`` pairs: the proxy
+    variables point every tool at the sidecar, and ``LITELLM_LOCAL_MODEL_COST_MAP`` stops
+    litellm fetching its cost map from a host that is not allowlisted.
     """
-    argv: list[str] = []
+    argv: list[str] = ["--dns", BLACKHOLE_DNS]
     for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
         argv += ["--env", f"{name}={PROXY_URL}"]
     for name in ("NO_PROXY", "no_proxy"):
@@ -185,6 +200,7 @@ def build_network_create_argv(network: str) -> list[str]:
         "network",
         "create",
         "--internal",
+        "--ipv6=false",
         "-o",
         "com.docker.network.bridge.inhibit_ipv4=true",
         "--label",

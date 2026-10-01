@@ -752,7 +752,9 @@ full network, `none` gives it no network, and `llm_only` lets it reach only the 
 
 Expected harmless `DENY` lines: Codex calls `chatgpt.com`, `github.com` and `api.github.com`
 (update check and remote config); Claude Code with `API_BACKEND=direct` sends telemetry to
-`http-intake.logs.us5.datadoghq.com`. Neither needs the host.
+`http-intake.logs.us5.datadoghq.com`. Neither needs the host. Codex without `CODEX_API_KEY` falls back to a
+ChatGPT login whose model host is `chatgpt.com`: that setup does not work under `llm_only` unless
+you allowlist it.
 
 ## Reproducing
 

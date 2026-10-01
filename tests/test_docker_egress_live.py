@@ -19,7 +19,14 @@ from pathlib import Path
 import pytest
 
 from coder_eval.isolation import docker_runner as dr
-from coder_eval.isolation.egress import EGRESS_LABEL, EGRESS_LOG_HEADER, NO_PROXY_HOSTS, PROXY_URL, egress_scope
+from coder_eval.isolation.egress import (
+    BLACKHOLE_DNS,
+    EGRESS_LABEL,
+    EGRESS_LOG_HEADER,
+    NO_PROXY_HOSTS,
+    PROXY_URL,
+    egress_scope,
+)
 from coder_eval.utils import get_default_docker_image_tag
 
 
@@ -100,6 +107,24 @@ async def test_allowlisted_http_works_denied_https_fails_and_nothing_leaks(frame
             denied = await asyncio.to_thread(_curl, handle.network, framework_image, "https://example.com/")
             assert denied.returncode == 56, denied.stderr
             assert "403" in denied.stderr
+            bypass = await asyncio.to_thread(
+                _docker,
+                "run",
+                "--rm",
+                "--network",
+                handle.network,
+                "--dns",
+                BLACKHOLE_DNS,
+                "--entrypoint",
+                "sh",
+                framework_image,
+                "-c",
+                "getent hosts example.com || echo NO_DNS; getent hosts coder-eval-egress >/dev/null && echo ALIAS_OK; "
+                + "curl -sS -m 5 -o /dev/null http://1.1.1.1/ || echo NO_ROUTE; "
+                + "curl -sS -m 5 -o /dev/null http://host.docker.internal/ || echo NO_HOST",
+            )
+            for marker in ("NO_DNS", "ALIAS_OK", "NO_ROUTE", "NO_HOST"):
+                assert marker in bypass.stdout, (marker, bypass.stdout, bypass.stderr)
     finally:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

@@ -33,8 +33,8 @@ from coder_eval.isolation.egress import (
     _rewrite_loopback_for_container,
     egress_scope,
     forwarded_env_names,
-    proxy_env_argv,
     resolve_egress_targets,
+    task_container_egress_argv,
 )
 from coder_eval.isolation.errors import DockerRunError, EgressSetupError
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
@@ -1471,7 +1471,7 @@ class DockerRunner:
         # Rationale: .claude/notes/isolation.md § Environment forwarding
         argv += ["--env", "TELEMETRY_ENABLED=false"]
         if egress is not None:
-            argv += proxy_env_argv()
+            argv += task_container_egress_argv()
 
         # Read-WRITE: the entry point deletes the staged task.yaml and context.json
         # after load, and `rm` fails with EROFS on a `:ro` bind mount.
