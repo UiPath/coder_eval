@@ -473,6 +473,51 @@ class TestCommunicate:
         record = await agent.communicate("hi")
         assert record.commands[0].result_status == "unknown"
 
+    async def test_result_for_an_unresolved_tool_takes_its_name_and_args(self, patch_exec, tmp_path):
+        """The SDK sends no tool_call for a tool name it cannot resolve, only the failed result."""
+        not_found = _ev(
+            type="tool_result",
+            toolId="s/x",
+            toolName="Bash",
+            toolResult={
+                "responseType": "error",
+                "content": "Tool Bash not found.",
+                "name": "Bash",
+                "args": {"command": "ls"},
+            },
+            toolStatus="failed",
+        )
+        agent, _ = await _started_agent(patch_exec, [not_found, _result(response="done")], tmp_path)
+        record = await agent.communicate("hi")
+        [command] = record.commands
+        assert (command.tool_name, command.parameters, command.result_status) == ("Bash", {"command": "ls"}, "error")
+
+    async def test_result_with_only_the_sdk_id_fallback_name_stays_unknown(self, patch_exec, tmp_path):
+        orphan = _ev(type="tool_result", toolId="s/x", toolName="s/x", toolResult="ok", toolStatus="completed")
+        agent, _ = await _started_agent(patch_exec, [orphan, _result(response="done")], tmp_path)
+        record = await agent.communicate("hi")
+        assert record.commands[0].tool_name == "unknown"
+
+    async def test_a_result_after_a_new_tool_call_still_matches_its_call(self, patch_exec, tmp_path):
+        """The SDK can start a new tool while earlier results are pending; those results still arrive."""
+        events = [
+            _tool_call("a", path="x.md"),
+            _tool_call("b", path="y.md"),
+            _tool_result("a"),
+            _tool_call("c", command="ls"),
+            _tool_result("b"),
+            _tool_result("c"),
+            _result(response="done"),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        assert [(c.tool_id, c.tool_name, c.result_status) for c in record.commands] == [
+            ("a", "shell", "success"),
+            ("b", "shell", "success"),
+            ("c", "shell", "success"),
+        ]
+        assert record.commands[1].parameters == {"path": "y.md"}
+
     async def test_cooperative_stop_ends_cleanly(self, patch_exec, tmp_path):
         events = [
             _ev(type="message", content="partial", isStepStart=True),

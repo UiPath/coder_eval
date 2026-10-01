@@ -118,6 +118,18 @@ def _tool_id(event: dict[str, Any]) -> str:
     return str(event.get("toolId") or "")
 
 
+def _orphan_tool_name(event: dict[str, Any], tool_id: str) -> str:
+    """The name on a ``tool_result`` with no open call; the SDK falls back to the tool id when it has none."""
+    name = event.get("toolName")
+    return name if isinstance(name, str) and name and name != tool_id else "unknown"
+
+
+def _orphan_tool_args(output: Any) -> dict[str, Any]:
+    """The call's args, which a failed lookup echoes back in its ``toolResult``."""
+    args = output.get("args") if isinstance(output, dict) else None
+    return args if isinstance(args, dict) else {}
+
+
 _GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
 
 
@@ -328,8 +340,8 @@ class _TurnState:
         # after the first opens once the previous call's tools have all returned.
         self.api_calls = 0
         # A result arrived while other tools were still open, so the next call is not
-        # counted yet. If the model speaks or calls a new tool first, those tools never
-        # returned and the next call has begun.
+        # counted yet. If the model speaks or calls a new tool first, the next call has
+        # begun; the open tools stay open, because the SDK can still deliver their results.
         self.results_incomplete = False
 
         self.model_used: str | None = model
@@ -742,7 +754,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         elif state.results_incomplete and (
             event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(event) not in state.open_tools)
         ):
-            self._close_open_tools(state, emit)
             state.api_calls += 1
             state.results_incomplete = False
 
@@ -810,19 +821,19 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     ) -> None:
         tool_id = _tool_id(event)
         telemetry = state.open_tools.pop(tool_id, None)
+        output = event.get("toolResult")
         if telemetry is None:
-            # A result with no matching open call (id mismatch or unknown shape).
-            # Never drop it: synthesize a telemetry row rather than lose the
-            # event.
+            # The SDK sends no tool_call for a tool name it cannot resolve, only
+            # this result, so the row takes its name and args from the result.
             state.sequence += 1
             telemetry = CommandTelemetry(
-                tool_name="unknown",
+                tool_name=_orphan_tool_name(event, tool_id),
                 tool_id=tool_id or str(uuid.uuid4()),
                 assistant_turn_index=state.message_events,
                 timestamp=datetime.now(),
+                parameters=_orphan_tool_args(output),
                 sequence_number=state.sequence,
             )
-        output = event.get("toolResult")
         if isinstance(output, dict) and isinstance(output.get("content"), str):
             output = output["content"]
         completed = datetime.now()
