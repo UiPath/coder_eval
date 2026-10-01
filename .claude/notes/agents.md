@@ -743,167 +743,89 @@ release adding an unclassified field fails loudly instead of silently passing th
 
 ## Delegate agent
 
-`DelegateAgent` drives UiPath Autopilot's Delegate agent — reasoning in the UiPath backend,
-tools executing locally through the SDK's bundled interop process. It spawns the host that the
-public `@uipath/delegate-stdio` npm package ships (`dist/delegate_stdio.mjs`); that package depends
-on `@uipath/delegate-sdk` and the platform's `@uipath/delegate-runtime-*` interop binaries, so one
-`npm install` is the whole prerequisite. The package README is the wire-protocol SSOT; every frame
-shape the adapter reads (`event` wrapper, `toolArgs`/`toolResult`/`toolStatus`, `isStepStart`,
-`result.usage`/`turnUsages`/`model`, top-level `error`, `destroyed`) was confirmed against a live
-`1.202.1` transcript before the port, and `tests/test_delegate_agent.py`'s frame builders replay
-those shapes.
+`DelegateAgent` drives UiPath Autopilot's Delegate agent: reasoning in the UiPath backend, tools run
+locally. It spawns the host from the public `@uipath/delegate-stdio` npm package
+(`dist/delegate_stdio.mjs`), which pulls in `@uipath/delegate-sdk` and the interop binaries. The
+package README is the wire-protocol SSOT. Every frame shape the adapter reads was confirmed against a
+live `1.202.1` transcript; `tests/test_delegate_agent.py`'s frame builders replay those shapes. (An
+earlier first-party `delegate_host.mjs` wrapper is gone; see git history.)
 
-An earlier version of this agent wrapped `@uipath/delegate-sdk` in a first-party host
-(`delegate_host.mjs`) because `delegate-stdio` was not yet public. That host and its protocol are
-gone; git history has them.
+**Auth goes to the host as the `auth` init option, not through its env.** `_env` reads the
+`DELEGATE_*` name first, then the bare `AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` /
+`TENANT_SLUG`. `DELEGATE_BACKEND_URL` → `backendUrl`, `DELEGATE_ENV` → `env`. We do not adopt the
+host's own names (`ORG_LOGICAL_NAME`, `BACKEND_URL`, …): bare names collide with other tooling, and CI
+secrets use the `DELEGATE_*` names. `_HOST_ENV_REMOVED` strips the host's names and the token from the
+host env, because the agent's shells inherit it (token leak to code under test) and a stray
+`BACKEND_URL` would reroute the host. A refresh source still writes the fresh token into the host's
+own `process.env.AUTH_TOKEN`. An older host ignores the option and fails init with `Auth required`;
+`_INIT_CONFIG_ERROR_HINT` names our variables beside the host's message. `env=<slug>` without org/tenant
+slugs fails init.
 
-**Auth and the backend reach the host as init options, not through its environment.** coder_eval
-keeps its own names: `_env` reads the `DELEGATE_`-namespaced spelling first, then the bare
-`AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` / `TENANT_SLUG`, and `_auth_option` sends the
-values as the host's `auth` init option. `DELEGATE_BACKEND_URL` becomes `backendUrl` and
-`DELEGATE_ENV` becomes `env`. It does not adopt the host's own names (`AUTH_TOKEN`, `TENANT_ID`,
-`ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`, `BACKEND_URL`), because the bare names collide with
-other tooling and the CI secrets are named after the `DELEGATE_` spellings.
+**`LLMGW_*` leaves the host env only when a token file is set.** Without a token file, the host's
+`selectTokenSource` uses that S2S pair to refresh, so stripping it always would end refresh after an
+hour. `_strip_redundant_gateway_creds` mirrors the host's lookup exactly
+(`DELEGATE_AUTH_TOKEN_FILE ?? AUTH_TOKEN_FILE`, path-delimiter split, blanks ignored).
 
-The host gives each `auth` field priority over its environment variable, and the SDK reads none of
-these names. It takes the credentials from the `TokenAuthProvider` the host builds, and an explicit
-`backendUrl` replaces the `BACKEND_URL` default its bundle reads at load. So `_HOST_ENV_REMOVED`
-takes the host's names, and the token under either spelling, out of the host's environment. The
-agent's shell tools inherit that environment, so a static token there is readable by the code under
-test. And a `BACKEND_URL` or `ORG_LOGICAL_NAME` that another tool exports can no longer route the
-host. A refresh source (token file, `LLMGW_*` pair, saved login) still writes its fresh token into
-the host's own `process.env.AUTH_TOKEN`.
+**Effort rides `sdk_options.effort`** — the same key as Claude Code, so one `-D` drives both.
+`get_sdk_options()` returns the whole `init` dict (so the reports show Model and Effort), with
+credentials redacted: `auth` → its field names, `backendUrl` → its host. It is persisted in
+`task.json`.
 
-The option needs a host release that accepts it. An older host ignores it and fails init with
-`Auth required` unless a saved login exists; `_INIT_CONFIG_ERROR_HINT` names coder_eval's variables
-beside the host's message, which names the host's. Confirmed live against alpha with a host built
-from the Autopilot branch and `DELEGATE_STDIO_VERBOSE=1`: the host resolved auth from the option,
-not the saved login, and neither its stderr nor the recorded `sdk_options` contained the token.
-Without the slugs, init fails with `env="alpha" requires org/tenant slugs`.
+**`enableSkills` must be sent explicitly**: the host default is `false`, so `bundledSkillsPath` alone
+loads nothing. `_resolve_bundled_skills_path` maps `<plugin.path>/skills` (first plugin wins), not the
+shared `agents/_skills.py` resolver: the SDK wants ONE parent directory, not a list of skill dirs.
 
-**Effort rides `sdk_options.effort`.** It is the same key as Claude Code, so one
-`-D agent.sdk_options.effort=...` drives both agents, and the reports' Effort row reads it from
-`get_sdk_options()`. The `-D` gate admits any registered kind whose config class declares
-`sdk_options`; `DelegateAgentConfig` validates the keys against the host options it forwards.
+**`max_turns` stays client-side.** The host's `maxSteps` does not stop the turn (live: `maxSteps: 2`
+ran 7 steps). The adapter counts calls from the event stream and abandons the host when call N+1
+opens; `len(turnUsages)` from the `result` then replaces the estimate as `num_turns`.
 
-`get_sdk_options()` returns the whole `init` options dict sent to the host, not the user's
-pass-through dict, with the credentials redacted: `auth` becomes its field names and `backendUrl`
-its host, because the result is persisted in `task.json`. Both reports use `EvaluationResult.sdk_options` in place of `agent_config`
-whenever it is truthy, so a pass-through-only dict hid the Model row from any run that set an
-effort. The init dict carries `model` and `effort`. The reports then show Permission Mode as N/A
-and Allowed Tools as "(all)", which is correct for this SDK. There is no Plugins row, because the
-init dict names the skills directory (`bundledSkillsPath`), not a `plugins` list.
+**A cut turn keeps the usage of its finished calls.** A turn cut by `max_turns` or a stop gets no
+`result`, so the adapter sums the per-round-trip `usage` frames; the `result`'s total replaces the sum
+when it arrives. Ordering (from SDK/backend source, not a live transcript): call N's `usage` frame
+always precedes the `tool_result` that opens call N+1. The frame is NOT a call boundary — it arrives
+before its call's tools run — so the cap stays on "the previous call's tools have all returned". The
+adapter warns when a cut turn had finished calls but no usage (an old host).
 
-**`max_turns` stays client-side.** The host accepts `maxSteps` on `send`, but it does not stop the
-turn: live, `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true` in the `result`.
-Forwarding it would suggest a cap that does not exist, so the adapter keeps counting calls from the
-event stream and abandons the host when call N+1 opens. Once the `result` arrives, `len(turnUsages)`
-(one entry per backend round-trip, confirmed equal to `assistantStepCount`) replaces the running
-estimate as `num_turns`.
+**One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
+per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
+window at turn start, so head and tail measure ~0.
 
-**A cut turn keeps the usage of its finished calls.** The host has no interrupt command, so a turn
-ended at `max_turns` or by a cooperative stop never gets its `result` frame. The host therefore
-also writes one `usage` frame per backend round-trip, and the adapter sums them; the `result`'s
-`usage` (their total) replaces that sum when it arrives. The order is what makes this work, and it
-comes from reading the SDK and backend source, not from a live transcript: the backend sends a
-request's `usage` chunk before its stream closes, the client runs the returned tools only after the
-stream closes, and the host flushes new `usage` entries before it writes each event. So call N's
-frame always precedes the `tool_result` that opens call N+1 and fires the cap. The in-flight call at
-the cut has no usage, as on the other harnesses. A host from before the frame existed sends none,
-and the adapter warns when a cut turn had finished calls but no usage.
+**Known host failures are recategorized** in `_describe_host_error` / `_crash_on_host_error`, ported
+from the out-of-tree `delegate-sdk` adapter that drove the same host and backend:
 
-The frame is not a call boundary. It arrives before its call's tools run, so a cap that fired on
-frame N would stop call N's tools, and one that waited for frame N+1 would let call N+1 run to its end.
-The cap stays on "the previous call's tools have all returned".
+- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>` or "not available in
+  your country"): a WAF rule matched shell-like text in the request, not a geo/auth block. A retry
+  is blocked again, so the reason carries "content filter" (`AGENT_INVALID_OUTPUT`). Two markers,
+  because the host truncates near 50 KB and the country sentence sits after ~48 KB of CSS.
+- **SSE connect timeout**: no response headers, so the backend never started the turn. Rewritten to
+  "connection" (`AGENT_API_ERROR`, retried) with "timeout" removed, which would be `AGENT_TIMEOUT`
+  (not retried).
+- **Session conflict** ("A reply is already being generated", 409): `_session_id` is dropped so the
+  retry starts a new conversation. A `session_id` pinned in config does not recover.
 
-**`enableSkills` must be sent explicitly.** The host's default is `false`, so a `bundledSkillsPath`
-alone loads nothing; the adapter sets `enableSkills` to whether a plugin resolved.
+Not ported: stall-timeout+resend and the S2S token-file refresher. Port them when the need shows.
 
-**No multi-generation transcript splitting (yet).** `DelegateAgent` builds exactly ONE
-`AssistantMessage` per `communicate()` call. The host now carries what a per-round-trip split needs —
-`isStepStart` on `message` events and per-round-trip `turnUsages` on `result` — but the adapter only
-uses `isStepStart` to merge streamed deltas into one text block. `timing.close_window` opens that one
-window from the turn's own start, so the head and tail both measure ~0.
+**No crash reason carries the stderr tail.** Categorization matches substrings of the reason, and the
+tail holds incidental text (the sandbox path, so the task id). In build 13599116 "guardrail" in a task
+path turned a transient error into non-retryable `AGENT_INVALID_OUTPUT`. `_log_stderr_tail` logs the
+tail at WARNING instead.
 
-**Known host failures are recategorized.** The out-of-tree `delegate-sdk` adapter drove this same
-`delegate-stdio` host against this same backend, so three of its failure signatures are ported, in
-`_describe_host_error` / `_crash_on_host_error`. Each routes a host `error` frame to the category
-`errors/categorization.py` should give it:
+**Only an init error that a retry cannot fix is non-retryable.** `AgentConfigError` only on
+`_INIT_CONFIG_ERROR_MARKERS` (auth missing/rejected, missing slugs, unknown env). Any other init error
+and the 60 s init deadline raise a retryable `AgentCrashError`.
 
-- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>`, "not available in
-  your country"). A 403 from a managed WAF rule that matched shell-like text in the request body —
-  for example a skill doc's `python -c "...open(...,'w')..."` echoed back by a file read. It is not a
-  geo or auth block. The same payload is blocked again on retry, so the reason is rewritten to carry
-  "content filter" (`AGENT_INVALID_OUTPUT`, not retried). Two markers, because the host truncates its
-  message near 50 KB and the country sentence sits after ~48 KB of inline font CSS; the `<title>` is
-  in the first ~300 bytes.
-- **SSE connect timeout.** The request got no response headers inside the SDK's connect watchdog
-  (30 s) on each of its three internal attempts. The raw "timeout" would route to `AGENT_TIMEOUT`,
-  which is not retried, but no headers means the backend never started the turn — a transient
-  availability window. The rewrite carries "connection" (`AGENT_API_ERROR`, retried with backoff) and
-  defangs "timeout".
-- **Session conflict** ("A reply is already being generated"). A backend 409 for a send into a
-  conversation whose previous generation still runs. A retry into that conversation can only
-  conflict again, so the remembered `_session_id` is dropped and the retry starts a new one. The host
-  is replaced either way. A `session_id` pinned in config still reaches the new host as an init
-  option, so a pinned run does not recover from this.
+**Clear the process handle on every path that leaves the host dead or dying** — EOF, `error` frame,
+timeout (pre-check AND mid-`wait_for`), stop, `max_turns`. A shipped bug left it set after a mid-read
+timeout, so the next turn reused a host with a `send` in flight
+(`test_timeout_elapsing_mid_read_still_raises_turn_timeout_error` pins it). `_force_kill_host` clears
+the handle before its reap. The adapter never reuses a host after a failed `send`, so no late event
+leaks into the retry.
 
-**No crash reason carries the stderr tail.** `errors/categorization.py` matches substrings of the
-reason, and the tail is incidental text: the SDK's own watchdog lines, PIDs, token lifetimes, and
-the host's `Working directory:` line, which holds the sandbox path and so the task id. In build
-13599116 the same transient `Delegate backend error: terminated` was retried on four tasks and
-ended `skill-review-agents-lowcode-guardrail-unknown-validator` as a non-retryable
-`AGENT_INVALID_OUTPUT`, because "guardrail" in its path matched the content-filter rule.
-`_log_stderr_tail` logs the tail at WARNING instead, on every crash path.
+**Registered unconditionally**, like `codex`/`antigravity`; its extra is empty. Node and
+`@uipath/delegate-stdio` are the real prerequisite, resolved lazily in `start()`.
 
-**Only an init error that a retry cannot fix is non-retryable.** An init `error` frame raises
-`AgentConfigError` only when it matches `_INIT_CONFIG_ERROR_MARKERS`: missing or rejected auth
-(the out-of-tree adapter's auth markers, kept as they were), missing org/tenant slugs, or an
-unknown env slug. Any other init error, and the 60 s init deadline, raise a retryable
-`AgentCrashError`, so a backend 5xx or a slow token refresh during `agent.initialize()` gets
-`execute_with_retry('Agent start')`'s retries instead of ending the task at once.
-
-**`LLMGW_*` leaves the host env only when a token file is configured.** The host's shells inherit
-its env, so the gateway client secret there is readable by the code under test. But the host's own
-`selectTokenSource` uses that S2S pair as its refresh source whenever no token file is set, so
-stripping it unconditionally would end token refresh an hour into a long run. With a token file
-the file wins and the pair is dead weight, so `_strip_redundant_gateway_creds` removes it — mirroring
-the host's lookup exactly (`DELEGATE_AUTH_TOKEN_FILE ?? AUTH_TOKEN_FILE`, split on the path
-delimiter, blank entries ignored; an empty `DELEGATE_AUTH_TOKEN_FILE` shadows the legacy name).
-Removing it in every case needs the out-of-tree adapter's S2S token-file refresher, which mints
-adapter-side and hands the host a file.
-
-Not ported: the first-response stall-timeout+resend (opt-in, and a stall already ends as a turn
-timeout) and that S2S token-file refresher. Port either once its need is observed here.
-
-**The process handle must be cleared on every path that leaves the host dead or dying** — EOF, an
-`error` frame, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
-`asyncio.wait_for`), cooperative stop, and `max_turns` exhaustion. A real bug shipped once during this
-agent's own development: a timeout elapsing mid-read fell through to the generic crash path instead of
-`TurnTimeoutError`, and left the process handle set, so the NEXT `communicate()` call reused a host with
-a `"send"` still nominally in flight instead of respawning — risking a stale response being consumed as
-the new turn's. `tests/test_delegate_agent.py`'s `test_timeout_elapsing_mid_read_still_raises_turn_timeout_error`
-pins the fix. The host survives a failed `send` (it answers the next `destroy` with `destroyed`), but
-the adapter still does not reuse it, so no late event from the failed turn can leak into the retry.
-`_force_kill_host` drops the handle itself, before its reap, so every path that kills the host
-clears it, even when the 5 s reap times out. Each call site used to pair the kill with its own
-clear, and `kill()` did not.
-
-**Skills mapping is deliberately NOT the shared `agents/_skills.py` resolver.** That resolver enumerates
-individual skill directories for a repeated `--skill <dir>`-style CLI argument (OpenCode/Pi's shape).
-The Delegate SDK's `bundledSkillsPath` wants exactly ONE parent directory whose children are skill
-folders — a genuinely different shape — so `_resolve_bundled_skills_path` maps `<plugin.path>/skills`,
-first plugin wins, instead of force-fitting the shared helper.
-
-**Registered unconditionally**, exactly like `codex`/`antigravity` — there is no conditional-registration
-gate keyed on an optional-dependency extra anywhere in this codebase; `opencode`/`pi` declare an EMPTY
-extra purely as packaging-metadata documentation, and `delegate` follows that same shape (no new pip
-package — Node/`@uipath/delegate-stdio` is the real prerequisite, resolved lazily in `start()`).
-
-**Windows path length.** The interop binary sits deep under `node_modules/@uipath/delegate-runtime-win32-x64/`;
-an install root long enough to push that path past 260 characters makes the SDK's spawn fail with
-`ENOENT` even though the file exists. Seen live from a scratch directory; the docs tell users to
-install into a short path.
+**Windows path length**: an install root that pushes the interop binary path past 260 characters makes
+the spawn fail with `ENOENT`. The docs tell users to install into a short path.
 
 ### Delegate agent pricing
 
@@ -937,9 +859,8 @@ introduced or should silently "fix" by picking one number over the other.
 
 `AgentKind.DELEGATE` is excluded from `tests/test_agent_golden_master.py`'s `_NO_GOLDEN_COVERAGE`
 allowlist rather than given fixture scenarios: a golden snapshot pins a byte-identical `TurnRecord`
-for a scripted event stream. The frame shapes are now confirmed against a live `delegate-stdio`
-transcript (see "Delegate agent" above), so this exemption can be lifted by recording real scenarios;
-until then `tests/test_delegate_agent.py` replays those shapes directly.
+for a scripted event stream. The frame shapes are now confirmed live, so record real scenarios to
+lift this; until then `tests/test_delegate_agent.py` replays the shapes.
 
 This does NOT extend to `tests/test_timing_identity_contract.py::test_delegate_buckets_tile_the_turn`,
 which IS a real, unexempted case: the ms-exact four-bucket identity depends only on this agent's own
