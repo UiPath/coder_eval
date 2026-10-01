@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal, Self, TypedDict
 
 from claude_agent_sdk import ClaudeAgentOptions
@@ -203,6 +204,15 @@ class BaseAgentConfig(BaseModel):
             raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
         return self
 
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """Normalized ``host:port`` targets this agent's own model API needs under ``network: llm_only``.
+
+        Beyond the API backend's hosts, which every agent gets. ``env`` holds the host
+        variables forwarded into the container. Pure: no I/O. Override on a plugin
+        agent's config class.
+        """
+        return ()
+
 
 class ClaudeCodeAgentConfig(BaseAgentConfig):
     """Claude Code agent configuration."""
@@ -291,6 +301,14 @@ class CodexAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
 
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """``api.openai.com`` unless ``CODEX_BASE_URL`` is set.
+
+        ``CodexAgent._resolve_base_url`` is the authority for that variable; a set
+        one is a forwarded ``*_URL`` whose host the allowlist derivation adds.
+        """
+        return () if env.get("CODEX_BASE_URL") else ("api.openai.com:443",)
+
 
 # Mirrors google.antigravity.types.ThinkingLevel as a plain Literal so this module
 # imports without the optional SDK -- base installs must load every config class.
@@ -315,6 +333,10 @@ class AntigravityAgentConfig(BaseAgentConfig):
             "daily-driver default — the API otherwise defaults to the more expensive 'high'."
         ),
     )
+
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The Gemini API host, the only one the local harness contacts."""
+        return ("generativelanguage.googleapis.com:443",)
 
 
 class OpenCodeAgentConfig(BaseAgentConfig):
@@ -365,6 +387,13 @@ class OpenCodeAgentConfig(BaseAgentConfig):
 # forbid valid Pi levels. Confirmed against ``pi --help`` on Pi 0.87.1.
 type PiThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
+_PI_PROVIDER_HOSTS: dict[str, str] = {
+    "openrouter": "openrouter.ai:443",
+    "anthropic": "api.anthropic.com:443",
+    "openai": "api.openai.com:443",
+    "google": "generativelanguage.googleapis.com:443",
+}
+
 
 class PiAgentConfig(BaseAgentConfig):
     """Pi agent configuration (the ``pi`` Node coding agent — https://pi.dev/).
@@ -391,6 +420,14 @@ class PiAgentConfig(BaseAgentConfig):
         default="medium",
         description="Pi reasoning effort passed as --thinking (off/minimal/low/medium/high/xhigh/max).",
     )
+
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The API host of the ``provider/`` prefix of ``model``; OpenRouter when unknown or unset.
+
+        Any other provider needs its host in ``sandbox.docker.egress_allowlist``.
+        """
+        provider, _, model_id = (self.model or "").partition("/")
+        return (_PI_PROVIDER_HOSTS.get(provider if model_id else "", "openrouter.ai:443"),)
 
 
 class DelegateAgentConfig(BaseAgentConfig):

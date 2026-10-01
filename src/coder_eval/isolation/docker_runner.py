@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, TextIO
 import yaml
 
 from coder_eval.config import settings
+from coder_eval.isolation.egress import _DOCKER_HOST_ALIAS, _rewrite_loopback_for_container, forwarded_env_names
+from coder_eval.isolation.errors import DockerRunError
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_GRADE_WORKSPACE,
@@ -75,28 +77,6 @@ logger = logging.getLogger(__name__)
 # MUST equal the `COPY` destination in docker/Dockerfile (drift-guarded by a test).
 # Rationale: .claude/notes/isolation.md § The entrypoint and the image contract
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
-
-# Docker Desktop's stable host alias from a bridge-network container. Auto-resolves
-# on macOS/Windows; on Linux it must be published via `--add-host`.
-_DOCKER_HOST_ALIAS = "host.docker.internal"
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
-def _rewrite_loopback_for_container(url: str) -> str | None:
-    """Rewrite a loopback URL to the docker host alias, preserving scheme/port/path.
-
-    Returns the rewritten URL, or None if the host is not loopback (forward as-is).
-    A LiteLLM proxy on the HOST is unreachable at localhost from inside a bridge
-    container, so ``http://localhost:4000`` -> ``http://host.docker.internal:4000``.
-    """
-    from urllib.parse import urlsplit, urlunsplit
-
-    parts = urlsplit(url)
-    if parts.hostname not in _LOOPBACK_HOSTS:
-        return None
-    netloc = _DOCKER_HOST_ALIAS if parts.port is None else f"{_DOCKER_HOST_ALIAS}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
 
 # DENYLIST of top-level entries the per-task RW copy of ~/.claude skips. Matched by
 # basename at every level, so anything unlisted (settings.json, .credentials.json,
@@ -350,17 +330,6 @@ def _validate_extra_mount(spec: str) -> str:
             f"Invalid extra_mounts entry {spec!r}: destination {dst_norm!r} shadows a framework-owned mount."
         )
     return f"{expanded_src}:{dst}:{mode}"
-
-
-class DockerRunError(RuntimeError):
-    """Raised when ``docker run`` exits non-zero AND no task.json was produced.
-
-    Criterion failures do NOT raise this -- the container always writes
-    task.json (with whatever results it has) before exiting, and the host
-    parses that regardless of exit code. This is reserved for setup-time
-    failures: missing image, daemon down, OOM-kill before the agent started,
-    etc.
-    """
 
 
 class DockerBuildError(DockerRunError):
@@ -1383,7 +1352,7 @@ class DockerRunner:
         # Explicit allowlist. `--env VAR` (name-only) tells docker to copy the value
         # from our env at run time, so secrets stay out of the argv we log.
         # Rationale: .claude/notes/isolation.md § Environment forwarding
-        merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
+        merged_allowlist = forwarded_env_names(self.rt.task)
         for env_var in merged_allowlist:
             # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
             # rewrite (host alias / absolute mount path), not name-only.

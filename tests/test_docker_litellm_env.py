@@ -14,10 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import (
-    DockerRunner,
-    _rewrite_loopback_for_container,
-)
+from coder_eval.isolation.docker_runner import DockerRunner
+from coder_eval.isolation.egress import _rewrite_loopback_for_container
 from coder_eval.models import DockerDriverConfig, FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
