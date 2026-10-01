@@ -500,7 +500,7 @@ shell-aware `parameters["command"]` extraction in `criteria/command_executed.py`
 to raw-JSON matching — so the same task scores differently per harness. Unknown names pass
 through unchanged.
 
-Three cases are worth knowing:
+Four cases are worth knowing:
 
 - **OpenCode's tool set varies by MODEL within the one harness.** A live 174-task run
   showed DeepSeek using `write`/`edit` 199 times and `apply_patch` 0, while GPT-5.6 used
@@ -513,6 +513,11 @@ Three cases are worth knowing:
 - **Pi's search tool is `find`** (glob-by-pattern), not `glob`; there is no `glob` tool in
   its built-in set, so mapping `find` to the canonical `Glob` is what keeps
   `command_executed` and `commands_efficiency` comparable.
+- **Delegate's host maps most names itself, but not `LoadSkill`.** `delegate-stdio` reports
+  `ReadFile` as `Read` and `ExecuteSkillApi` as `Skill`, so `DelegateAgent` maps only
+  `LoadSkill {name}` to `Skill {skill}`; without it `skill_triggered` never sees a Delegate skill
+  load. The rename is keyed by the host's name: keyed by `Skill`, it would also turn
+  ExecuteSkillApi's `name`, an API call, into a skill engagement.
 
 Antigravity additionally strips the result payload out of a tool call's arguments: the
 harness folds result fields into the same `args` dict at DONE. Beyond a static key list,

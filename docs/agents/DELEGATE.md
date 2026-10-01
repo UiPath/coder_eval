@@ -93,6 +93,8 @@ success_criteria:
 
 A `plugins:` entry with `type: local` and a `path` is mounted as `<path>/skills` (the Delegate SDK's `bundledSkillsPath`, which expects one directory whose direct children are skill folders), and turns on `enableSkills`. With no plugin, skills stay off. If more than one plugin is configured, the first wins and a warning is logged.
 
+The SDK loads a catalog skill with `LoadSkill {"name", "plugin"}`. The adapter records it as `Skill {"skill", "plugin"}`, the call Claude Code makes, so `skill_triggered` and other skill-loaded criteria see the load.
+
 ## Architecture
 
 ### Class Hierarchy

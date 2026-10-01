@@ -20,6 +20,7 @@ import pytest
 from coder_eval.agents import delegate_agent as agent_module
 from coder_eval.agents.delegate_agent import DelegateAgent, _resolve_host_bundle
 from coder_eval.agents.registry import AgentRegistry, create_agent
+from coder_eval.criteria.skill_triggered import _engaged_skill_names
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
 from coder_eval.errors.categories import ErrorCategory
 from coder_eval.errors.categorization import categorize_error
@@ -46,7 +47,7 @@ def _usage(input_tokens: int, output_tokens: int) -> bytes:
     return _line({"type": "usage", "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})
 
 
-def _tool_call(tool_id: str, name: str = "shell", **args: Any) -> bytes:
+def _tool_call(tool_id: str, name: str = "shell", /, **args: Any) -> bytes:
     return _ev(type="tool_call", toolId=tool_id, toolName=name, toolArgs=args, toolStatus="pending")
 
 
@@ -607,6 +608,32 @@ class TestCommunicate:
         record = await agent.communicate("hi")
         [command] = record.commands
         assert (command.tool_name, command.parameters, command.result_status) == ("Bash", {"command": "ls"}, "error")
+
+    async def test_load_skill_is_recorded_as_the_canonical_skill_call(self, patch_exec, tmp_path):
+        """Skill criteria read `Skill` + `skill`; the host sends `LoadSkill` + `name`."""
+        events = [
+            _tool_call("s1", "LoadSkill", name="uipath-rpa", plugin=""),
+            _tool_result("s1"),
+            _result(response="done"),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        [command] = record.commands
+        assert (command.tool_name, command.parameters) == ("Skill", {"skill": "uipath-rpa", "plugin": ""})
+        assert _engaged_skill_names(command) == {"uipath-rpa"}
+
+    async def test_skill_api_call_keeps_its_name_arg(self, patch_exec, tmp_path):
+        """The host already reports ExecuteSkillApi as `Skill`; its `name` is not a skill load."""
+        events = [
+            _tool_call("s1", "Skill", name="process-knowledge", method="search"),
+            _tool_result("s1"),
+            _result(response="done"),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        [command] = record.commands
+        assert (command.tool_name, command.parameters) == ("Skill", {"name": "process-knowledge", "method": "search"})
+        assert _engaged_skill_names(command) == set()
 
     async def test_result_with_only_the_sdk_id_fallback_name_stays_unknown(self, patch_exec, tmp_path):
         orphan = _ev(type="tool_result", toolId="s/x", toolName="s/x", toolResult="ok", toolStatus="completed")

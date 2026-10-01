@@ -140,9 +140,23 @@ _TEXT_EVENT_TYPES = frozenset({"thinking", "message"})
 _FAILED_TOOL_STATUSES = frozenset({"failed", "interrupted"})
 """``toolStatus`` values the SDK's ``tool_result`` carries for a tool that did not complete."""
 
+# The host reports most tools under their canonical (Claude) names already
+# (ReadFile -> Read, ...), but not LoadSkill, which loads a catalog skill by name.
+# Keyed by the host's name, not the canonical one: the host also reports
+# ExecuteSkillApi as `Skill`, and that call's `name` is an API call, not a skill load.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
+_TOOL_NAME_MAP: dict[str, str] = {"LoadSkill": "Skill"}
+_DELEGATE_ARG_RENAME: dict[str, dict[str, str]] = {"LoadSkill": {"name": "skill"}}
+
 
 def _tool_id(event: dict[str, Any]) -> str:
     return str(event.get("toolId") or "")
+
+
+def _canonical_tool(tool_name: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map a host tool name and its argument keys onto the canonical cross-agent vocabulary."""
+    rename = _DELEGATE_ARG_RENAME.get(tool_name, {})
+    return _TOOL_NAME_MAP.get(tool_name, tool_name), {rename.get(key, key): value for key, value in params.items()}
 
 
 def _orphan_tool_name(event: dict[str, Any], tool_id: str) -> str:
@@ -891,9 +905,10 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
     def _handle_tool_call(self, event: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         tool_id = _tool_id(event) or str(uuid.uuid4())
-        tool_name = str(event.get("toolName") or "unknown")
-        parameters = event.get("toolArgs")
-        parameters = parameters if isinstance(parameters, dict) else {}
+        raw_args = event.get("toolArgs")
+        tool_name, parameters = _canonical_tool(
+            str(event.get("toolName") or "unknown"), raw_args if isinstance(raw_args, dict) else {}
+        )
         state.sequence += 1
         telemetry = CommandTelemetry(
             tool_name=tool_name,
