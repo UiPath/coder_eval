@@ -13,11 +13,16 @@ from coder_eval.config import Settings
 from coder_eval.isolation import docker_runner, errors
 from coder_eval.isolation.egress import resolve_egress_targets
 from coder_eval.models import (
+    AgentJudgeCriterion,
     ApiBackend,
+    ApiRouteContext,
+    CheckerContext,
     DockerDriverConfig,
     FileExistsCriterion,
+    LLMJudgeCriterion,
     NoulQuestion,
     SandboxConfig,
+    SimulationConfig,
     SystemOneJudgeCriterion,
     TaskDefinition,
     normalize_egress_target,
@@ -85,35 +90,11 @@ def test_codex_with_azure_base_url_uses_only_that_host():
 
 def test_non_litellm_loopback_url_is_skipped_with_a_warning(caplog):
     env = {"CODEX_BASE_URL": "http://127.0.0.1:8080"}
-    with caplog.at_level(logging.WARNING, logger="coder_eval.isolation.egress"):
+    with caplog.at_level(logging.WARNING, logger="coder_eval.models.sandbox"):
         targets = resolve_egress_targets(_task({"type": "codex"}), env=env, settings=_settings(ApiBackend.LITELLM))
     assert targets == []
     assert "CODEX_BASE_URL" in caplog.text
     assert "8080" not in caplog.text
-
-
-def test_uipath_url_with_a_path_contributes_its_host():
-    env = {"UIPATH_URL": "https://cloud.uipath.com/org/tenant"}
-    assert "cloud.uipath.com:443" in resolve_egress_targets(_task(), env=env, settings=_settings())
-
-
-def test_only_forwarded_url_vars_count():
-    env = {"MY_SERVICE_URL": "https://svc.example.com", "HOME": "/root"}
-    assert resolve_egress_targets(_task(), env=env, settings=_settings()) == DIRECT
-    forwarded = _task(env_passthrough_extra=["MY_SERVICE_URL", "MISSING_URL"])
-    assert resolve_egress_targets(forwarded, env=env, settings=_settings()) == sorted([*DIRECT, "svc.example.com:443"])
-
-
-def test_plain_http_url_defaults_to_port_80():
-    task = _task(env_passthrough_extra=["MIRROR_URL"])
-    targets = resolve_egress_targets(task, env={"MIRROR_URL": "http://mirror.example"}, settings=_settings())
-    assert "mirror.example:80" in targets
-
-
-def test_non_http_url_var_is_ignored():
-    task = _task(env_passthrough_extra=["DB_URL"])
-    targets = resolve_egress_targets(task, env={"DB_URL": "postgres://db.example:5432/x"}, settings=_settings())
-    assert targets == DIRECT
 
 
 @pytest.mark.parametrize(
@@ -127,16 +108,15 @@ def test_non_http_url_var_is_ignored():
     ],
 )
 def test_unallowlistable_url_raises_without_echoing_the_value(url: str):
-    task = _task(env_passthrough_extra=["X_URL"])
-    with pytest.raises(ValueError, match="X_URL") as excinfo:
-        resolve_egress_targets(task, env={"X_URL": url}, settings=_settings())
+    with pytest.raises(ValueError, match="CODEX_BASE_URL") as excinfo:
+        resolve_egress_targets(_task({"type": "codex"}), env={"CODEX_BASE_URL": url}, settings=_settings())
     assert "secret" not in "".join(traceback.format_exception(excinfo.value))
 
 
 def test_bad_litellm_loopback_port_names_the_variable():
     env = {"LITELLM_BASE_URL": "http://localhost:" + "secret"}
     with pytest.raises(ValueError, match="LITELLM_BASE_URL") as excinfo:
-        resolve_egress_targets(_task(), env=env, settings=_settings())
+        resolve_egress_targets(_task(), env=env, settings=_settings(ApiBackend.LITELLM))
     assert "secret" not in "".join(traceback.format_exception(excinfo.value))
 
 
@@ -195,7 +175,7 @@ def test_the_none_agent_adds_nothing():
 def test_unresolved_agent_contributes_nothing():
     task = _task()
     task.agent = None
-    assert resolve_egress_targets(task, env={}, settings=_settings()) == DIRECT
+    assert resolve_egress_targets(task, env={}, settings=_settings()) == []
 
 
 def test_system_one_judge_default_and_custom_base_url():
@@ -226,3 +206,61 @@ def test_every_registered_agent_config_answers_with_normalized_targets():
 def test_docker_run_error_is_one_class_in_both_modules():
     assert docker_runner.DockerRunError is errors.DockerRunError
     assert issubclass(errors.EgressSetupError, errors.DockerRunError)
+
+
+def test_forwarded_url_vars_do_not_widen_the_allowlist():
+    env = {"UIPATH_URL": "https://cloud.uipath.com/org", "MY_SERVICE_URL": "https://svc.example.com"}
+    task = _task(env_passthrough_extra=["MY_SERVICE_URL"])
+    assert resolve_egress_targets(task, env=env, settings=_settings()) == DIRECT
+
+
+def test_claude_code_does_not_get_the_codex_host():
+    env = {"CODEX_BASE_URL": "https://x.openai.azure.com/openai/v1"}
+    assert resolve_egress_targets(_task(), env=env, settings=_settings()) == DIRECT
+
+
+@pytest.mark.parametrize("kind", ["codex", "antigravity", "pi", "opencode", "delegate"])
+def test_agents_off_the_api_backend_do_not_get_its_hosts(kind: str):
+    targets = resolve_egress_targets(
+        _task({"type": kind}), env={}, settings=_settings(ApiBackend.BEDROCK, "eu-north-1")
+    )
+    assert not [t for t in targets if "anthropic" in t or "claude" in t or "bedrock" in t]
+
+
+def test_codex_plain_http_base_url_defaults_to_port_80():
+    env = {"CODEX_BASE_URL": "http://gw.example/v1"}
+    assert resolve_egress_targets(_task({"type": "codex"}), env=env, settings=_settings()) == ["gw.example:80"]
+
+
+def test_llm_judge_adds_the_backend_for_an_agent_off_the_backend():
+    judge = LLMJudgeCriterion(description="j", prompt="p")
+    task = _task({"type": "antigravity"}, criteria=[judge])
+    targets = resolve_egress_targets(task, env={}, settings=_settings(ApiBackend.BEDROCK, "eu-north-1"))
+    assert targets == [
+        "bedrock-runtime.eu-north-1.amazonaws.com:443",
+        "bedrock.eu-north-1.amazonaws.com:443",
+        "generativelanguage.googleapis.com:443",
+    ]
+
+
+def test_judge_route_override_uses_that_backend():
+    judge = AgentJudgeCriterion(description="j", prompt="p")
+    task = _task({"type": "codex"}, criteria=[judge])
+    task.checker_context = CheckerContext(api_route=ApiRouteContext(route=ApiBackend.DIRECT))
+    targets = resolve_egress_targets(task, env={}, settings=_settings(ApiBackend.BEDROCK, "eu-north-1"))
+    assert targets == sorted([*DIRECT, "api.openai.com:443"])
+
+
+def test_enabled_simulation_adds_the_backend():
+    task = _task({"type": "codex"})
+    task.simulation = SimulationConfig(enabled=True, persona="p", goal="g")
+    assert resolve_egress_targets(task, env={}, settings=_settings()) == sorted([*DIRECT, "api.openai.com:443"])
+    task.simulation = SimulationConfig(enabled=False, persona="p", goal="g")
+    assert resolve_egress_targets(task, env={}, settings=_settings()) == ["api.openai.com:443"]
+
+
+def test_litellm_backend_without_a_forwarded_url_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger="coder_eval.isolation.egress"):
+        targets = resolve_egress_targets(_task(), env={}, settings=_settings(ApiBackend.LITELLM))
+    assert targets == []
+    assert "LITELLM_BASE_URL" in caplog.text

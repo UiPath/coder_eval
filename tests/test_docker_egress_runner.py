@@ -41,6 +41,7 @@ from coder_eval.models import (
     FinalStatus,
     SandboxConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 from coder_eval.orchestration.regrade import _container_dispatch_commands
 from coder_eval.path_utils import TASK_JSON_FILENAME
@@ -55,6 +56,7 @@ def _runner(**docker: object) -> DockerRunner:
         task_id="t",
         description="d",
         initial_prompt="p",
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(**docker)),  # type: ignore[arg-type]
         success_criteria=[FileExistsCriterion(description="c", path="x.txt")],
     )

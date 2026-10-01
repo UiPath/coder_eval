@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -127,6 +129,34 @@ def normalize_egress_target(entry: str) -> str:
             + "port 1-65535), with no scheme, path, wildcard or IPv6 literal."
         )
     return f"{host}:{int(port_text)}"
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+logger = logging.getLogger(__name__)
+
+
+def url_egress_target(source: str, url: str) -> str | None:
+    """Normalized ``host:port`` of an ``http(s)`` URL, or None when it has no host or another scheme.
+
+    A loopback host is also None, with a warning: the egress sidecar cannot reach it.
+    ``source`` names the URL in the warning and the error; the URL itself is never
+    echoed, because it may carry credentials.
+
+    Raises:
+        ValueError: The URL's host or port cannot be allowlisted.
+    """
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        if parts.hostname in _LOOPBACK_HOSTS:
+            logger.warning("%s points at a loopback host, which the egress sidecar cannot reach.", source)
+            return None
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
+        return normalize_egress_target(f"{parts.hostname}:{port}")
+    except ValueError:
+        raise ValueError(f"{source} has a host or port that network: llm_only cannot allowlist.") from None
 
 
 class DockerBuildConfig(BaseModel):

@@ -102,20 +102,21 @@ allowlist.
 
 ### The derived allowlist
 
-You do not list the model APIs yourself. The host derives them:
+You do not list the model APIs yourself. The host derives them from the parts of the task that
+call a model, and adds nothing for the parts that do not:
 
 | Source | Hosts added |
 |---|---|
-| API backend (`API_BACKEND`) | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the `LITELLM_BASE_URL` row below |
-| Forwarded `*_URL` variables | the host and port of every variable in `env_passthrough` / `env_passthrough_extra` whose name ends in `_URL` and whose value is an `http(s)` URL: `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`), `CODEX_BASE_URL`, `UIPATH_URL`, and your own |
-| Agent | codex: `api.openai.com:443` when `CODEX_BASE_URL` is not forwarded. antigravity: `generativelanguage.googleapis.com:443`. pi: the host of the `provider/` prefix of `agent.model` (`openrouter`, `anthropic`, `openai`, `google`; anything else or no model gives `openrouter.ai:443`). claude-code, opencode, delegate, none: nothing |
+| API backend (`API_BACKEND`), only when a `claude-code` agent, an enabled `simulation:`, or an `llm_judge` / `agent_judge` criterion uses it | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the host of the forwarded `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`) |
+| Agent | codex: the host of the forwarded `CODEX_BASE_URL`, else `api.openai.com:443`. antigravity: `generativelanguage.googleapis.com:443`. pi: the host of the `provider/` prefix of `agent.model` (`openrouter`, `anthropic`, `openai`, `google`; anything else or no model gives `openrouter.ai:443`). claude-code, opencode, delegate, none: nothing beyond the backend row |
 | `system_one_judge` criteria | the host of each `base_url` (default `api.typesafe.ai:443`) |
 | `egress_allowlist` | your entries |
 
-The judges (`llm_judge`, `agent_judge`) and the dialog simulator use the API backend, so the
-backend row covers them, unless the task sets `checker_context.api_route` to another route or
-endpoint: add that host to `egress_allowlist`. A Pi provider other than the four above, and every OpenCode or Delegate
-provider, needs its host in `egress_allowlist`.
+A judge with its own `checker_context.api_route.route` uses the hosts of that backend. A
+`route: litellm` judge configures its endpoint through `params`, so add that host to
+`egress_allowlist`. Other forwarded `*_URL` variables, such as `UIPATH_URL`, add no host: a task
+whose tools call that service lists the host in `egress_allowlist`. A Pi provider other than the
+four above, and every OpenCode or Delegate provider, also needs its host in `egress_allowlist`.
 
 ### Extra egress hosts
 

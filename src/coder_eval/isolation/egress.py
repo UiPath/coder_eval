@@ -17,7 +17,14 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 from coder_eval.isolation.errors import EgressSetupError
-from coder_eval.models import ApiBackend, SystemOneJudgeCriterion, normalize_egress_target
+from coder_eval.models import (
+    AgentJudgeCriterion,
+    ApiBackend,
+    LLMJudgeCriterion,
+    SystemOneJudgeCriterion,
+    normalize_egress_target,
+    url_egress_target,
+)
 
 
 if TYPE_CHECKING:
@@ -58,33 +65,10 @@ def forwarded_env_names(task: TaskDefinition) -> set[str]:
     return set(docker.env_passthrough) | set(docker.env_passthrough_extra)
 
 
-def _url_target(source: str, url: str, *, rewrite_loopback: bool = False) -> str | None:
-    """``host:port`` of an ``http(s)`` URL with a host, else None.
-
-    ``source`` names the URL in errors and warnings; the URL itself is never echoed,
-    because it may carry credentials.
-    """
-    try:
-        if rewrite_loopback:
-            url = _rewrite_loopback_for_container(url) or url
-        parts = urlsplit(url)
-        if parts.scheme not in ("http", "https") or not parts.hostname:
-            return None
-        if parts.hostname in _LOOPBACK_HOSTS:
-            logger.warning(
-                "%s points at a loopback host, which the egress sidecar cannot reach; it is not allowlisted.", source
-            )
-            return None
-        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
-        return normalize_egress_target(f"{parts.hostname}:{port}")
-    except ValueError:
-        raise ValueError(f"{source} has a host or port that network: llm_only cannot allowlist.") from None
-
-
-def _backend_targets(settings: Settings) -> list[str]:
-    if settings.api_backend == ApiBackend.DIRECT:
+def _backend_targets(backend: ApiBackend, settings: Settings, forwarded: Mapping[str, str]) -> list[str]:
+    if backend == ApiBackend.DIRECT:
         return list(_DIRECT_TARGETS)
-    if settings.api_backend == ApiBackend.BEDROCK:
+    if backend == ApiBackend.BEDROCK:
         region = settings.aws_region
         if not region:
             logger.warning("api_backend is bedrock but AWS_REGION is unset: no Bedrock host is allowlisted.")
@@ -96,34 +80,53 @@ def _backend_targets(settings: Settings) -> list[str]:
             ]
         except ValueError:
             raise ValueError("AWS_REGION is not a valid region name for a Bedrock host.") from None
-    return []
+    base_url = forwarded.get("LITELLM_BASE_URL")
+    if not base_url:
+        logger.warning("api_backend is litellm but LITELLM_BASE_URL is not forwarded: no LiteLLM host is allowlisted.")
+        return []
+    try:
+        rewritten = _rewrite_loopback_for_container(base_url) or base_url
+    except ValueError:
+        raise ValueError("LITELLM_BASE_URL has a host or port that network: llm_only cannot allowlist.") from None
+    target = url_egress_target("LITELLM_BASE_URL", rewritten)
+    return [target] if target is not None else []
+
+
+def _api_backends_used(task: TaskDefinition, settings: Settings) -> set[ApiBackend]:
+    """The backends the agent, the dialog simulator and the LLM judges reach their model through."""
+    backends: set[ApiBackend] = set()
+    if task.agent is not None and task.agent.uses_api_backend:
+        backends.add(settings.api_backend)
+    if task.simulation is not None and task.simulation.enabled:
+        backends.add(settings.api_backend)
+    if any(isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) for c in task.success_criteria):
+        api_route = task.checker_context.api_route if task.checker_context else None
+        backends.add(api_route.route if api_route and api_route.route else settings.api_backend)
+    return backends
 
 
 def resolve_egress_targets(task: TaskDefinition, *, env: Mapping[str, str], settings: Settings) -> list[str]:
     """Every ``host:port`` the task's container may reach under ``network: llm_only``.
 
-    The union of the API backend's hosts, the host of every forwarded ``*_URL``
-    variable, the agent config's ``egress_hosts``, each ``system_one_judge``
-    ``base_url``, and ``sandbox.docker.egress_allowlist``. ``env`` is the host
-    environment; only the variables the container receives count. Pure: reads only
-    its arguments. Sorted and de-duplicated.
+    The union of the hosts of each API backend the task uses (see
+    ``_api_backends_used``), the agent config's ``egress_hosts``, each
+    ``system_one_judge`` ``base_url``, and ``sandbox.docker.egress_allowlist``.
+    ``env`` is the host environment; only the variables the container receives
+    count. Pure: reads only its arguments. Sorted and de-duplicated.
 
     Raises:
-        ValueError: A forwarded URL, a judge ``base_url`` or ``AWS_REGION`` names a host
-            that cannot be allowlisted.
+        ValueError: ``LITELLM_BASE_URL``, ``CODEX_BASE_URL``, a judge ``base_url`` or
+            ``AWS_REGION`` names a host that cannot be allowlisted.
     """
     forwarded = {name: env[name] for name in forwarded_env_names(task) if env.get(name)}
-    targets = set(_backend_targets(settings))
-    for name in sorted(forwarded):
-        if name.endswith("_URL"):
-            target = _url_target(name, forwarded[name], rewrite_loopback=name == "LITELLM_BASE_URL")
-            if target is not None:
-                targets.add(target)
+    targets: set[str] = set()
+    for backend in sorted(_api_backends_used(task, settings)):
+        targets.update(_backend_targets(backend, settings, forwarded))
     if task.agent is not None:
         targets.update(task.agent.egress_hosts(forwarded))
     for criterion in task.success_criteria:
         if isinstance(criterion, SystemOneJudgeCriterion):
-            target = _url_target("system_one_judge base_url", criterion.base_url)
+            target = url_egress_target("system_one_judge base_url", criterion.base_url)
             if target is not None:
                 targets.add(target)
     targets.update(task.sandbox.docker.egress_allowlist)

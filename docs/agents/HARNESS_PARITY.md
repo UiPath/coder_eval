@@ -747,8 +747,8 @@ full network, `none` gives it no network, and `llm_only` lets it reach only the 
 | `bridge` | works | works | works | works (custom image) | works | works (custom image) | works |
 | `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
 | `llm_only` honours the proxy | yes | yes | yes | CLI not in the framework image; untested | yes | CLI not in the framework image; untested | no egress needed |
-| Default egress hosts (beyond the backend's) | none | the `CODEX_BASE_URL` host, else `api.openai.com:443` | `generativelanguage.googleapis.com:443` | none: add the provider hosts to `egress_allowlist` | the `provider/` host of `agent.model` (default `openrouter.ai:443`) | none: add the backend hosts to `egress_allowlist` | none |
-| Verified by | spike S3 (Bedrock and direct) | spike S4 (Azure `CODEX_BASE_URL`) | spike S6 | spike S8 (absent) | spike S7 | spike S8 (absent) | — |
+| Default egress hosts | the API backend's hosts | the `CODEX_BASE_URL` host, else `api.openai.com:443` (no backend hosts) | `generativelanguage.googleapis.com:443` (no backend hosts) | none: add the provider hosts to `egress_allowlist` | the `provider/` host of `agent.model` (default `openrouter.ai:443`) | none: add the backend hosts to `egress_allowlist` | none |
+| Verified by | runs R2, R11, R12 (Bedrock); spike S3 (direct) | run R3 (Luna on Azure `CODEX_BASE_URL`) | run R4 | spike S8 (absent) | run R5 (proxy path; the model call hit an OpenRouter credit limit) | spike S8 (absent) | — |
 
 Expected harmless `DENY` lines: Codex calls `chatgpt.com`, `github.com` and `api.github.com`
 (update check and remote config); Claude Code with `API_BACKEND=direct` sends telemetry to

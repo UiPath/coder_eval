@@ -197,6 +197,7 @@ from coder_eval.models.sandbox import (
     ResourceLimits,
     SandboxConfig,
     normalize_egress_target,
+    url_egress_target,
     validate_template_sources_list,
 )
 from coder_eval.models.system_one import (
@@ -347,6 +348,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SIDECAR_MODULES",
     "ResourceLimits",
     "normalize_egress_target",
+    "url_egress_target",
     "validate_template_sources_list",
     # Telemetry
     "AssistantMessage",

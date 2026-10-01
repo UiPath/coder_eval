@@ -1119,6 +1119,18 @@ and teardown is joined the same way.
 `^(ALLOW|DENY|FAIL)`. A request line with a control or non-ASCII byte is refused before anything is
 logged, because a lone `\n` in a method once forged a separate `ALLOW` line.
 
+### Why the allowlist follows the model callers, not the forwarded env
+
+The first version allowed the API backend's hosts for every agent and the host of every forwarded
+`*_URL` variable. The real runs showed the cost: a Claude task could reach the Azure
+`CODEX_BASE_URL` host, and a Codex, Antigravity or Pi task could reach `api.anthropic.com`,
+because those variables are on the default passthrough list and the default backend is `direct`.
+Each host was a model provider, but none was needed. So the backend's hosts are added only for a
+component that uses `API_BACKEND` (`uses_api_backend` on the agent config, an enabled simulator,
+an `llm_judge` / `agent_judge` criterion), and a URL variable counts only where its owner reads it
+(`LITELLM_BASE_URL` for the litellm backend, `CODEX_BASE_URL` in `CodexAgentConfig.egress_hosts`).
+Any other host is explicit in `egress_allowlist`.
+
 ### What Phase 0 measured
 
 - Every built-in harness in the image and every judge route (`llm_judge`, `agent_judge`,
