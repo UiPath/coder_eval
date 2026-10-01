@@ -24,14 +24,14 @@ Under the hood, this agent spawns the host that the public [`@uipath/delegate-st
 npm install @uipath/delegate-stdio
 ```
 
-**You usually don't need to set anything about where.** When neither `DELEGATE_STDIO_NODE_MODULES` nor `DELEGATE_STDIO_PATH` is set, coder_eval searches for the install in this order: the current directory and its ancestors (the same way Node resolves modules), then `src/coder_eval/agents/delegate/`, then your home directory. `src/coder_eval/agents/delegate/` is this agent's own directory, and it ships a `package.json` that names the dependency. An install there is found from any current directory.
+**You usually don't need to set anything about where.** When neither `DELEGATE_SDK_NODE_MODULES` nor `DELEGATE_SDK_PATH` is set, coder_eval searches for the install in this order: the current directory and its ancestors (the same way Node resolves modules), then `src/coder_eval/agents/delegate/`, then your home directory. `src/coder_eval/agents/delegate/` is this agent's own directory, and it ships a `package.json` that names the dependency. An install there is found from any current directory.
 
 To override the auto-search, set **one** of:
 
 | Variable | Purpose |
 |---|---|
-| `DELEGATE_STDIO_NODE_MODULES` | Install root that holds `node_modules/@uipath/...`. |
-| `DELEGATE_STDIO_PATH` | Absolute path straight to `@uipath/delegate-stdio/dist/delegate_stdio.mjs`. |
+| `DELEGATE_SDK_NODE_MODULES` | Install root that holds `node_modules/@uipath/...`. |
+| `DELEGATE_SDK_PATH` | Absolute path straight to `@uipath/delegate-stdio/dist/delegate_stdio.mjs`. Any other file, such as `@uipath/delegate-sdk`'s `dist/index.mjs`, is an error. |
 
 On Windows, install into a short path. The interop binary sits deep inside `node_modules`, and a path longer than 260 characters makes its spawn fail with `ENOENT`.
 
@@ -39,16 +39,18 @@ On Windows, install into a short path. The interop binary sits deep inside `node
 
 | Variable | Purpose |
 |---|---|
-| `DELEGATE_SDK_ENV` | Cloud environment slug (`alpha` / `staging` / `production`), sent as the host's `env` init option. The host derives the backend URL from the org/tenant slugs. |
-| `BACKEND_URL` | Pin the full agent-service URL directly (e.g. `https://cloud.uipath.com/<org>/<tenant>/delegate_`, or `http://localhost:5002` for a local backend). The host reads it itself. Wins over `DELEGATE_SDK_ENV` when both are set. |
+| `DELEGATE_ENV` | Cloud environment slug (`alpha` / `staging` / `production`), sent as the host's `env` init option. The host derives the backend URL from the org/tenant slugs. |
+| `DELEGATE_BACKEND_URL` | Pin the full agent-service URL directly (e.g. `https://cloud.uipath.com/<org>/<tenant>/delegate_`, or `http://localhost:5002` for a local backend), sent as the host's `backendUrl` init option. Wins over `DELEGATE_ENV` when both are set. |
 | `INTEROP_URL` | Connect to an interop instance that is already running, instead of letting the SDK spawn its own. The host reads it itself. |
 
 ### 3. Authenticate
 
 Either:
 
-- **Environment token** — `AUTH_TOKEN`, `TENANT_ID`, `ORG_ID` env vars. When `DELEGATE_SDK_ENV` (not `BACKEND_URL`) resolves the backend, also set `ORG_LOGICAL_NAME` and `TENANT_NAME`. These are the human-readable org/tenant names, not the GUIDs. All of these are the host's own names: coder_eval passes its environment to the host unchanged, and the host reads them itself. Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `BACKEND_URL` instead.
-- **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no `AUTH_TOKEN` is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `ORG_LOGICAL_NAME` / `TENANT_NAME` are not needed.
+- **Environment token** — `DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID` env vars. When `DELEGATE_ENV` (not `DELEGATE_BACKEND_URL`) resolves the backend, also set `DELEGATE_ORG_SLUG` and `DELEGATE_TENANT_SLUG`. These are the human-readable org/tenant names, not the GUIDs. Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `DELEGATE_BACKEND_URL` instead. Each variable also accepts the bare spelling (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_SLUG`, `TENANT_SLUG`) as a fallback. Prefer the `DELEGATE_` spelling in a shared environment, because the bare names collide with what other tooling (npm, Vault, Terraform) commonly exports.
+- **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no token is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `DELEGATE_ORG_SLUG` / `DELEGATE_TENANT_SLUG` are not needed.
+
+coder_eval sends these values to the host as its `auth` init option, on stdin. It also removes the host's own variable names (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`, `BACKEND_URL`) and `DELEGATE_AUTH_TOKEN` from the host's environment. So the agent's shell commands cannot read the token, and a variable that another tool exports does not change where the host connects. The `auth` init option needs a `@uipath/delegate-stdio` release that accepts it: version 1.202.1 and older ignore it, and then init fails with `Auth required` unless a saved login exists.
 
 The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh) and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
 
@@ -130,7 +132,7 @@ A wall-clock deadline (`timeout`) is enforced both between reads (a top-of-loop 
 
 On any crash (host death, an `error` frame during a turn, or an unexpected exception), the agent:
 1. Sets `pending_turn` to a `crashed=True` TurnRecord with captured telemetry.
-2. Raises `AgentCrashError` (retryable) or `AgentConfigError` (non-retryable — missing Node/SDK install, or an init error that a retry cannot fix: missing or rejected auth, missing org/tenant slugs, or an unknown `DELEGATE_SDK_ENV`). Any other init error, and an init that does not respond within 60 s, is retryable.
+2. Raises `AgentCrashError` (retryable) or `AgentConfigError` (non-retryable — missing Node/SDK install, or an init error that a retry cannot fix: missing or rejected auth, missing org/tenant slugs, or an unknown `DELEGATE_ENV`). Any other init error, and an init that does not respond within 60 s, is retryable.
 3. The orchestrator reads `pending_turn` and calls `discard_pending_turn()` to roll back state.
 
 The crash reason never includes the host's stderr. The agent logs the last 20 stderr lines at WARNING instead, because the error categorizer matches words in the reason, and stderr contains the sandbox path, which contains the task id.

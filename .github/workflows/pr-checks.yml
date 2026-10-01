@@ -1187,10 +1187,10 @@ jobs:
     # and implemented in coder_eval_uipath/eval_runner/scripts/ci/refresh-auth.sh —
     # rather than a long-lived AUTH_TOKEN secret, since a minted token's ~1h TTL
     # would make a static secret stale between runs. A dedicated bot user's
-    # username/password is the durable credential; the Delegate SDK reads the
-    # minted token straight from AUTH_TOKEN/TENANT_ID/ORG_ID (see
-    # docs/agents/DELEGATE.md), so no sdk-auth.json or client-secret refresh chain
-    # is needed here.
+    # username/password is the durable credential; the agent sends the minted
+    # token (DELEGATE_AUTH_TOKEN, with DELEGATE_TENANT_ID / DELEGATE_ORG_ID) to the
+    # host as its `auth` init option (see docs/agents/DELEGATE.md), so no
+    # sdk-auth.json or client-secret refresh chain is needed here.
     name: Delegate Live E2E (ROPC)
     runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
@@ -1372,16 +1372,16 @@ jobs:
       - name: Run fizzbuzz delegate task (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
-          DELEGATE_SDK_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
-          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
-          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
-          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          # Read by the delegate-stdio host itself — needed alongside the GUIDs
-          # above whenever DELEGATE_SDK_ENV (rather than BACKEND_URL) resolves
-          # the backend (see .claude/notes/agents.md § Delegate agent).
-          ORG_LOGICAL_NAME: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_NAME: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          # Needed alongside the GUIDs above whenever DELEGATE_ENV (rather than
+          # DELEGATE_BACKEND_URL) resolves the backend; the agent sends all five to
+          # the host as its `auth` init option (see .claude/notes/agents.md § Delegate agent).
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: .venv/bin/coder-eval run tasks/delegate/fizzbuzz_delegate.yaml --run-dir runs/delegate-live
 
       - name: Verify Delegate live run PASSED
@@ -1404,13 +1404,13 @@ jobs:
       - name: Run Delegate live unit tests (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_STDIO_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
-          DELEGATE_SDK_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
-          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
-          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
-          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          ORG_LOGICAL_NAME: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_NAME: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: |
           mkdir -p tmp
           .venv/bin/pytest tests/test_delegate_agent_live.py \

@@ -146,6 +146,29 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
+_DELEGATE_ENV_NAMES = (
+    "DELEGATE_SDK_PATH",
+    "DELEGATE_SDK_NODE_MODULES",
+    "DELEGATE_ENV",
+    "DELEGATE_BACKEND_URL",
+    *(
+        f"{prefix}{name}"
+        for prefix in ("", "DELEGATE_")
+        for name in ("AUTH_TOKEN", "TENANT_ID", "ORG_ID", "ORG_SLUG", "TENANT_SLUG")
+    ),
+    "ORG_LOGICAL_NAME",
+    "TENANT_NAME",
+    "BACKEND_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_delegate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter builds init options from these names, so the developer's own values must not leak in."""
+    for name in _DELEGATE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
 def _config(**overrides: Any) -> DelegateAgentConfig:
     return DelegateAgentConfig(type=AgentKind.DELEGATE, **overrides)
 
@@ -163,31 +186,39 @@ class TestResolveHostBundle:
     def test_explicit_path_env_var(self, tmp_path, monkeypatch):
         entry = tmp_path / "delegate_stdio.mjs"
         entry.write_text("#!/usr/bin/env node")
-        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(entry))
+        monkeypatch.setenv("DELEGATE_SDK_PATH", str(entry))
         assert _resolve_host_bundle() == entry.resolve()
 
+    def test_explicit_path_to_another_file_raises(self, tmp_path, monkeypatch):
+        sdk_entry = tmp_path / "node_modules" / "@uipath" / "delegate-sdk" / "dist" / "index.mjs"
+        sdk_entry.parent.mkdir(parents=True)
+        sdk_entry.write_text("export {}")
+        monkeypatch.setenv("DELEGATE_SDK_PATH", str(sdk_entry))
+        with pytest.raises(AgentConfigError, match="must point at @uipath/delegate-stdio"):
+            _resolve_host_bundle()
+
     def test_explicit_path_missing_file_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(tmp_path / "nope.mjs"))
+        monkeypatch.setenv("DELEGATE_SDK_PATH", str(tmp_path / "nope.mjs"))
         with pytest.raises(AgentConfigError, match="does not point to a file"):
             _resolve_host_bundle()
 
     def test_node_modules_override(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_STDIO_NODE_MODULES", str(tmp_path))
+        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
+        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
         entry = tmp_path / "node_modules" / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
         entry.parent.mkdir(parents=True)
         entry.write_text("#!/usr/bin/env node")
         assert _resolve_host_bundle() == entry.resolve()
 
     def test_node_modules_override_missing_raises(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_STDIO_NODE_MODULES", str(tmp_path))
+        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
+        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
         with pytest.raises(AgentConfigError, match="not found"):
             _resolve_host_bundle()
 
     def test_no_config_and_not_found_raises_with_search_list(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_STDIO_PATH", raising=False)
-        monkeypatch.delenv("DELEGATE_STDIO_NODE_MODULES", raising=False)
+        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
+        monkeypatch.delenv("DELEGATE_SDK_NODE_MODULES", raising=False)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))
         # A real npm install under the developer's actual home directory must
@@ -230,6 +261,14 @@ class TestStart:
         with pytest.raises(error_type, match="Delegate SDK init failed"):
             await agent.start(str(tmp_path))
         assert agent._process is None
+
+    async def test_a_config_init_error_names_the_variables_coder_eval_reads(self, patch_exec, tmp_path):
+        """The host's message names the host's own variables, which coder_eval keeps out of its env."""
+        message = 'env="alpha" requires org/tenant slugs. Set ORG_LOGICAL_NAME and TENANT_NAME env vars'
+        patch_exec([_line({"type": "error", "message": message})])
+        agent = DelegateAgent(_config())
+        with pytest.raises(AgentConfigError, match="DELEGATE_ORG_SLUG / DELEGATE_TENANT_SLUG"):
+            await agent.start(str(tmp_path))
 
     async def test_init_timeout_is_retryable(self, patch_exec, tmp_path, monkeypatch):
         monkeypatch.setattr(agent_module, "_INIT_TIMEOUT_SEC", 0.05)
@@ -279,20 +318,29 @@ class TestStart:
         await _started_agent(patch_exec, [], tmp_path, system_prompt="be nice")
         assert any("has no Delegate SDK equivalent" in r.message for r in caplog.records)
 
-    async def test_delegate_sdk_env_becomes_the_env_option(self, patch_exec, tmp_path, monkeypatch):
-        monkeypatch.setenv("DELEGATE_SDK_ENV", "alpha")
-        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        assert proc.stdin.written[0]["options"]["env"] == "alpha"
-
-    async def test_backend_url_is_left_for_the_host_to_read(self, patch_exec, tmp_path, monkeypatch):
-        monkeypatch.setenv("BACKEND_URL", "https://user:secret@backend.example/delegate_")
-        monkeypatch.setenv("DELEGATE_SDK_ENV", "alpha")
+    async def test_delegate_env_becomes_the_env_option(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("DELEGATE_ENV", "alpha")
         agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        assert "backendUrl" not in proc.stdin.written[0]["options"]
-        assert proc.spawn_kwargs["env"]["BACKEND_URL"] == "https://user:secret@backend.example/delegate_"
+        assert proc.stdin.written[0]["options"]["env"] == "alpha"
+        assert agent.get_environment_info()["delegate_env"] == "alpha"
+
+    async def test_delegate_backend_url_becomes_the_backend_url_option(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("DELEGATE_BACKEND_URL", "https://user:secret@backend.example/delegate_")
+        monkeypatch.setenv("DELEGATE_ENV", "alpha")
+        agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        assert proc.stdin.written[0]["options"]["backendUrl"] == "https://user:secret@backend.example/delegate_"
         info = agent.get_environment_info()
         assert info["delegate_backend_url_host"] == "backend.example"
         assert "delegate_env" not in info
+
+    async def test_the_host_never_reads_its_own_auth_or_backend_names(self, patch_exec, tmp_path, monkeypatch):
+        """A BACKEND_URL or ORG_LOGICAL_NAME exported for another tool must not route the host."""
+        host_names = ("AUTH_TOKEN", "TENANT_ID", "ORG_ID", "ORG_LOGICAL_NAME", "TENANT_NAME", "BACKEND_URL")
+        for name in host_names:
+            monkeypatch.setenv(name, "value-for-another-tool")
+        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        env = proc.spawn_kwargs["env"]
+        assert not [name for name in host_names if name in env]
 
     async def test_skills_enabled_only_with_a_plugin(self, patch_exec, tmp_path):
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
@@ -307,22 +355,49 @@ class TestStart:
         assert options["enableSkills"] is True
         assert options["bundledSkillsPath"] == str(plugin_dir / "skills")
 
-    async def test_auth_reaches_the_host_under_its_own_env_names(self, patch_exec, tmp_path, monkeypatch):
-        """The host reads auth from its environment, so nothing auth-shaped goes into init options."""
-        auth = {
-            "AUTH_TOKEN": "tok-1",
-            "TENANT_ID": "tenant-guid",
-            "ORG_ID": "org-guid",
-            "ORG_LOGICAL_NAME": "my-org",
-            "TENANT_NAME": "my-tenant",
-        }
-        for name, value in auth.items():
+    async def test_auth_reaches_the_host_as_the_auth_init_option(self, patch_exec, tmp_path, monkeypatch):
+        """The token goes to the host on stdin only, so the agent's shells cannot read it from their env."""
+        for name, value in {
+            "DELEGATE_AUTH_TOKEN": "tok-1",
+            "DELEGATE_TENANT_ID": "tenant-guid",
+            "DELEGATE_ORG_ID": "org-guid",
+            "DELEGATE_ORG_SLUG": "my-org",
+            "DELEGATE_TENANT_SLUG": "my-tenant",
+        }.items():
             monkeypatch.setenv(name, value)
-        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "old-namespaced-token")
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        env = proc.spawn_kwargs["env"]
-        assert {name: env[name] for name in auth} == auth
+        assert proc.stdin.written[0]["options"]["auth"] == {
+            "accessToken": "tok-1",
+            "tenantId": "tenant-guid",
+            "organizationId": "org-guid",
+            "orgLogicalName": "my-org",
+            "tenantName": "my-tenant",
+        }
+        assert "tok-1" not in proc.spawn_kwargs["env"].values()
+
+    async def test_the_namespaced_name_wins_and_the_bare_name_is_the_fallback(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "namespaced-token")
+        monkeypatch.setenv("AUTH_TOKEN", "bare-token")
+        monkeypatch.setenv("ORG_SLUG", "bare-org")
+        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        auth = proc.stdin.written[0]["options"]["auth"]
+        assert auth == {"accessToken": "namespaced-token", "orgLogicalName": "bare-org"}
+
+    async def test_no_auth_variables_send_no_auth_option(self, patch_exec, tmp_path):
+        """The host then falls back to the saved login."""
+        _agent, proc = await _started_agent(patch_exec, [], tmp_path)
         assert "auth" not in proc.stdin.written[0]["options"]
+
+    async def test_sdk_options_redact_the_credentials(self, patch_exec, tmp_path, monkeypatch):
+        """The run records sdk_options, so the token and a credential-bearing URL must not reach it."""
+        monkeypatch.setenv("DELEGATE_AUTH_TOKEN", "tok-1")
+        monkeypatch.setenv("DELEGATE_TENANT_ID", "tenant-guid")
+        monkeypatch.setenv("DELEGATE_BACKEND_URL", "https://user:secret@backend.example/delegate_")
+        agent, _proc = await _started_agent(patch_exec, [], tmp_path)
+        options = agent.get_sdk_options() or {}
+        assert options["auth"] == ["accessToken", "tenantId"]
+        assert options["backendUrl"] == "backend.example"
+        assert "tok-1" not in json.dumps(options)
 
     @pytest.mark.parametrize(
         ("token_file_env", "stripped"),

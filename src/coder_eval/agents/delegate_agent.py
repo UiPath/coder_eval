@@ -87,7 +87,8 @@ logger = logging.getLogger(__name__)
 # --- Host resolution ---------------------------------------------------------
 
 _HOST_PACKAGE = "@uipath/delegate-stdio"
-_HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
+_HOST_BUNDLE_NAME = "delegate_stdio.mjs"
+_HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / _HOST_BUNDLE_NAME
 _AGENT_INSTALL_ROOT = Path(__file__).resolve().parent / "delegate"
 """This agent's own directory; it ships a ``package.json`` that names the host package."""
 
@@ -122,7 +123,16 @@ _INIT_CONFIG_ERROR_MARKERS = (
     "unknown env",
 )
 """Substrings of an init ``error`` message that a retry cannot fix: missing or rejected
-auth, or a bad ``DELEGATE_SDK_ENV``. Any other init error is retryable."""
+auth, or a bad ``DELEGATE_ENV``. Any other init error is retryable."""
+
+_INIT_CONFIG_ERROR_HINT = (
+    "coder_eval sends the auth and the org/tenant slugs as the host's `auth` init option, read from "
+    + "DELEGATE_AUTH_TOKEN / DELEGATE_TENANT_ID / DELEGATE_ORG_ID / DELEGATE_ORG_SLUG / DELEGATE_TENANT_SLUG "
+    + "(or the same names without DELEGATE_), and keeps the host's own AUTH_TOKEN / TENANT_ID / ORG_ID / "
+    + "ORG_LOGICAL_NAME / TENANT_NAME out of its environment. A @uipath/delegate-stdio without the `auth` "
+    + "init option ignores it. See docs/agents/DELEGATE.md."
+)
+"""Appended to a config-class init error, whose host message names the host's own variables."""
 
 # Event types (inside the host's `event` frames) that carry model-turn content.
 # `session_start` / `done` are informational; anything else is logged and ignored.
@@ -146,6 +156,44 @@ def _orphan_tool_args(output: Any) -> dict[str, Any]:
     args = output.get("args") if isinstance(output, dict) else None
     return args if isinstance(args, dict) else {}
 
+
+def _env(bare_name: str) -> str | None:
+    """Read a ``DELEGATE_``-namespaced variable, falling back to the bare name.
+
+    The bare spellings (``AUTH_TOKEN``, ``TENANT_ID``, ...) collide with names
+    other tooling (npm, Vault, Terraform) commonly exports, so the namespaced
+    spelling is checked first.
+    """
+    return os.environ.get(f"DELEGATE_{bare_name}") or os.environ.get(bare_name)
+
+
+_AUTH_OPTION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("accessToken", "AUTH_TOKEN"),
+    ("tenantId", "TENANT_ID"),
+    ("organizationId", "ORG_ID"),
+    ("orgLogicalName", "ORG_SLUG"),
+    ("tenantName", "TENANT_SLUG"),
+)
+"""``(field of the host's auth init option, name read through _env)``."""
+
+
+def _auth_option() -> dict[str, str]:
+    """The host's ``auth`` init option, built from the variables that are set."""
+    return {field: value for field, name in _AUTH_OPTION_FIELDS if (value := _env(name))}
+
+
+_HOST_ENV_REMOVED = (
+    "AUTH_TOKEN",
+    "TENANT_ID",
+    "ORG_ID",
+    "ORG_LOGICAL_NAME",
+    "TENANT_NAME",
+    "BACKEND_URL",
+    "DELEGATE_AUTH_TOKEN",
+)
+"""Removed from the host's environment. The host reads the first six itself, but
+coder_eval sends their values as init options instead; and the agent's shell tools
+inherit the host env, so no spelling of the token may stay in it."""
 
 _GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
 
@@ -185,31 +233,38 @@ def _candidate_install_roots() -> list[Path]:
 def _resolve_host_bundle() -> Path:
     """Locate the installed ``@uipath/delegate-stdio``'s ``dist/delegate_stdio.mjs``.
 
-    Resolution order: ``DELEGATE_STDIO_PATH`` (explicit file path) ->
-    ``DELEGATE_STDIO_NODE_MODULES`` (explicit install root, probed exactly) ->
+    Resolution order: ``DELEGATE_SDK_PATH`` (explicit file path) ->
+    ``DELEGATE_SDK_NODE_MODULES`` (explicit install root, probed exactly) ->
     ``_candidate_install_roots()``, so an ``npm install`` in this agent's own
     ``agents/delegate/`` directory is found from any cwd.
 
     Raises:
-        AgentConfigError: no install found anywhere searched.
+        AgentConfigError: no install found anywhere searched, or ``DELEGATE_SDK_PATH``
+            names another file, such as ``@uipath/delegate-sdk``'s ``dist/index.mjs``.
     """
-    explicit = os.environ.get("DELEGATE_STDIO_PATH")
+    explicit = os.environ.get("DELEGATE_SDK_PATH")
     if explicit:
         path = Path(explicit).expanduser().resolve()
         if not path.is_file():
             raise AgentConfigError(
-                f"DELEGATE_STDIO_PATH={path} does not point to a file. Point it at "
-                + f"{_HOST_PACKAGE}'s dist/delegate_stdio.mjs."
+                f"DELEGATE_SDK_PATH={path} does not point to a file. Point it at "
+                + f"{_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}."
+            )
+        if path.name != _HOST_BUNDLE_NAME:
+            raise AgentConfigError(
+                f"DELEGATE_SDK_PATH={path} must point at {_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}, "
+                + "not at @uipath/delegate-sdk's dist/index.mjs or another file. "
+                + f"Run `npm install {_HOST_PACKAGE}`; see docs/agents/DELEGATE.md."
             )
         return path
 
-    root_override = os.environ.get("DELEGATE_STDIO_NODE_MODULES")
+    root_override = os.environ.get("DELEGATE_SDK_NODE_MODULES")
     if root_override:
         path = (Path(root_override).expanduser().resolve() / _HOST_BUNDLE_REL_PATH).resolve()
         if not path.is_file():
             raise AgentConfigError(
-                f"DELEGATE_STDIO_NODE_MODULES={root_override}: {_HOST_PACKAGE} not found at {path}. "
-                + f"Run `npm install {_HOST_PACKAGE}` there, or set DELEGATE_STDIO_PATH directly."
+                f"DELEGATE_SDK_NODE_MODULES={root_override}: {_HOST_PACKAGE} not found at {path}. "
+                + f"Run `npm install {_HOST_PACKAGE}` there, or set DELEGATE_SDK_PATH directly."
             )
         return path
 
@@ -225,8 +280,8 @@ def _resolve_host_bundle() -> Path:
         f"{_HOST_PACKAGE} not found. Searched the cwd, its ancestors, this agent's directory, and home:\n"
         + f"  {searched_block}\n"
         + f"Run `npm install {_HOST_PACKAGE}` (plain, public install — no token needed), "
-        + f"e.g. in {_AGENT_INSTALL_ROOT}, or set DELEGATE_STDIO_NODE_MODULES "
-        + "to the install root, or DELEGATE_STDIO_PATH to the dist/delegate_stdio.mjs file directly. "
+        + f"e.g. in {_AGENT_INSTALL_ROOT}, or set DELEGATE_SDK_NODE_MODULES "
+        + f"to the install root, or DELEGATE_SDK_PATH to the dist/{_HOST_BUNDLE_NAME} file directly. "
         + "See docs/agents/DELEGATE.md."
     )
 
@@ -458,6 +513,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         env.setdefault("DELEGATE_TELEMETRY_DISABLED", "1")
         if stripped := _strip_redundant_gateway_creds(env):
             logger.debug("delegate: a token file is configured; removed %s from the host env", ", ".join(stripped))
+        for name in _HOST_ENV_REMOVED:
+            env.pop(name, None)
 
         await self._cancel_drain_tasks()
         self._stdout_queue = asyncio.Queue()
@@ -495,7 +552,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             await self._force_kill_host()
             message = str(ack.get("message", "unknown error"))
             if any(marker in message.lower() for marker in _INIT_CONFIG_ERROR_MARKERS):
-                raise AgentConfigError(f"Delegate SDK init failed: {message}")
+                raise AgentConfigError(f"Delegate SDK init failed: {message} {_INIT_CONFIG_ERROR_HINT}")
             raise AgentCrashError(f"Delegate SDK init failed: {message}")
 
     def _build_init_options(self) -> dict[str, Any]:
@@ -512,9 +569,14 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             options["sessionId"] = self.config.session_id
         if self._env_path_prepend:
             options["shellPathPrepend"] = list(self._env_path_prepend)
-        environment = os.environ.get("DELEGATE_SDK_ENV")
+        backend_url = os.environ.get("DELEGATE_BACKEND_URL")
+        if backend_url:
+            options["backendUrl"] = backend_url
+        environment = os.environ.get("DELEGATE_ENV")
         if environment:
             options["env"] = environment
+        if auth := _auth_option():
+            options["auth"] = auth
         # list[LocalPluginConfig] is not list[dict[str, Any]] under list invariance.
         skills_path = _resolve_bundled_skills_path(self.config.plugins)  # type: ignore[arg-type]
         options["enableSkills"] = skills_path is not None
@@ -608,8 +670,19 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         await self._cancel_drain_tasks()
 
     def get_sdk_options(self) -> dict[str, Any] | None:
-        """The ``init`` options sent to the last host spawned, or ``None`` before ``start()``."""
-        return self._init_options
+        """The ``init`` options sent to the last host spawned, or ``None`` before ``start()``.
+
+        Credentials are redacted, because the result is persisted with the run:
+        ``auth`` becomes the names of its fields, and ``backendUrl`` its host.
+        """
+        if self._init_options is None:
+            return None
+        options = dict(self._init_options)
+        if "auth" in options:
+            options["auth"] = sorted(options["auth"])
+        if "backendUrl" in options:
+            options["backendUrl"] = urlparse(options["backendUrl"]).hostname
+        return options
 
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {
@@ -618,11 +691,11 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         }
         if self.config.enable_computer_use:
             info["delegate_enable_computer_use"] = True
-        # The host ranks BACKEND_URL over the env slug (see docs/agents/DELEGATE.md),
+        # The host ranks backendUrl over the env slug (see docs/agents/DELEGATE.md),
         # so recording delegate_env here too would assert a routing decision the SDK
         # never made. Host only (never the full URL, which can carry embedded credentials).
-        backend_url = os.environ.get("BACKEND_URL")
-        environment = os.environ.get("DELEGATE_SDK_ENV")
+        backend_url = os.environ.get("DELEGATE_BACKEND_URL")
+        environment = os.environ.get("DELEGATE_ENV")
         if backend_url:
             info["delegate_backend_url_host"] = urlparse(backend_url).hostname
         elif environment:

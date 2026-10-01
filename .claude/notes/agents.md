@@ -757,13 +757,29 @@ An earlier version of this agent wrapped `@uipath/delegate-sdk` in a first-party
 (`delegate_host.mjs`) because `delegate-stdio` was not yet public. That host and its protocol are
 gone; git history has them.
 
-**Auth goes through the host's environment, not the init options.** The host reads `AUTH_TOKEN` /
-`TENANT_ID` / `ORG_ID` and, for an `env`-derived backend URL, `ORG_LOGICAL_NAME` / `TENANT_NAME`
-from its own environment, and `BACKEND_URL` / `INTEROP_URL` too. coder_eval uses the host's names
-as its user-facing names and passes its environment through unchanged, so there is one set of names
-and no re-export table to drift, and `coder_eval_uipath` pipelines use the same names. Confirmed live with no saved login: with the slugs the
-turn runs; without them init fails with `env="alpha" requires org/tenant slugs`. The env slug is the
-one value the host takes only as an init option, so `DELEGATE_SDK_ENV` becomes `env`.
+**Auth and the backend reach the host as init options, not through its environment.** coder_eval
+keeps its own names: `_env` reads the `DELEGATE_`-namespaced spelling first, then the bare
+`AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` / `TENANT_SLUG`, and `_auth_option` sends the
+values as the host's `auth` init option. `DELEGATE_BACKEND_URL` becomes `backendUrl` and
+`DELEGATE_ENV` becomes `env`. It does not adopt the host's own names (`AUTH_TOKEN`, `TENANT_ID`,
+`ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`, `BACKEND_URL`), because the bare names collide with
+other tooling and the CI secrets are named after the `DELEGATE_` spellings.
+
+The host gives each `auth` field priority over its environment variable, and the SDK reads none of
+these names. It takes the credentials from the `TokenAuthProvider` the host builds, and an explicit
+`backendUrl` replaces the `BACKEND_URL` default its bundle reads at load. So `_HOST_ENV_REMOVED`
+takes the host's names, and the token under either spelling, out of the host's environment. The
+agent's shell tools inherit that environment, so a static token there is readable by the code under
+test. And a `BACKEND_URL` or `ORG_LOGICAL_NAME` that another tool exports can no longer route the
+host. A refresh source (token file, `LLMGW_*` pair, saved login) still writes its fresh token into
+the host's own `process.env.AUTH_TOKEN`.
+
+The option needs a host release that accepts it. An older host ignores it and fails init with
+`Auth required` unless a saved login exists; `_INIT_CONFIG_ERROR_HINT` names coder_eval's variables
+beside the host's message, which names the host's. Confirmed live against alpha with a host built
+from the Autopilot branch and `DELEGATE_STDIO_VERBOSE=1`: the host resolved auth from the option,
+not the saved login, and neither its stderr nor the recorded `sdk_options` contained the token.
+Without the slugs, init fails with `env="alpha" requires org/tenant slugs`.
 
 **Effort rides `sdk_options.effort`.** It is the same key as Claude Code, so one
 `-D agent.sdk_options.effort=...` drives both agents, and the reports' Effort row reads it from
@@ -771,7 +787,8 @@ one value the host takes only as an init option, so `DELEGATE_SDK_ENV` becomes `
 `sdk_options`; `DelegateAgentConfig` validates the keys against the host options it forwards.
 
 `get_sdk_options()` returns the whole `init` options dict sent to the host, not the user's
-pass-through dict. Both reports use `EvaluationResult.sdk_options` in place of `agent_config`
+pass-through dict, with the credentials redacted: `auth` becomes its field names and `backendUrl`
+its host, because the result is persisted in `task.json`. Both reports use `EvaluationResult.sdk_options` in place of `agent_config`
 whenever it is truthy, so a pass-through-only dict hid the Model row from any run that set an
 effort. The init dict carries `model` and `effort`. The reports then show Permission Mode as N/A
 and Allowed Tools as "(all)", which is correct for this SDK. There is no Plugins row, because the

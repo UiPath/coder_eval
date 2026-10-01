@@ -2,8 +2,9 @@
 
 Hit a real Delegate backend through a real Node subprocess; skipped by default,
 only run with ``pytest -m live``. Needs Node + a real ``@uipath/delegate-stdio``
-install, UiPath auth (``AUTH_TOKEN``/``TENANT_ID``/``ORG_ID`` or a saved login),
-a backend (``DELEGATE_SDK_ENV``/``BACKEND_URL``), and optionally
+install, UiPath auth (``DELEGATE_AUTH_TOKEN``/``DELEGATE_TENANT_ID``/``DELEGATE_ORG_ID``, or the
+same names without ``DELEGATE_``, or a saved login), a backend
+(``DELEGATE_ENV``/``DELEGATE_BACKEND_URL``), and optionally
 ``DELEGATE_MODEL``.
 
 A failure here while the unit tests pass usually means the host's frame shapes
@@ -32,8 +33,9 @@ def _have_prerequisites() -> bool:
         _resolve_host_bundle()
     except AgentConfigError:
         return False
-    has_auth = bool(os.getenv("AUTH_TOKEN")) or (Path.home() / ".aria" / "sdk-auth.json").is_file()
-    has_backend = bool(os.getenv("DELEGATE_SDK_ENV") or os.getenv("BACKEND_URL"))
+    has_token = bool(os.getenv("DELEGATE_AUTH_TOKEN") or os.getenv("AUTH_TOKEN"))
+    has_auth = has_token or (Path.home() / ".aria" / "sdk-auth.json").is_file()
+    has_backend = bool(os.getenv("DELEGATE_ENV") or os.getenv("DELEGATE_BACKEND_URL"))
     return has_auth and has_backend
 
 
