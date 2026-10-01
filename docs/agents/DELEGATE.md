@@ -24,7 +24,7 @@ Under the hood, this agent spawns the host that the public [`@uipath/delegate-st
 npm install @uipath/delegate-stdio
 ```
 
-**You usually don't need to set anything about where.** When neither `DELEGATE_STDIO_NODE_MODULES` nor `DELEGATE_STDIO_PATH` is set, coder_eval auto-locates the install by walking up from the current directory through its ancestors (and home) — the same way Node resolves modules. Running the install inside `src/coder_eval/agents/delegate/` (this agent's own directory, which ships a `package.json` naming the dependency) is a convenient default location.
+**You usually don't need to set anything about where.** When neither `DELEGATE_STDIO_NODE_MODULES` nor `DELEGATE_STDIO_PATH` is set, coder_eval searches for the install in this order: the current directory and its ancestors (the same way Node resolves modules), then `src/coder_eval/agents/delegate/`, then your home directory. `src/coder_eval/agents/delegate/` is this agent's own directory, and it ships a `package.json` that names the dependency. An install there is found from any current directory.
 
 To override the auto-search, set **one** of:
 
@@ -130,8 +130,10 @@ A wall-clock deadline (`timeout`) is enforced both between reads (a top-of-loop 
 
 On any crash (host death, an `error` frame during a turn, or an unexpected exception), the agent:
 1. Sets `pending_turn` to a `crashed=True` TurnRecord with captured telemetry.
-2. Raises `AgentCrashError` (retryable) or `AgentConfigError` (non-retryable — missing Node/SDK install, or an SDK init rejection such as a missing `backendUrl`).
+2. Raises `AgentCrashError` (retryable) or `AgentConfigError` (non-retryable — missing Node/SDK install, or an init error that a retry cannot fix: missing or rejected auth, missing org/tenant slugs, or an unknown `DELEGATE_SDK_ENV`). Any other init error, and an init that does not respond within 60 s, is retryable.
 3. The orchestrator reads `pending_turn` and calls `discard_pending_turn()` to roll back state.
+
+The crash reason never includes the host's stderr. The agent logs the last 20 stderr lines at WARNING instead, because the error categorizer matches words in the reason, and stderr contains the sandbox path, which contains the task id.
 
 A dead host is always detected and its handle cleared, so a retried `communicate()` call always respawns a fresh host rather than hang or cross-wire a stale response.
 

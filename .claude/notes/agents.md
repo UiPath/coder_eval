@@ -770,6 +770,13 @@ one value the host takes only as an init option, so `DELEGATE_SDK_ENV` becomes `
 `get_sdk_options()`. The `-D` gate admits any registered kind whose config class declares
 `sdk_options`; `DelegateAgentConfig` validates the keys against the host options it forwards.
 
+`get_sdk_options()` returns the whole `init` options dict sent to the host, not the user's
+pass-through dict. Both reports use `EvaluationResult.sdk_options` in place of `agent_config`
+whenever it is truthy, so a pass-through-only dict hid the Model row from any run that set an
+effort. The init dict carries `model` and `effort`. The reports then show Permission Mode as N/A
+and Allowed Tools as "(all)", which is correct for this SDK. There is no Plugins row, because the
+init dict names the skills directory (`bundledSkillsPath`), not a `plugins` list.
+
 **`max_turns` stays client-side.** The host accepts `maxSteps` on `send`, but it does not stop the
 turn: live, `maxSteps: 2` ran 7 steps and only reported `maxStepsReached: true` in the `result`.
 Forwarding it would suggest a cap that does not exist, so the adapter keeps counting calls from the
@@ -824,9 +831,20 @@ window from the turn's own start, so the head and tail both measure ~0.
   is replaced either way. A `session_id` pinned in config still reaches the new host as an init
   option, so a pinned run does not recover from this.
 
-A rewritten reason omits the stderr tail — the tail logs the SDK's own watchdog lines, and one
-"timeout" in it would re-route the crash to `AGENT_TIMEOUT` (the `timeout` rule runs before both
-"content filter" and "connection"). The tail is logged at WARNING instead.
+**No crash reason carries the stderr tail.** `errors/categorization.py` matches substrings of the
+reason, and the tail is incidental text: the SDK's own watchdog lines, PIDs, token lifetimes, and
+the host's `Working directory:` line, which holds the sandbox path and so the task id. In build
+13599116 the same transient `Delegate backend error: terminated` was retried on four tasks and
+ended `skill-review-agents-lowcode-guardrail-unknown-validator` as a non-retryable
+`AGENT_INVALID_OUTPUT`, because "guardrail" in its path matched the content-filter rule.
+`_log_stderr_tail` logs the tail at WARNING instead, on every crash path.
+
+**Only an init error that a retry cannot fix is non-retryable.** An init `error` frame raises
+`AgentConfigError` only when it matches `_INIT_CONFIG_ERROR_MARKERS`: missing or rejected auth
+(the out-of-tree adapter's auth markers, kept as they were), missing org/tenant slugs, or an
+unknown env slug. Any other init error, and the 60 s init deadline, raise a retryable
+`AgentCrashError`, so a backend 5xx or a slow token refresh during `agent.initialize()` gets
+`execute_with_retry('Agent start')`'s retries instead of ending the task at once.
 
 **`LLMGW_*` leaves the host env only when a token file is configured.** The host's shells inherit
 its env, so the gateway client secret there is readable by the code under test. But the host's own
@@ -850,6 +868,9 @@ a `"send"` still nominally in flight instead of respawning — risking a stale r
 the new turn's. `tests/test_delegate_agent.py`'s `test_timeout_elapsing_mid_read_still_raises_turn_timeout_error`
 pins the fix. The host survives a failed `send` (it answers the next `destroy` with `destroyed`), but
 the adapter still does not reuse it, so no late event from the failed turn can leak into the retry.
+`_force_kill_host` drops the handle itself, before its reap, so every path that kills the host
+clears it, even when the 5 s reap times out. Each call site used to pair the kill with its own
+clear, and `kill()` did not.
 
 **Skills mapping is deliberately NOT the shared `agents/_skills.py` resolver.** That resolver enumerates
 individual skill directories for a repeated `--skill <dir>`-style CLI argument (OpenCode/Pi's shape).

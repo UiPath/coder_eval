@@ -88,6 +88,8 @@ logger = logging.getLogger(__name__)
 
 _HOST_PACKAGE = "@uipath/delegate-stdio"
 _HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
+_AGENT_INSTALL_ROOT = Path(__file__).resolve().parent / "delegate"
+"""This agent's own directory; it ships a ``package.json`` that names the host package."""
 
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "allowed_tools",
@@ -106,6 +108,21 @@ _INIT_TIMEOUT_SEC = 60.0
 ``agent.initialize()`` (auth refresh, backend connect) blocks ``start()``
 indefinitely, unlike every turn-scoped read, which is deadline-bounded."""
 _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+_INIT_CONFIG_ERROR_MARKERS = (
+    "auth required",
+    "authentication",
+    "unauthorized",
+    "invalid credentials",
+    "invalid token",
+    "expired",
+    "401",
+    "403",
+    "requires org/tenant slugs",
+    "unknown env",
+)
+"""Substrings of an init ``error`` message that a retry cannot fix: missing or rejected
+auth, or a bad ``DELEGATE_SDK_ENV``. Any other init error is retryable."""
 
 # Event types (inside the host's `event` frames) that carry model-turn content.
 # `session_start` / `done` are informational; anything else is logged and ignored.
@@ -152,17 +169,16 @@ def _strip_redundant_gateway_creds(env: dict[str, str]) -> tuple[str, ...]:
 
 
 def _candidate_install_roots() -> list[Path]:
-    """Ancestor-walk search roots: cwd, its ancestors, and home.
+    """Search roots, in order: cwd and its ancestors, ``_AGENT_INSTALL_ROOT``, then home.
 
-    Mirrors Node's own module resolution so an ``npm install`` run in the
-    launch directory, any ancestor, or (where npm lands a package when the cwd
-    has no ``package.json``) home, is found with zero configuration.
+    The cwd walk mirrors Node's own module resolution. Home is where npm lands a
+    package when the cwd has no ``package.json``.
     """
     cwd = Path.cwd().resolve()
     roots: list[Path] = [cwd, *cwd.parents]
-    home = Path.home().resolve()
-    if home not in roots:
-        roots.append(home)
+    for root in (_AGENT_INSTALL_ROOT, Path.home().resolve()):
+        if root not in roots:
+            roots.append(root)
     return roots
 
 
@@ -171,9 +187,8 @@ def _resolve_host_bundle() -> Path:
 
     Resolution order: ``DELEGATE_STDIO_PATH`` (explicit file path) ->
     ``DELEGATE_STDIO_NODE_MODULES`` (explicit install root, probed exactly) ->
-    ancestor walk from cwd (plus home), so an ``npm install`` anywhere in that
-    chain — including this module's own ``agents/delegate/`` directory, which
-    ships a ``package.json`` naming the dependency — is found automatically.
+    ``_candidate_install_roots()``, so an ``npm install`` in this agent's own
+    ``agents/delegate/`` directory is found from any cwd.
 
     Raises:
         AgentConfigError: no install found anywhere searched.
@@ -207,10 +222,10 @@ def _resolve_host_bundle() -> Path:
 
     searched_block = "\n  ".join(str(p) for p in searched)
     raise AgentConfigError(
-        f"{_HOST_PACKAGE} not found. Searched the cwd, its ancestors, and home:\n"
+        f"{_HOST_PACKAGE} not found. Searched the cwd, its ancestors, this agent's directory, and home:\n"
         + f"  {searched_block}\n"
         + f"Run `npm install {_HOST_PACKAGE}` (plain, public install — no token needed), "
-        + "e.g. in this framework's own agents/delegate/ directory, or set DELEGATE_STDIO_NODE_MODULES "
+        + f"e.g. in {_AGENT_INSTALL_ROOT}, or set DELEGATE_STDIO_NODE_MODULES "
         + "to the install root, or DELEGATE_STDIO_PATH to the dist/delegate_stdio.mjs file directly. "
         + "See docs/agents/DELEGATE.md."
     )
@@ -392,6 +407,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._state = AgentState.WORKING
 
         self._host_bundle: Path | None = None
+        self._init_options: dict[str, Any] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -465,21 +481,22 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._stdout_task = asyncio.create_task(self._drain_stdout(self._process.stdout))
         self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
 
-        init_options = self._build_init_options()
-        await self._send_command({"cmd": "init", "options": init_options})
+        self._init_options = self._build_init_options()
+        await self._send_command({"cmd": "init", "options": self._init_options})
         try:
             ack = await asyncio.wait_for(self._read_until(("init_ok", "error")), timeout=_INIT_TIMEOUT_SEC)
         except TimeoutError as exc:
             await self._force_kill_host()
-            self._process = None
-            raise AgentConfigError(
+            raise AgentCrashError(
                 f"Delegate SDK init did not respond within {_INIT_TIMEOUT_SEC:.0f}s "
                 + "(hung auth refresh or backend connect?)."
             ) from exc
         if ack.get("type") == "error":
             await self._force_kill_host()
-            self._process = None
-            raise AgentConfigError(f"Delegate SDK init failed: {ack.get('message', 'unknown error')}")
+            message = str(ack.get("message", "unknown error"))
+            if any(marker in message.lower() for marker in _INIT_CONFIG_ERROR_MARKERS):
+                raise AgentConfigError(f"Delegate SDK init failed: {message}")
+            raise AgentCrashError(f"Delegate SDK init failed: {message}")
 
     def _build_init_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -528,7 +545,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._sweep_pgid()
 
     async def _force_kill_host(self) -> None:
+        """SIGKILL the host and drop its handle, so the next ``communicate()`` respawns.
+
+        The handle is dropped even when the reap times out: a dying host must never
+        receive the next ``send``.
+        """
         proc = self._process
+        self._process = None
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
@@ -583,10 +606,10 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 await asyncio.wait_for(self._process.wait(), timeout=_STOP_TIMEOUT_SEC)
         await self._force_kill_host()
         await self._cancel_drain_tasks()
-        self._process = None
 
     def get_sdk_options(self) -> dict[str, Any] | None:
-        return dict(self.config.sdk_options) or None
+        """The ``init`` options sent to the last host spawned, or ``None`` before ``start()``."""
+        return self._init_options
 
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {
@@ -702,11 +725,11 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
                 if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
-                    await self._abandon_host_after_loop_exit()
+                    await self._force_kill_host()
                     break
                 if should_stop is not None and should_stop():
                     stopped_early = True
-                    await self._abandon_host_after_loop_exit()
+                    await self._force_kill_host()
                     break
 
             if stopped_early:
@@ -738,7 +761,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             # from a dead stdin) -- force-kill so a retry always respawns
             # rather than write into, or read stale events from, this host.
             await self._force_kill_host()
-            self._process = None
             self._crash_turn(state, collector, emit, f"Delegate turn failed: {e!s}", cause=e)
             raise  # unreachable — _crash_turn is NoReturn
 
@@ -1009,19 +1031,25 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             )
         )
 
-    async def _abandon_host_after_loop_exit(self) -> None:
-        """Force-kill after ``max_turns``/cooperative-stop; next turn respawns."""
-        await self._force_kill_host()
-        self._process = None
+    def _log_stderr_tail(self, reason: str) -> None:
+        """Log the host's stderr tail beside ``reason``.
+
+        Never put the tail in a raised reason: ``errors/categorization.py`` matches
+        substrings of the reason, and the tail holds incidental text (the sandbox
+        path, which names the task) that can match a non-retryable rule.
+
+        Rationale: .claude/notes/agents.md § Delegate agent
+        """
+        logger.warning("delegate: %s. stderr tail:\n%s", reason, self._stderr_tail())
 
     async def _abandon_host_and_crash(
         self,
         state: _TurnState,
         collector: EventCollector,
         emit: Callable[[StreamEvent], None],
-        message: str,
+        reason: str,
     ) -> NoReturn:
-        """Force-kill the current host, drop the handle, and crash the turn.
+        """Force-kill the current host and crash the turn with ``reason``.
 
         Shared by every mid-``communicate()`` failure kernel that must not let
         the NEXT ``communicate()`` reuse this host: reuse risks writing a
@@ -1029,8 +1057,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         fires after this failure as the retry's own result.
         """
         await self._force_kill_host()
-        self._process = None
-        self._crash_turn(state, collector, emit, f"{message}. stderr tail:\n{self._stderr_tail()}")
+        self._log_stderr_tail(reason)
+        self._crash_turn(state, collector, emit, reason)
 
     async def _crash_on_host_error(
         self,
@@ -1041,10 +1069,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     ) -> NoReturn:
         """Crash the turn on a host ``error`` frame; the host is never reused.
 
-        A rewritten reason goes out without the stderr tail, which can itself
-        say "timeout" and so undo the rewrite's categorization; the tail is
-        logged instead. A session conflict also drops the remembered session id,
-        because a retry into the same conversation can only conflict again.
+        A session conflict also drops the remembered session id, because a retry
+        into the same conversation can only conflict again.
         """
         reason = _describe_host_error(message)
         if reason is None:
@@ -1054,11 +1080,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     self._session_id,
                 )
                 self._session_id = None
-            await self._abandon_host_and_crash(state, collector, emit, f"Delegate send failed: {message}")
-        logger.warning("delegate: %s stderr tail:\n%s", reason, self._stderr_tail())
-        await self._force_kill_host()
-        self._process = None
-        self._crash_turn(state, collector, emit, reason)
+            reason = f"Delegate send failed: {message}"
+        await self._abandon_host_and_crash(state, collector, emit, reason)
 
     def _crash_turn(
         self,
@@ -1081,9 +1104,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self, state: _TurnState, collector: EventCollector, emit: Callable[[StreamEvent], None], timeout: float
     ) -> NoReturn:
         await self._force_kill_host()
-        # Drop the handle so the NEXT communicate() respawns rather than reuse
-        # a killed process (or, worse, a "send" still nominally in flight).
-        self._process = None
 
         def finalize(status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
             self._finalize_turn(state, status, emit, crashed=crashed, crash_reason=crash_reason)
@@ -1113,9 +1133,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 # As in communicate()'s loop: the host may still be alive
                 # (a buffer overrun or drain exception, not necessarily exit).
                 await self._force_kill_host()
-                self._process = None
-                tail = self._stderr_tail()
-                raise AgentCrashError(f"Delegate host exited before responding. stderr tail:\n{tail}")
+                reason = "Delegate host exited before responding"
+                self._log_stderr_tail(reason)
+                raise AgentCrashError(reason)
             if msg.get("type") in accepted_types:
                 return msg
             logger.debug("delegate: ignoring host message %r during init", msg.get("type"))
@@ -1145,6 +1165,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     continue
                 if isinstance(obj, dict):
                     await self._stdout_queue.put(obj)
+        except asyncio.CancelledError:
+            raise
         except BaseException:
             logger.exception("delegate: stdout drain failed")
             await self._stdout_queue.put(None)

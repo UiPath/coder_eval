@@ -24,6 +24,7 @@ from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutErro
 from coder_eval.errors.categories import ErrorCategory
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.models import AgentKind, DelegateAgentConfig
+from coder_eval.reports.markdown import collect_agent_settings_rows
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
 
 
@@ -211,11 +212,32 @@ class TestStart:
         assert sent["options"]["workingDirectory"] == str(tmp_path)
         assert proc.spawn_args == ("node", str(Path("/opt/delegate_stdio.mjs")))
 
-    async def test_init_error_raises_agent_config_error(self, patch_exec, tmp_path):
-        patch_exec([_line({"type": "error", "message": "backendUrl is required", "stack": "Error: ..."})])
+    @pytest.mark.parametrize(
+        ("host_message", "error_type"),
+        [
+            ("Auth required: set AUTH_TOKEN/TENANT_ID/ORG_ID env vars", AgentConfigError),
+            ('env="alpha" requires org/tenant slugs. Set ORG_LOGICAL_NAME and TENANT_NAME', AgentConfigError),
+            ("Token endpoint https://cloud.example/token returned HTTP 503: unavailable", AgentCrashError),
+            ("fetch failed", AgentCrashError),
+        ],
+        ids=["no-auth", "no-slugs", "token-endpoint-5xx", "network"],
+    )
+    async def test_only_an_init_error_a_retry_cannot_fix_is_non_retryable(
+        self, patch_exec, tmp_path, host_message, error_type
+    ):
+        patch_exec([_line({"type": "error", "message": host_message, "stack": "Error: ..."})])
         agent = DelegateAgent(_config())
-        with pytest.raises(AgentConfigError, match="backendUrl is required"):
+        with pytest.raises(error_type, match="Delegate SDK init failed"):
             await agent.start(str(tmp_path))
+        assert agent._process is None
+
+    async def test_init_timeout_is_retryable(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module, "_INIT_TIMEOUT_SEC", 0.05)
+        patch_exec([], hang_after=True)
+        agent = DelegateAgent(_config())
+        with pytest.raises(AgentCrashError, match="did not respond") as excinfo:
+            await agent.start(str(tmp_path))
+        assert categorize_error(excinfo.value, {"component": "agent"}) is ErrorCategory.AGENT_CRASH
         assert agent._process is None
 
     async def test_eof_during_init_raises_crash(self, patch_exec, tmp_path):
@@ -225,18 +247,22 @@ class TestStart:
             await agent.start(str(tmp_path))
 
     async def test_effort_and_project_id_forwarded(self, patch_exec, tmp_path):
-        agent, proc = await _started_agent(
+        _agent, proc = await _started_agent(
             patch_exec, [], tmp_path, sdk_options={"effort": "high"}, project_id="proj-1"
         )
         options = proc.stdin.written[0]["options"]
         assert options["effort"] == "high"
         assert options["projectId"] == "proj-1"
-        assert agent.get_sdk_options() == {"effort": "high"}
 
-    async def test_no_sdk_options_reports_none(self, patch_exec, tmp_path):
-        agent, proc = await _started_agent(patch_exec, [], tmp_path)
-        assert "effort" not in proc.stdin.written[0]["options"]
-        assert agent.get_sdk_options() is None
+    async def test_sdk_options_are_the_init_options_sent(self, patch_exec, tmp_path):
+        """The reports prefer ``sdk_options`` over ``agent_config``, so it must carry the model too."""
+        assert DelegateAgent(_config()).get_sdk_options() is None
+        agent, proc = await _started_agent(
+            patch_exec, [], tmp_path, model="virtuoso-1-5", sdk_options={"effort": "high"}
+        )
+        assert agent.get_sdk_options() == proc.stdin.written[0]["options"]
+        rows = dict(collect_agent_settings_rows(agent.get_sdk_options() or {}, is_sdk=True))
+        assert (rows["Model"], rows["Effort"]) == ("virtuoso-1-5", "high")
 
     async def test_enable_computer_use_default_false(self, patch_exec, tmp_path):
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
@@ -420,6 +446,21 @@ class TestCommunicate:
         assert "<" not in str(excinfo.value)
         assert proc._killed
         assert agent._process is None
+
+    async def test_crash_category_ignores_the_stderr_tail(self, patch_exec, tmp_path, caplog):
+        """The tail names the sandbox, so a task id containing "guardrail" must not make a crash non-retryable."""
+        patch_exec(
+            [_line({"type": "init_ok"}), _line({"type": "error", "message": "Delegate backend error: terminated"})],
+            [b"[handleInit] Working directory: /work/skill-lowcode-guardrail-validator\n"],
+        )
+        agent = DelegateAgent(_config(), task_id="t1")
+        await agent.start(str(tmp_path))
+        await asyncio.sleep(0)
+        assert agent._stderr_lines
+        with caplog.at_level(logging.WARNING), pytest.raises(AgentCrashError) as excinfo:
+            await agent.communicate("hi")
+        assert categorize_error(excinfo.value, {"component": "agent"}) is ErrorCategory.AGENT_CRASH
+        assert any("guardrail-validator" in r.getMessage() for r in caplog.records)
 
     async def test_session_conflict_drops_the_session_id(self, patch_exec, tmp_path):
         events = [
@@ -863,6 +904,17 @@ class TestStop:
         assert proc.stdin.written[-1] == {"cmd": "destroy"}
         assert agent.pending_turn is None
 
+    async def test_stop_cancels_a_blocked_stdout_drain_without_an_error_log(
+        self, patch_exec, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(agent_module, "_STOP_TIMEOUT_SEC", 0.01)
+        patch_exec([_line({"type": "init_ok"})], hang_after=True)
+        agent = DelegateAgent(_config(), task_id="t1")
+        await agent.start(str(tmp_path))
+        with caplog.at_level(logging.ERROR):
+            await agent.stop()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
 
 class TestKill:
     def test_kill_sync_signals_running_process(self, patch_exec, tmp_path, monkeypatch):
@@ -903,6 +955,12 @@ class TestKill:
         if os.name == "posix":
             assert killpg_calls == [(proc.pid, agent_module._SIGKILL)]
 
+    async def test_kill_drops_the_handle_so_the_next_turn_respawns(self, patch_exec, tmp_path):
+        agent, proc = await _started_agent(patch_exec, [], tmp_path)
+        await agent.kill()
+        assert proc._killed
+        assert agent._process is None
+
 
 class TestRegistration:
     def test_registered_as_delegate(self):
@@ -917,7 +975,8 @@ class TestRegistration:
         assert isinstance(agent, DelegateAgent)
 
 
-def test_install_target_names_the_host_package():
+def test_install_target_names_the_host_package_and_is_searched():
     """``agents/delegate/package.json`` is the documented ``npm install`` target the resolver finds."""
-    package_json = Path(agent_module.__file__).parent / "delegate" / "package.json"
+    package_json = agent_module._AGENT_INSTALL_ROOT / "package.json"
     assert agent_module._HOST_PACKAGE in json.loads(package_json.read_text())["dependencies"]
+    assert agent_module._AGENT_INSTALL_ROOT in agent_module._candidate_install_roots()
