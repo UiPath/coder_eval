@@ -22,7 +22,6 @@ from coder_eval.isolation import docker_runner as dr
 from coder_eval.isolation.egress import (
     BLACKHOLE_DNS,
     EGRESS_LABEL,
-    EGRESS_LOG_HEADER,
     NO_PROXY_HOSTS,
     PROXY_URL,
     egress_scope,
@@ -88,7 +87,7 @@ async def test_allowlisted_http_works_denied_https_fails_and_nothing_leaks(frame
     heartbeat = tmp_path / dr.HEARTBEAT_FILENAME
     heartbeat.touch()
     heartbeat_task = asyncio.create_task(dr._heartbeat_loop(heartbeat))
-    log_path = tmp_path / "docker.log"
+    log_path = tmp_path / "egress.log"
     try:
         async with egress_scope(
             container_name=name,
@@ -131,7 +130,7 @@ async def test_allowlisted_http_works_denied_https_fails_and_nothing_leaks(frame
             await heartbeat_task
 
     log = log_path.read_text(encoding="utf-8")
-    assert EGRESS_LOG_HEADER in log
+    assert log.startswith("READY ")
     assert "ALLOW example.com:80 GET" in log
     assert "DENY example.com:443 CONNECT" in log
     containers = _docker("ps", "-a", "-q", "--filter", f"label={EGRESS_LABEL}", "--filter", f"name={name}")

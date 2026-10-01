@@ -26,14 +26,14 @@ import yaml
 
 from coder_eval.config import settings
 from coder_eval.isolation.egress import (
-    _DOCKER_HOST_ALIAS,
+    DOCKER_HOST_ALIAS,
     EGRESS_PROXY_MODULE,
     PROXY_ENV_NAMES,
     EgressHandle,
-    _rewrite_loopback_for_container,
     egress_scope,
     forwarded_env_names,
     resolve_egress_targets,
+    rewrite_loopback_for_container,
     task_container_egress_argv,
 )
 from coder_eval.isolation.errors import DockerRunError, EgressSetupError
@@ -60,6 +60,7 @@ from coder_eval.models import (
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_LOG_FILENAME,
     PRIOR_RESULT_FILENAME,
     REFERENCE_COPY_IGNORE,
     TASK_JSON_FILENAME,
@@ -666,7 +667,10 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
             egress_dir = staging / "egress"
             if egress_targets is not None:
-                await asyncio.to_thread(_prepare_egress_dir, egress_dir)
+                try:
+                    await asyncio.to_thread(_prepare_egress_dir, egress_dir)
+                except OSError as exc:
+                    raise EgressSetupError(f"network: llm_only could not stage the egress proxy: {exc}") from exc
             # AFTER staging, BEFORE the container starts: the DAC caps are dropped, so
             # every framework-owned mount must be reachable through its `other` bits.
             # Writable so the entry point can delete the staged task.yaml/context.json.
@@ -691,7 +695,7 @@ class DockerRunner:
                     heartbeat=heartbeat_path,
                     stale_seconds=HEARTBEAT_STALE_SECONDS,
                     targets=egress_targets,
-                    log_path=log_path,
+                    log_path=self.rt.run_dir / EGRESS_LOG_FILENAME,
                     allow_image_skew=settings.allow_image_skew,
                 )
                 if egress_targets is not None
@@ -708,7 +712,6 @@ class DockerRunner:
                     stderr=asyncio.subprocess.STDOUT,
                     limit=STDOUT_LINE_LIMIT_BYTES,
                 )
-                # Opened INSIDE the scope: the egress teardown appends to this file after it closes.
                 log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
                 # HAZARD: `docker run --rm` does NOT propagate a kill daemon-side, so
                 # without this `finally` Ctrl-C leaves the container burning budget.
@@ -858,7 +861,8 @@ class DockerRunner:
     async def _kill_container(self, proc: asyncio.subprocess.Process, container_name: str) -> None:
         """Best-effort teardown when cancelled mid-stream with the container still alive.
 
-        Called from ``run``'s inner ``finally`` (after heartbeat-cancel + log-fh close),
+        Called from ``run``'s inner ``finally`` (after the log-fh close; the heartbeat is
+        cancelled later, after the egress teardown, so a live sidecar never goes stale),
         guarded by ``if proc.returncode is None``. ``docker run --rm`` does NOT propagate
         a host-side kill to the daemon, so kill the container by name and then the docker
         CLI subprocess. No exception leaks from cleanup; suppression is narrowed to
@@ -1443,12 +1447,12 @@ class DockerRunner:
         # explicit `--env VAR=value` is safe in the logged argv -- unlike the token.
         litellm_base_url = os.environ.get("LITELLM_BASE_URL")
         if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and cfg.network != "none":
-            rewritten = _rewrite_loopback_for_container(litellm_base_url)
+            rewritten = rewrite_loopback_for_container(litellm_base_url)
             if rewritten is not None:
                 argv += ["--env", f"LITELLM_BASE_URL={rewritten}"]
                 # Under llm_only only the sidecar dials the host, so it carries the alias.
                 if egress is None:
-                    argv += ["--add-host", f"{_DOCKER_HOST_ALIAS}:host-gateway"]
+                    argv += ["--add-host", f"{DOCKER_HOST_ALIAS}:host-gateway"]
             else:
                 argv += ["--env", "LITELLM_BASE_URL"]
 

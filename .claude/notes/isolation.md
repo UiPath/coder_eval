@@ -1086,6 +1086,22 @@ embedded DNS answering the sidecar alias while every external forward goes nowhe
 `default-network-opts` enable IPv6 from giving the internal bridge an IPv6 gateway. IPv6
 link-local reach to a host service was not measured.
 
+`NET_RAW` is dropped from the task container for the same reason: with raw sockets an agent could
+write frames for the bridge's own MAC address and reach a host service over UDP without the
+sidecar. That path was not measured; the cap drop removes it at no cost, since no tool needs raw
+sockets under `llm_only`.
+
+### Why the sidecar log is a separate, atomically written file
+
+The first version appended the sidecar log to `docker.log` after the container exited. That file
+is in the run directory, which is bind-mounted writable into the container at the SAME path, so
+the agent could replace it with a symlink to a host file (for example a shell rc file) and get a
+line it chose (`DENY $(cmd):443 CONNECT` passes the visible-ASCII check) appended there by the
+host. Container stdout could also forge `ALLOW` / `DENY` lines in it. The log is now `egress.log`,
+written once by `write_text_atomic`, whose `os.replace` replaces a planted symlink instead of
+following it. `BAD` lines carry only the method and length, because a refused target can hold
+credentials in its userinfo or query.
+
 ### Why the framework image and a bind-mounted module
 
 The sidecar image is the framework image, never the task image: a task image is task-authored and

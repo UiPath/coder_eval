@@ -89,7 +89,8 @@ For each task the host creates:
    `NODE_USE_ENV_PROXY=1` and `LITELLM_LOCAL_MODEL_COST_MAP=True`. A host value of a proxy
    variable (`*_PROXY`, `NO_PROXY`, `NODE_USE_ENV_PROXY`) is never forwarded. Its upstream DNS
    server is `192.0.2.1`, an address that is never routed: Docker's own DNS still resolves the
-   sidecar, but an external name does not resolve.
+   sidecar, but an external name does not resolve. It also runs without `NET_RAW`, so it cannot
+   send crafted packets onto the internal bridge.
 
 Before the task container starts, the host sends one `CONNECT` per allowlisted target through
 the sidecar. If one fails, the task is an `ERROR` row that names the failing targets. The host
@@ -195,17 +196,25 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 - **Exact hosts only.** No wildcards and no CIDR ranges.
 - **podman and rootless Docker** are not tested.
 - **Harbor export** refuses an `llm_only` task.
+- **The sidecar is also on the default `bridge`.** A `bridge` container of another task can reach
+  it. It gets no extra reach, because the allowlist is a subset of what `bridge` already reaches,
+  and the sidecar serves at most 256 connections at once (one more gets `503`).
+- **Plugin agents.** A third-party agent gets the API backend's hosts only when its config class
+  sets `uses_api_backend = True`, and its own hosts only through `egress_hosts()`; see
+  [Extending Coder Eval](EXTENDING.md#the-config-class).
 
 ### Troubleshooting egress
 
-The sidecar log is appended to the task's `docker.log` under
-`=== egress proxy (network: llm_only) ===`. Each connection is one line:
+The sidecar log is the task's `egress.log`, beside `docker.log` (a grading container's log is
+`grade.egress.log`). It is a separate file so that container output cannot add lines to it.
+Each connection is one line:
 `ALLOW host:port METHOD`, `DENY host:port METHOD`, `FAIL host:port <error>` (an allowed host the
-sidecar could not reach), or `BAD …` (a request the proxy refused to parse). To see which hosts a
+sidecar could not reach), or `BAD …` (a request the proxy refused; the line names only its method
+and length, because the target can carry credentials). To see which hosts a
 task needed:
 
 ```bash
-grep -rhE "^(ALLOW|DENY|FAIL)" --include=docker.log runs/latest | sort | uniq -c
+grep -rhE "^(ALLOW|DENY|FAIL)" --include=egress.log runs/latest | sort | uniq -c
 ```
 
 Add each needed `DENY` host to `egress_allowlist`. If the host process was killed, remove the

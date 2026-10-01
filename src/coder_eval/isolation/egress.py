@@ -1,7 +1,7 @@
 """Host side of ``network: llm_only``: the egress allowlist and the per-task proxy sidecar.
 
-Imports only :mod:`coder_eval.isolation.errors` and :mod:`coder_eval.models`, so
-``docker_runner`` can import it without a cycle.
+Imports only :mod:`coder_eval.isolation.errors`, :mod:`coder_eval.models` and
+:mod:`coder_eval.path_utils`, so ``docker_runner`` can import it without a cycle.
 
 Rationale: .claude/notes/isolation.md § The egress sidecar (network: llm_only)
 """
@@ -18,13 +18,19 @@ from urllib.parse import urlsplit, urlunsplit
 
 from coder_eval.isolation.errors import EgressSetupError
 from coder_eval.models import (
+    LOOPBACK_HOSTS,
     AgentJudgeCriterion,
-    ApiBackend,
+    BedrockRoute,
+    DirectRoute,
+    LiteLLMRoute,
     LLMJudgeCriterion,
     SystemOneJudgeCriterion,
     normalize_egress_target,
+    resolve_evaluation_route,
+    resolve_route,
     url_egress_target,
 )
+from coder_eval.path_utils import write_text_atomic
 
 
 if TYPE_CHECKING:
@@ -32,20 +38,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from coder_eval.config import Settings
-    from coder_eval.models import TaskDefinition
+    from coder_eval.models import ApiRoute, TaskDefinition
 
 
 logger = logging.getLogger(__name__)
 
 # Docker Desktop's stable host alias from a bridge-network container. Auto-resolves
 # on macOS/Windows; on Linux it must be published via `--add-host`.
-_DOCKER_HOST_ALIAS = "host.docker.internal"
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
+DOCKER_HOST_ALIAS = "host.docker.internal"
 _DIRECT_TARGETS = ("api.anthropic.com:443", "platform.claude.com:443")
 
 
-def _rewrite_loopback_for_container(url: str) -> str | None:
+def rewrite_loopback_for_container(url: str) -> str | None:
     """Rewrite a loopback URL to the docker host alias, preserving scheme/port/path.
 
     Returns the rewritten URL, or None if the host is not loopback (forward as-is).
@@ -53,9 +57,9 @@ def _rewrite_loopback_for_container(url: str) -> str | None:
     container, so ``http://localhost:4000`` -> ``http://host.docker.internal:4000``.
     """
     parts = urlsplit(url)
-    if parts.hostname not in _LOOPBACK_HOSTS:
+    if parts.hostname not in LOOPBACK_HOSTS:
         return None
-    netloc = _DOCKER_HOST_ALIAS if parts.port is None else f"{_DOCKER_HOST_ALIAS}:{parts.port}"
+    netloc = DOCKER_HOST_ALIAS if parts.port is None else f"{DOCKER_HOST_ALIAS}:{parts.port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
@@ -65,63 +69,101 @@ def forwarded_env_names(task: TaskDefinition) -> set[str]:
     return set(docker.env_passthrough) | set(docker.env_passthrough_extra)
 
 
-def _backend_targets(backend: ApiBackend, settings: Settings, forwarded: Mapping[str, str]) -> list[str]:
-    if backend == ApiBackend.DIRECT:
+_LITELLM_BASE_KWARGS = ("api_base", "base_url")
+
+
+def _bedrock_targets(region: str) -> list[str]:
+    try:
+        return [
+            normalize_egress_target(f"bedrock-runtime.{region}.amazonaws.com"),
+            normalize_egress_target(f"bedrock.{region}.amazonaws.com"),
+        ]
+    except ValueError:
+        raise ValueError("AWS_REGION is not a valid region name for a Bedrock host.") from None
+
+
+def _litellm_base_url(route: LiteLLMRoute, forwarded: Mapping[str, str]) -> tuple[str, str | None]:
+    """``(source, url)`` of the endpoint a LiteLLM route calls; ``url`` is None when it is not known here."""
+    if route.params is None and route.env_params is None:
+        return "LITELLM_BASE_URL", forwarded.get("LITELLM_BASE_URL")
+    for kwarg in _LITELLM_BASE_KWARGS:
+        literal = (route.params or {}).get(kwarg)
+        if isinstance(literal, str):
+            return f"checker_context.api_route.params.{kwarg}", literal
+        env_name = (route.env_params or {}).get(kwarg)
+        if env_name:
+            return env_name, forwarded.get(env_name)
+    return "checker_context.api_route", None
+
+
+def _route_targets(route: ApiRoute, forwarded: Mapping[str, str]) -> list[str]:
+    if isinstance(route, DirectRoute):
         return list(_DIRECT_TARGETS)
-    if backend == ApiBackend.BEDROCK:
-        region = settings.aws_region
-        if not region:
-            logger.warning("api_backend is bedrock but AWS_REGION is unset: no Bedrock host is allowlisted.")
-            return []
-        try:
-            return [
-                normalize_egress_target(f"bedrock-runtime.{region}.amazonaws.com"),
-                normalize_egress_target(f"bedrock.{region}.amazonaws.com"),
-            ]
-        except ValueError:
-            raise ValueError("AWS_REGION is not a valid region name for a Bedrock host.") from None
-    base_url = forwarded.get("LITELLM_BASE_URL")
-    if not base_url:
-        logger.warning("api_backend is litellm but LITELLM_BASE_URL is not forwarded: no LiteLLM host is allowlisted.")
+    if isinstance(route, BedrockRoute):
+        return _bedrock_targets(route.region)
+    source, url = _litellm_base_url(route, forwarded)
+    if not url:
+        logger.warning("The LiteLLM endpoint of %s is not forwarded: add its host to egress_allowlist.", source)
         return []
     try:
-        rewritten = _rewrite_loopback_for_container(base_url) or base_url
+        url = rewrite_loopback_for_container(url) or url
     except ValueError:
-        raise ValueError("LITELLM_BASE_URL has a host or port that network: llm_only cannot allowlist.") from None
-    target = url_egress_target("LITELLM_BASE_URL", rewritten)
+        raise ValueError(f"{source} has a host or port that network: llm_only cannot allowlist.") from None
+    target = url_egress_target(source, url)
     return [target] if target is not None else []
 
 
-def _api_backends_used(task: TaskDefinition, settings: Settings) -> set[ApiBackend]:
-    """The backends the agent, the dialog simulator and the LLM judges reach their model through."""
-    backends: set[ApiBackend] = set()
+def _model_routes(task: TaskDefinition, settings: Settings) -> list[ApiRoute]:
+    """The routes the agent, the dialog simulator and the LLM judges call, resolved as the orchestrator does."""
+    try:
+        agent_route = resolve_route(settings)
+    except (AssertionError, ValueError):
+        logger.warning(
+            "API_BACKEND=%s is not fully configured (AWS_REGION / AWS_BEARER_TOKEN_BEDROCK, or "
+            + "LITELLM_BASE_URL / LITELLM_AUTH_TOKEN): no model-API host is allowlisted.",
+            settings.api_backend,
+        )
+        return []
+    routes: list[ApiRoute] = []
     if task.agent is not None and task.agent.uses_api_backend:
-        backends.add(settings.api_backend)
+        routes.append(agent_route)
     if task.simulation is not None and task.simulation.enabled:
-        backends.add(settings.api_backend)
-    if any(isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) for c in task.success_criteria):
+        routes.append(resolve_evaluation_route(settings, agent_route))
+    if any(isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and c.enabled for c in task.success_criteria):
         api_route = task.checker_context.api_route if task.checker_context else None
-        backends.add(api_route.route if api_route and api_route.route else settings.api_backend)
-    return backends
+        try:
+            routes.append(
+                resolve_evaluation_route(
+                    settings,
+                    agent_route,
+                    backend_override=api_route.route.value if api_route and api_route.route else None,
+                    model_override=api_route.model if api_route else None,
+                    params_override=api_route.params if api_route else None,
+                    env_params_override=api_route.env_params if api_route else None,
+                )
+            )
+        except ValueError:
+            logger.warning("checker_context.api_route is not fully configured: no judge host is allowlisted.")
+    return routes
 
 
 def resolve_egress_targets(task: TaskDefinition, *, env: Mapping[str, str], settings: Settings) -> list[str]:
     """Every ``host:port`` the task's container may reach under ``network: llm_only``.
 
-    The union of the hosts of each API backend the task uses (see
-    ``_api_backends_used``), the agent config's ``egress_hosts``, each
+    The union of the hosts of each model route the task calls (see
+    ``_model_routes``), the agent config's ``egress_hosts``, each
     ``system_one_judge`` ``base_url``, and ``sandbox.docker.egress_allowlist``.
     ``env`` is the host environment; only the variables the container receives
     count. Pure: reads only its arguments. Sorted and de-duplicated.
 
     Raises:
-        ValueError: ``LITELLM_BASE_URL``, ``CODEX_BASE_URL``, a judge ``base_url`` or
+        ValueError: A LiteLLM endpoint, ``CODEX_BASE_URL``, a judge ``base_url`` or
             ``AWS_REGION`` names a host that cannot be allowlisted.
     """
     forwarded = {name: env[name] for name in forwarded_env_names(task) if env.get(name)}
     targets: set[str] = set()
-    for backend in sorted(_api_backends_used(task, settings)):
-        targets.update(_backend_targets(backend, settings, forwarded))
+    for route in _model_routes(task, settings):
+        targets.update(_route_targets(route, forwarded))
     if task.agent is not None:
         targets.update(task.agent.egress_hosts(forwarded))
     for criterion in task.success_criteria:
@@ -160,7 +202,6 @@ PROXY_ENV_NAMES = frozenset(
 # Docker's embedded DNS answering the sidecar alias while external lookups go nowhere, even on
 # a daemon that forwards internal-network queries from the host namespace (CVE-2024-29018).
 BLACKHOLE_DNS = "192.0.2.1"
-EGRESS_LOG_HEADER = "=== egress proxy (network: llm_only) ==="
 PRUNE_HINT = (
     f"docker rm -f $(docker ps -aq --filter label={EGRESS_LABEL}); "
     + f"docker network prune -f --filter label={EGRESS_LABEL}"
@@ -185,11 +226,12 @@ class EgressHandle:
 def task_container_egress_argv() -> list[str]:
     """``docker run`` arguments the task container gets under ``network: llm_only``.
 
-    A black-hole upstream resolver, and explicit (non-secret) ``--env`` pairs: the proxy
+    No raw sockets (no crafted frames onto the internal bridge), a black-hole upstream
+    resolver, and explicit (non-secret) ``--env`` pairs: the proxy
     variables point every tool at the sidecar, and ``LITELLM_LOCAL_MODEL_COST_MAP`` stops
     litellm fetching its cost map from a host that is not allowlisted.
     """
-    argv: list[str] = ["--dns", BLACKHOLE_DNS]
+    argv: list[str] = ["--cap-drop", "NET_RAW", "--dns", BLACKHOLE_DNS]
     for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
         argv += ["--env", f"{name}={PROXY_URL}"]
     for name in ("NO_PROXY", "no_proxy"):
@@ -234,7 +276,7 @@ def build_sidecar_create_argv(
         "--network-alias",
         EGRESS_PROXY_ALIAS,
         "--add-host",
-        f"{_DOCKER_HOST_ALIAS}:host-gateway",
+        f"{DOCKER_HOST_ALIAS}:host-gateway",
         "--sysctl",
         "net.ipv4.ip_forward=0",
         "--user",
@@ -358,13 +400,6 @@ async def _probe(sidecar: str, targets: Sequence[str]) -> None:
     )
 
 
-def _append_sidecar_log(log_path: Path, text: str) -> None:
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(f"\n{EGRESS_LOG_HEADER}\n{text}")
-        if text and not text.endswith("\n"):
-            handle.write("\n")
-
-
 async def _best_effort(*args: str) -> subprocess.CompletedProcess[str] | None:
     try:
         return await _docker(*args)
@@ -378,15 +413,15 @@ async def _teardown(*, network: str | None, sidecar: str | None, log_path: Path)
         logs = await _best_effort("logs", sidecar)
         if logs is not None and logs.returncode == 0:
             try:
-                await asyncio.to_thread(_append_sidecar_log, log_path, logs.stdout + logs.stderr)
+                await asyncio.to_thread(write_text_atomic, log_path, logs.stdout + logs.stderr)
             except OSError as exc:
-                logger.warning("Could not append the egress proxy log to %s: %s", log_path, exc)
+                logger.warning("Could not write the egress proxy log to %s: %s", log_path, exc)
         await _best_effort("rm", "-f", sidecar)
     if network is None:
         return
     for attempt in range(1, _NETWORK_RM_ATTEMPTS + 1):
         removed = await _best_effort("network", "rm", network)
-        if removed is not None and removed.returncode == 0:
+        if removed is not None and (removed.returncode == 0 or "not found" in removed.stderr.lower()):
             return
         if attempt < _NETWORK_RM_ATTEMPTS:
             await asyncio.sleep(_NETWORK_RM_RETRY_SECONDS)
@@ -424,7 +459,8 @@ async def egress_scope(
     """Create the internal network and proxy sidecar, probe every target, yield, then tear both down.
 
     ``egress_dir`` holds the proxy module and ``heartbeat`` must already exist on the
-    host. Teardown runs on every exit path and appends the sidecar log to ``log_path``.
+    host. Teardown runs on every exit path and writes the sidecar log to ``log_path``
+    (atomically, so a symlink planted at that path is replaced, never followed).
 
     Raises:
         EgressSetupError: Any setup step (image, network, sidecar, probe) failed.

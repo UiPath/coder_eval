@@ -20,7 +20,6 @@ from coder_eval.isolation import egress as egress_mod
 from coder_eval.isolation.docker_runner import CONTAINER_ENTRYPOINT, DockerRunError, DockerRunner
 from coder_eval.isolation.egress import (
     EGRESS_LABEL,
-    EGRESS_LOG_HEADER,
     NO_PROXY_HOSTS,
     PROXY_URL,
     PRUNE_HINT,
@@ -235,7 +234,7 @@ def _failed(stderr: str = "", stdout: str = "") -> subprocess.CompletedProcess[s
 async def _enter_scope(tmp_path: Path, fake: _FakeDocker, monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> Path:
     monkeypatch.setattr(egress_mod, "_docker", fake)
     monkeypatch.setattr(egress_mod, "_NETWORK_RM_RETRY_SECONDS", 0)
-    log_path = tmp_path / "docker.log"
+    log_path = tmp_path / "egress.log"
     async with egress_scope(
         container_name="c",
         image="coder-eval-agent:x",
@@ -264,14 +263,25 @@ _HAPPY_ORDER = [
 
 
 class TestEgressScope:
-    async def test_happy_path_order_and_log_append(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_happy_path_order_and_own_log_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _FakeDocker()
-        (tmp_path / "docker.log").write_text("container line\n", encoding="utf-8")
+        (tmp_path / "egress.log").write_text("stale line from an earlier run\n", encoding="utf-8")
         log_path = await _enter_scope(tmp_path, fake, monkeypatch)
         assert fake.verbs() == _HAPPY_ORDER
         assert fake.calls[3] == ("network", "connect", "bridge", "c-egress")
         assert fake.calls[5][-1] == "api.anthropic.com:443"
-        assert log_path.read_text(encoding="utf-8") == (f"container line\n\n{EGRESS_LOG_HEADER}\negress log line\n")
+        assert log_path.read_text(encoding="utf-8") == "egress log line\n"
+
+    async def test_a_planted_log_symlink_is_replaced_not_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        victim = tmp_path / "victim_rc"
+        victim.write_text("original\n", encoding="utf-8")
+        (tmp_path / "egress.log").symlink_to(victim)
+        log_path = await _enter_scope(tmp_path, _FakeDocker(), monkeypatch)
+        assert victim.read_text(encoding="utf-8") == "original\n"
+        assert not log_path.is_symlink()
+        assert log_path.read_text(encoding="utf-8") == "egress log line\n"
 
     async def test_probe_failure_names_the_target_and_still_tears_down(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -437,6 +447,17 @@ class TestEgressScope:
         with caplog.at_level(logging.WARNING, logger=egress_mod.logger.name):
             await _enter_scope(tmp_path, fake, monkeypatch)
         assert fake.verbs().count("network rm") == 3
+        assert "Could not remove" not in caplog.text
+
+    async def test_a_network_that_was_never_created_is_not_reported_as_leaked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        missing = _failed("Error response from daemon: network c-net not found")
+        fake = _FakeDocker({"network create": [_failed("all predefined address pools have been fully subnetted")]})
+        fake.answers["network rm"] = [missing]
+        with caplog.at_level(logging.WARNING, logger=egress_mod.logger.name), pytest.raises(EgressSetupError):
+            await _enter_scope(tmp_path, fake, monkeypatch)
+        assert fake.verbs().count("network rm") == 1
         assert "Could not remove" not in caplog.text
 
     async def test_network_rm_gives_up_with_the_prune_hint(

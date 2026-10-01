@@ -37,7 +37,9 @@ from coder_eval.models import (
 )
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_LOG_FILENAME,
     GRADE_DOCKER_LOG_FILENAME,
+    GRADE_EGRESS_LOG_FILENAME,
     GRADE_LOG_FILENAME,
     PRE_GRADE_JSON_FILENAME,
     TASK_JSON_FILENAME,
@@ -692,6 +694,7 @@ def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
     unhonored = f"{TASK_JSON_FILENAME}.unhonored"
     rescued = (
         (DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME),
+        (EGRESS_LOG_FILENAME, GRADE_EGRESS_LOG_FILENAME),
         (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME),
         (unhonored, unhonored),
     )

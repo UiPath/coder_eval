@@ -131,7 +131,7 @@ def normalize_egress_target(entry: str) -> str:
     return f"{host}:{int(port_text)}"
 
 
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def url_egress_target(source: str, url: str) -> str | None:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             return None
-        if parts.hostname in _LOOPBACK_HOSTS:
+        if parts.hostname in LOOPBACK_HOSTS:
             logger.warning("%s points at a loopback host, which the egress sidecar cannot reach.", source)
             return None
         port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)

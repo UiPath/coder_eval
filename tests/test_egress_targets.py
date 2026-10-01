@@ -34,8 +34,18 @@ from coder_eval.plugins import ensure_plugins_loaded
 DIRECT = ["api.anthropic.com:443", "platform.claude.com:443"]
 
 
-def _settings(backend: ApiBackend = ApiBackend.DIRECT, region: str | None = None) -> Settings:
-    return Settings.model_construct(api_backend=backend, aws_region=region)
+def _settings(
+    backend: ApiBackend = ApiBackend.DIRECT, region: str | None = None, *, bedrock_token: str | None = "tok"
+) -> Settings:
+    return Settings.model_construct(
+        api_backend=backend,
+        aws_region=region,
+        aws_bearer_token_bedrock=bedrock_token if region else None,
+        anthropic_api_key="key",
+        litellm_base_url="http://gateway.invalid",
+        litellm_auth_token="tok",
+        litellm_model="m",
+    )
 
 
 def _task(agent: dict[str, Any] | None = None, *, criteria: list[Any] | None = None, **docker: Any) -> TaskDefinition:
@@ -264,3 +274,61 @@ def test_litellm_backend_without_a_forwarded_url_warns(caplog):
         targets = resolve_egress_targets(_task(), env={}, settings=_settings(ApiBackend.LITELLM))
     assert targets == []
     assert "LITELLM_BASE_URL" in caplog.text
+
+
+LITELLM_GW = {"LITELLM_BASE_URL": "https://gw.corp/v1"}
+
+
+@pytest.mark.parametrize(
+    ("region", "expected"),
+    [
+        ("eu-north-1", ["bedrock-runtime.eu-north-1.amazonaws.com:443", "bedrock.eu-north-1.amazonaws.com:443"]),
+        (None, DIRECT),
+    ],
+)
+def test_litellm_agent_judge_and_simulator_get_the_pinned_claude_backend(region: str | None, expected: list[str]):
+    task = _task(criteria=[LLMJudgeCriterion(description="j", prompt="p")])
+    task.simulation = SimulationConfig(enabled=True, persona="p", goal="g")
+    targets = resolve_egress_targets(task, env=LITELLM_GW, settings=_settings(ApiBackend.LITELLM, region))
+    assert targets == sorted(["gw.corp:443", *expected])
+
+
+def test_litellm_simulator_alone_gets_the_pinned_backend():
+    task = _task({"type": "codex"})
+    task.simulation = SimulationConfig(enabled=True, persona="p", goal="g")
+    assert resolve_egress_targets(task, env={}, settings=_settings(ApiBackend.LITELLM)) == sorted(
+        [*DIRECT, "api.openai.com:443"]
+    )
+
+
+def test_disabled_judge_adds_no_host():
+    judge = LLMJudgeCriterion(description="j", prompt="p", enabled=False)
+    task = _task({"type": "codex"}, criteria=[judge])
+    assert resolve_egress_targets(task, env={}, settings=_settings()) == ["api.openai.com:443"]
+
+
+def test_litellm_judge_route_uses_its_own_api_base():
+    task = _task({"type": "codex"}, criteria=[LLMJudgeCriterion(description="j", prompt="p")])
+    route = ApiRouteContext(route=ApiBackend.LITELLM, model="azure/x", params={"api_base": "https://judge.example/v1"})
+    task.checker_context = CheckerContext(api_route=route)
+    targets = resolve_egress_targets(task, env=LITELLM_GW, settings=_settings())
+    assert targets == ["api.openai.com:443", "judge.example:443"]
+
+
+def test_litellm_judge_route_reads_a_forwarded_env_param():
+    task = _task(
+        {"type": "codex"},
+        criteria=[LLMJudgeCriterion(description="j", prompt="p")],
+        env_passthrough_extra=["JUDGE_BASE"],
+    )
+    route = ApiRouteContext(route=ApiBackend.LITELLM, model="azure/x", env_params={"api_base": "JUDGE_BASE"})
+    task.checker_context = CheckerContext(api_route=route)
+    targets = resolve_egress_targets(task, env={"JUDGE_BASE": "https://j2.example"}, settings=_settings())
+    assert targets == ["api.openai.com:443", "j2.example:443"]
+
+
+def test_unconfigured_backend_warns_without_echoing_values(caplog):
+    settings = _settings(ApiBackend.BEDROCK, "eu-north-1", bedrock_token=None)
+    with caplog.at_level(logging.WARNING, logger="coder_eval.isolation.egress"):
+        assert resolve_egress_targets(_task(), env={}, settings=settings) == []
+    assert "AWS_BEARER_TOKEN_BEDROCK" in caplog.text

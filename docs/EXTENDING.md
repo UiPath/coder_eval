@@ -80,6 +80,14 @@ class MyAgentConfig(BaseAgentConfig):
 The factory `create_agent(kind, config, …)` raises `TypeError` if the passed config
 isn't an instance of the registered `config_class`, so keep them paired.
 
+Under `network: llm_only` the container reaches only an allowlist of hosts, and the config class
+supplies its share. Set the class variable `uses_api_backend = True` when the agent calls its
+model through `API_BACKEND` (as `claude-code` does), and override
+`egress_hosts(self, env) -> tuple[str, ...]` to return the `host:port` targets of its own model API
+(`env` holds the forwarded variables; `url_egress_target` from `coder_eval.models` turns a URL
+into a target). An agent that does neither can reach no model under `llm_only`. See
+[Docker Isolation § The derived allowlist](DOCKER_ISOLATION.md#the-derived-allowlist).
+
 ### The `Agent` ABC — implementation checklist
 
 Implement these three abstract methods:

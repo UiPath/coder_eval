@@ -87,3 +87,29 @@ def test_allowlist_accepted_under_bridge():
 def test_unknown_key_still_forbidden():
     with pytest.raises(ValidationError):
         DockerDriverConfig(egress_allow=["pypi.org"])  # type: ignore[call-arg]
+
+
+async def test_llm_only_without_the_docker_driver_is_refused_before_any_agent_runs(tmp_path):
+    from unittest.mock import patch
+
+    from coder_eval.models import FinalStatus, ResolvedTask, TaskDefinition
+    from coder_eval.orchestration.batch import run_batch
+    from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestrator import Orchestrator
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="p",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir", "docker": {"network": "llm_only"}},
+        success_criteria=[{"type": "file_exists", "path": "x.txt", "description": "x"}],
+    )
+    run_dir = tmp_path / "run"
+    rt = ResolvedTask(task=task, task_file=tmp_path / "t.yaml", run_dir=run_dir / "default" / "t", variant_id="default")
+    with patch.object(Orchestrator, "__init__", side_effect=AssertionError("an agent must not run")) as init:
+        _summary, results = await run_batch([rt], BatchRunConfig(run_dir=run_dir, max_parallel=1))
+    init.assert_not_called()
+    [result] = results
+    assert result.result.final_status == FinalStatus.ERROR
+    assert "llm_only needs sandbox.driver: docker" in (result.result.error_message or "")

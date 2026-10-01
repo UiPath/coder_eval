@@ -28,17 +28,26 @@ HEAD_LIMIT_BYTES = 64 * 1024
 HEAD_TIMEOUT_SECONDS = 30.0
 DIAL_TIMEOUT_SECONDS = 10.0
 PIPE_CHUNK_BYTES = 64 * 1024
+MAX_CONNECTIONS = 256
 MAX_HEARTBEAT_POLL_SECONDS = 2.0
 PROBE_STARTUP_RETRY_SECONDS = 5.0
 
 _BAD_REQUEST = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _BAD_GATEWAY = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+_UNAVAILABLE = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 
 
 def _log(line: str) -> None:
     print(line, flush=True)
+
+
+def _redacted(request_line: bytes) -> str:
+    """A refused request line, shown as its method and length only: the target may carry credentials."""
+    method = request_line.split(b" ", 1)[0]
+    shown = method.decode("ascii") if method.isalpha() and method.isascii() and len(method) <= 16 else "?"
+    return f"{shown} unparseable request line ({len(request_line)} bytes)"
 
 
 def _is_visible_ascii(data: bytes) -> bool:
@@ -173,7 +182,7 @@ async def handle_client(
     request_line, _, header_block = head[:-4].partition(b"\r\n")
     fields = request_line.decode("latin-1").split(" ")
     if len(fields) != 3 or not _is_visible_ascii(request_line) or not fields[2].startswith("HTTP/"):
-        _log(f"BAD {request_line!r}")
+        _log(f"BAD {_redacted(request_line)}")
         await _reply_and_close(client_writer, _BAD_REQUEST)
         return
     method, target, version = fields
@@ -194,7 +203,7 @@ async def handle_client(
     else:
         parsed = None
     if parsed is None:
-        _log(f"BAD {request_line!r}")
+        _log(f"BAD {_redacted(request_line)}")
         await _reply_and_close(client_writer, _BAD_REQUEST)
         return
     host, port = parsed
@@ -231,10 +240,23 @@ async def handle_client(
 
 
 async def start_proxy(allow: frozenset[str], host: str, port: int) -> asyncio.Server:
-    """Start listening; the returned server is already accepting connections."""
+    """Start listening; the returned server is already accepting connections.
+
+    At most ``MAX_CONNECTIONS`` clients are served at once; one more gets ``503``.
+    """
+    active = 0
 
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await handle_client(allow, reader, writer)
+        nonlocal active
+        if active >= MAX_CONNECTIONS:
+            _log("BAD too-many-connections")
+            await _reply_and_close(writer, _UNAVAILABLE)
+            return
+        active += 1
+        try:
+            await handle_client(allow, reader, writer)
+        finally:
+            active -= 1
 
     return await asyncio.start_server(_handle, host, port, limit=HEAD_LIMIT_BYTES)
 

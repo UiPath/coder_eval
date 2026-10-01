@@ -185,6 +185,29 @@ async def test_garbage_request_line_is_400(line: bytes, capsys):
     assert "BAD" in capsys.readouterr().out
 
 
+async def test_a_refused_request_line_is_logged_without_its_target(capsys):
+    async with _proxy(set()) as port:
+        _reader, writer, status = await _request(port, b"GET http://u:SECRET@h:99999/?token=T HTTP/1.1\r\n\r\n")
+        writer.close()
+    out = capsys.readouterr().out
+    assert status.startswith(b"HTTP/1.1 400")
+    assert "BAD GET unparseable request line" in out
+    assert "SECRET" not in out
+    assert "token" not in out
+
+
+async def test_connections_beyond_the_cap_get_503(monkeypatch, capsys):
+    monkeypatch.setattr(egress_proxy, "MAX_CONNECTIONS", 1)
+    async with _proxy(set()) as port:
+        _held_reader, held_writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.05)
+        _reader, writer, status = await _request(port, b"CONNECT a.example:443 HTTP/1.1\r\n\r\n")
+        writer.close()
+        held_writer.close()
+    assert status.startswith(b"HTTP/1.1 503")
+    assert "BAD too-many-connections" in capsys.readouterr().out
+
+
 async def test_oversized_head_closes_the_connection(capsys):
     async with _proxy(set()) as port:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
