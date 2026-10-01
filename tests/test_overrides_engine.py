@@ -130,6 +130,19 @@ class TestApplyOverrides:
         apply_overrides(task, {"sandbox.docker.env_passthrough_extra": ["CLI"]})
         assert task.sandbox.docker.env_passthrough_extra == ["BASE", "CLI"]
 
+    def test_network_llm_only_via_dash_d_keeps_image(self):
+        task = _make_task(sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(image="custom:1")))
+        apply_overrides(task, {"sandbox.docker.network": "llm_only"})
+        assert task.sandbox.docker.network == "llm_only"
+        assert task.sandbox.docker.image == "custom:1"
+
+    def test_egress_allowlist_appends_and_normalizes_via_dash_d(self):
+        task = _make_task(
+            sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(egress_allowlist=["pypi.org"]))
+        )
+        apply_overrides(task, {"sandbox.docker.egress_allowlist": ["CLI.example.com:8443"]})
+        assert task.sandbox.docker.egress_allowlist == ["pypi.org:443", "cli.example.com:8443"]
+
     def test_system_prompt_file_clears_sibling_via_dash_d(self):
         """`-D agent.system_prompt_file` clears an inherited system_prompt (no crash)."""
         task = _make_task(agent=parse_agent_config(type="claude-code", system_prompt="inherited"))
