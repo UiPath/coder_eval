@@ -47,8 +47,160 @@ coder-eval run --driver docker
 sandbox:
   driver: docker
   docker:
-    network: bridge         # or "none" for sealed runs
+    network: bridge         # bridge | llm_only | none (see Network modes)
     image: my-custom:tag    # override the default image
+```
+
+## Network modes
+
+`sandbox.docker.network` selects what the task container can reach. The same mode applies to
+the grading container of a detached `coder-eval evaluate`.
+
+| Mode | The container reaches | Use it for |
+|---|---|---|
+| `bridge` (default) | the full network | tasks that install packages or call other services |
+| `llm_only` | only the model APIs and the hosts in `egress_allowlist`, through a proxy sidecar | agent tasks that must not use general internet |
+| `none` | nothing | `agent: {type: none}` tasks only: a real agent cannot reach its model API |
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+    egress_allowlist: [pypi.org, files.pythonhosted.org]   # optional, appended across layers
+```
+
+You can also set it per run: `-D sandbox.docker.network=llm_only` and
+`-D 'sandbox.docker.egress_allowlist=["pypi.org"]'`.
+
+### How the egress sidecar works
+
+For each task the host creates:
+
+1. A per-task `docker network create --internal` network with
+   `com.docker.network.bridge.inhibit_ipv4=true`. The network has no route out and no gateway
+   address on the host, so the task container cannot reach the internet or a host service.
+2. An egress-proxy sidecar from the framework image `coder-eval-agent:<version>`. It joins the
+   internal network (DNS alias `coder-eval-egress`) and the default `bridge`. It runs the host's
+   own `egress_proxy.py`, bind-mounted read-only, as uid 65534 with all capabilities dropped and a
+   read-only root file system. It forwards only to exact `host:port` targets.
+3. The task container, on the internal network only, with `HTTPS_PROXY` / `HTTP_PROXY` (both
+   cases) set to `http://coder-eval-egress:3128`, `NO_PROXY=localhost,127.0.0.1,::1`,
+   `NODE_USE_ENV_PROXY=1` and `LITELLM_LOCAL_MODEL_COST_MAP=True`. A host value of a proxy
+   variable is never forwarded.
+
+Before the task container starts, the host sends one `CONNECT` per allowlisted target through
+the sidecar. If one fails, the task is an `ERROR` row that names the failing targets. The host
+removes the sidecar and the network on every path (success, error, Ctrl-C). If the host process
+is killed, the sidecar stops by itself when the host heartbeat goes stale; see
+[Troubleshooting egress](#troubleshooting-egress) to remove what is left.
+
+A tool that ignores the proxy variables has no route, so it fails closed. It cannot bypass the
+allowlist.
+
+### The derived allowlist
+
+You do not list the model APIs yourself. The host derives them:
+
+| Source | Hosts added |
+|---|---|
+| API backend (`API_BACKEND`) | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the `LITELLM_BASE_URL` row below |
+| Forwarded `*_URL` variables | the host and port of every variable in `env_passthrough` / `env_passthrough_extra` whose name ends in `_URL` and whose value is an `http(s)` URL: `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`), `CODEX_BASE_URL`, `UIPATH_URL`, and your own |
+| Agent | codex: `api.openai.com:443` when `CODEX_BASE_URL` is not forwarded. antigravity: `generativelanguage.googleapis.com:443`. pi: the host of the `provider/` prefix of `agent.model` (`openrouter`, `anthropic`, `openai`, `google`; anything else or no model gives `openrouter.ai:443`). claude-code, opencode, delegate, none: nothing |
+| `system_one_judge` criteria | the host of each `base_url` (default `api.typesafe.ai:443`) |
+| `egress_allowlist` | your entries |
+
+The judges (`llm_judge`, `agent_judge`) and the dialog simulator use the API backend, so the
+backend row covers them. A Pi provider other than the four above, and every OpenCode or Delegate
+provider, needs its host in `egress_allowlist`.
+
+### Extra egress hosts
+
+`egress_allowlist` takes `host` or `host:port` entries; a bare host means port 443. A host is a DNS
+name or an IPv4 address. Schemes, paths, wildcards and IPv6 addresses are refused when the task
+loads. Entries are appended across the config layers, like `env_passthrough_extra`. Under `bridge`
+or `none` the field is ignored.
+
+Typical additions:
+
+| Need | Entries |
+|---|---|
+| `sandbox.python.env_packages`, `pip`, `uv` | `pypi.org`, `files.pythonhosted.org` |
+| `npm`, `npx -y` MCP servers | `registry.npmjs.org` |
+| `git clone` over https from GitHub | `github.com` |
+| `apt` (Debian) | `deb.debian.org:80` |
+| `apt` (Ubuntu) | `archive.ubuntu.com:80`, `security.ubuntu.com:80` (amd64) or `ports.ubuntu.com:80` (arm64) |
+| `apk` (Alpine) | `dl-cdn.alpinelinux.org` |
+| A remote MCP server or a run-time plugin install | its host |
+
+### Tool compatibility
+
+The task image needs nothing new: its tools must honour the proxy variables.
+
+| Tool | Under `llm_only` |
+|---|---|
+| curl, GNU wget, git over https, pip, uv, npm/npx, apt, apk | honour the proxy; a denied host fails fast (`CONNECT tunnel failed, response 403`, `npm error 403`; pip and uv retry for about 8–12 s first) |
+| Python urllib / requests / httpx | honour the proxy (`trust_env` is on by default) |
+| Python aiohttp | only with `trust_env=True` (litellm sets it); otherwise no route |
+| Node `fetch` / `https` | only on Node ≥ 22.21 or ≥ 24.5, through `NODE_USE_ENV_PROXY=1`; older Node has no route. Node prints an `UNDICI-EHPA` warning on stderr |
+| Go `net/http` default client | honours the proxy; a custom transport without `Proxy` has no route |
+| busybox `wget` (Alpine) | plain http works; https always fails `400`, because it sends `GET https://…` instead of `CONNECT`. Use curl |
+| dnf (Rocky, Fedora) | its metalink picks random mirrors, so an exact-host list cannot work. Pin a `baseurl` or bake the packages into the image |
+| git over ssh, raw sockets, DNS lookups, Java without proxy flags | no route |
+
+Every built-in harness in the framework image honours the proxy (Claude Code, Codex,
+Antigravity, Pi). See [Run-Limit Parity § Network modes](agents/HARNESS_PARITY.md#network-modes-under-the-docker-driver).
+
+The sidecar always runs the Debian framework image, so the task image's distribution does not
+change the boundary. Debian, Ubuntu, Rocky Linux, Fedora and Alpine task images were tested as
+clients. A runtime-kit image needs the framework image too (`make docker-images` builds both).
+
+**Docker versions.** Docker 20.10 or later (`host-gateway` first shipped there). Tested on Docker
+Desktop 29 (macOS) and on Linux dockerd 20.10, 24 and 29, with both the `iptables` and the
+`nftables` firewall backends. On Linux, `host.docker.internal` resolves to the `docker0` address,
+so a LiteLLM proxy on the host must listen on `docker0` or `0.0.0.0`, as under `bridge`.
+
+### Expected DENY lines
+
+Some clients call hosts they do not need. These `DENY` lines are harmless:
+
+| Client | Denied host |
+|---|---|
+| Claude Code with `API_BACKEND=direct` | `http-intake.logs.us5.datadoghq.com:443` (telemetry) |
+| Codex | `chatgpt.com:443`, `github.com:443`, `api.github.com:443` (update check, remote config) |
+| litellm without `LITELLM_LOCAL_MODEL_COST_MAP` | `raw.githubusercontent.com:443` (cost map) |
+
+### Egress limits
+
+- **Parallel tasks.** Each task uses one Docker network. A default Docker Desktop has address
+  pools for about 29 user networks, so keep `--max-parallel` under that. When the pools are
+  exhausted, the row error names `--max-parallel`, the prune command and the daemon's
+  `default-address-pools` setting.
+- **No upstream proxy.** The sidecar connects directly. A host that can reach the internet only
+  through a corporate proxy cannot use `llm_only`.
+- **Not exfiltration-proof.** The agent can still send data to an allowlisted host.
+- **Exact hosts only.** No wildcards and no CIDR ranges.
+- **podman and rootless Docker** are not tested.
+- **Harbor export** refuses an `llm_only` task.
+
+### Troubleshooting egress
+
+The sidecar log is appended to the task's `docker.log` under
+`=== egress proxy (network: llm_only) ===`. Each connection is one line:
+`ALLOW host:port METHOD`, `DENY host:port METHOD`, `FAIL host:port <error>` (an allowed host the
+sidecar could not reach), or `BAD …` (a request the proxy refused to parse). To see which hosts a
+task needed:
+
+```bash
+grep -E "^(ALLOW|DENY|FAIL)" runs/latest/**/docker.log | sort | uniq -c
+```
+
+Add each needed `DENY` host to `egress_allowlist`. If the host process was killed, remove the
+leaked sidecars and networks:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=org.coder-eval.egress)
+docker network prune -f --filter label=org.coder-eval.egress
 ```
 
 ## Using a pre-built custom image

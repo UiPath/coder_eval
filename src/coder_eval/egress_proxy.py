@@ -3,10 +3,9 @@
 ``serve`` accepts HTTP ``CONNECT host:port`` and absolute-form plain HTTP
 (``GET http://host/...``) and forwards only to an exact allowlisted ``host:port``.
 It never originates TLS: an absolute-form ``https://`` request gets ``400``. Every
-decision is one stdout line: ``ALLOW``, ``DENY``, ``FAIL``, ``BAD`` or ``STALE``,
-after one ``READY`` line. A request line with a control or non-ASCII byte is refused,
-so a client cannot forge a log line. With ``--heartbeat`` it stops by itself when the
-host heartbeat file stops changing for ``--stale`` seconds.
+decision is one stdout line (``ALLOW``, ``DENY``, ``FAIL``, ``BAD``, ``STALE``) after
+one ``READY`` line; a request line with a control or non-ASCII byte is refused. With
+``--heartbeat`` it stops when the host heartbeat stops changing for ``--stale`` seconds.
 
 ``probe`` sends one ``CONNECT`` per target through a running proxy, prints
 ``OK target`` or ``FAIL target <reason>``, and exits 0 only when every target is OK.
@@ -14,6 +13,8 @@ host heartbeat file stops changing for ``--stale`` seconds.
 The host bind-mounts this file into the framework image and runs it with
 ``python3 -I``, so it may import only ``argparse``, ``asyncio``, ``os``, ``sys`` and
 ``time``. Importing it starts nothing.
+
+Rationale: .claude/notes/isolation.md § The egress sidecar (network: llm_only)
 """
 
 import argparse

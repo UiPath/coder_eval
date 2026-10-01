@@ -1,0 +1,37 @@
+task_id: docker_egress_llm_only
+description: |
+  Negative egress check: under network llm_only the agent completes, but general internet is unreachable.
+tags: [docker, network, smoke]
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: [Bash, Read, Write]
+  setting_sources: []
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+  limits:
+    timeout: 300
+initial_prompt: |
+  Run exactly this command and do not retry it: curl -sS -m 10 https://example.com > curl_out.txt 2>&1; echo "exit=$?" >> curl_out.txt
+  Then create notes.txt containing the single word DONE.
+success_criteria:
+  - type: file_contains
+    path: notes.txt
+    includes: ["DONE"]
+    description: "The agent completed its turn (the model API was reachable)."
+    weight: 0.4
+  - type: file_contains
+    path: curl_out.txt
+    includes: ["exit="]
+    description: "The agent ran the curl command."
+    weight: 0.2
+  - type: run_command
+    command: "! curl -sS -m 10 -o /dev/null https://example.com"
+    description: "General internet is unreachable from the container at grading time too."
+    weight: 0.4
+run_limits:
+  max_turns: 6
+  task_timeout: 300
+  turn_timeout: 120

@@ -734,6 +734,26 @@ both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
 
 Full detail: [Pi](PI.md).
 
+## Network modes under the docker driver
+
+`sandbox.docker.network` has the same meaning on every harness: `bridge` gives the container the
+full network, `none` gives it no network, and `llm_only` lets it reach only the model APIs and
+`egress_allowlist` through a proxy sidecar
+([Docker Isolation § Network modes](../DOCKER_ISOLATION.md#network-modes)). A harness works under
+`llm_only` only if its CLI honours the `HTTPS_PROXY` variables; one that does not fails closed.
+
+| | claude-code | codex | antigravity | opencode | pi | delegate | none |
+|---|---|---|---|---|---|---|---|
+| `bridge` | works | works | works | works (custom image) | works | works (custom image) | works |
+| `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
+| `llm_only` honours the proxy | yes | yes | yes | CLI not in the framework image; untested | yes | CLI not in the framework image; untested | no egress needed |
+| Default egress hosts (beyond the backend's) | none | the `CODEX_BASE_URL` host, else `api.openai.com:443` | `generativelanguage.googleapis.com:443` | none: add the provider hosts to `egress_allowlist` | the `provider/` host of `agent.model` (default `openrouter.ai:443`) | none: add the backend hosts to `egress_allowlist` | none |
+| Verified by | spike S3 (Bedrock and direct) | spike S4 (Azure `CODEX_BASE_URL`) | spike S6 | spike S8 (absent) | spike S7 | spike S8 (absent) | — |
+
+Expected harmless `DENY` lines: Codex calls `chatgpt.com`, `github.com` and `api.github.com`
+(update check and remote config); Claude Code with `API_BACKEND=direct` sends telemetry to
+`http-intake.logs.us5.datadoghq.com`. Neither needs the host.
+
 ## Reproducing
 
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more

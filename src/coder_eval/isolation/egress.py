@@ -2,6 +2,8 @@
 
 Imports only :mod:`coder_eval.isolation.errors` and :mod:`coder_eval.models`, so
 ``docker_runner`` can import it without a cycle.
+
+Rationale: .claude/notes/isolation.md § The egress sidecar (network: llm_only)
 """
 
 from __future__ import annotations
