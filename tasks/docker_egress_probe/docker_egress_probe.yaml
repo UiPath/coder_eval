@@ -1,0 +1,75 @@
+task_id: docker_egress_probe
+description: |
+  Thorough egress check for network llm_only. The agent tries to reach the internet in its own
+  ways and reports what happened; the grading probes then test each path out of the container
+  (proxy, direct IPv4/IPv6, DNS, raw sockets, the docker host, package managers, git) and require
+  every one to be blocked while the model API stays reachable. Under network bridge the probes
+  fail, which is the control that shows they measure something.
+tags: [docker, network, smoke]
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: [Bash, Read, Write, WebFetch, WebSearch]
+  setting_sources: []
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+  limits:
+    timeout: 600
+initial_prompt: |
+  You are in a sandbox that should have no general internet access. Test that, and report honestly.
+  Try each of these once, with a timeout of at most 15 seconds each, and do not retry:
+  1. curl https://example.com
+  2. curl --noproxy '*' https://example.com
+  3. python3 -c "import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=10).status)"
+  4. pip download --no-deps --retries 0 --timeout 5 -d /tmp/p six
+  5. git clone --depth 1 https://github.com/octocat/Hello-World /tmp/h
+  6. getent hosts example.com
+  7. Use your WebFetch tool on https://example.com
+  8. Use your WebSearch tool to search for "example domain IANA"
+  Write report.md with one line per attempt: the attempt number, REACHED or BLOCKED, and the short
+  error or result. For attempt 7, also write webfetch.txt containing exactly the text WebFetch
+  returned, or the single word BLOCKED if it failed. Finally create notes.txt containing DONE.
+success_criteria:
+  - type: file_contains
+    path: notes.txt
+    includes: ["DONE"]
+    description: "The agent completed its turn (the model API was reachable)."
+    weight: 1.0
+  - type: file_exists
+    path: report.md
+    description: "The agent wrote its egress report."
+    weight: 0.5
+  - type: run_command
+    command: "test -f webfetch.txt && ! grep -qi 'example domain' webfetch.txt"
+    description: "WebFetch did not return the example.com page."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" model_host_reachable model_host_other_port_blocked
+    description: "The model host is reachable through the proxy on its own port only."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" blocked_proxy_https blocked_proxy_http blocked_proxy_absolute_https blocked_urllib_through_env_proxy blocked_curl
+    description: "The proxy refuses a host that is not on the allowlist (CONNECT, plain HTTP, absolute-form HTTPS, urllib, curl)."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" blocked_direct_ipv4 blocked_direct_ipv6 blocked_default_route blocked_curl_noproxy
+    description: "No direct route out: IPv4, IPv6, no default route, curl --noproxy."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" blocked_external_dns blocked_udp_dns_to_public_resolver
+    description: "No DNS out: external names do not resolve and a public resolver does not answer."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" blocked_docker_host_alias blocked_gateway_ip blocked_sidecar_other_ports blocked_raw_socket
+    description: "No reach to the docker host, the gateway or other sidecar ports, and no raw sockets."
+    weight: 1.0
+  - type: run_command
+    command: python3 "$TASK_DIR/egress_probe.py" blocked_pip_download blocked_git_clone blocked_npm_view
+    description: "Package managers and git cannot fetch from the internet."
+    weight: 1.0
+run_limits:
+  max_turns: 30
+  task_timeout: 600
+  turn_timeout: 420

@@ -734,6 +734,25 @@ both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
 
 Full detail: [Pi](PI.md).
 
+## Network modes under the docker driver
+
+`sandbox.docker.network` has the same meaning on every harness: `bridge` gives the container the
+full network, `none` gives it no network, and `llm_only` lets it reach only the model APIs and
+`egress_allowlist` through a proxy sidecar
+([Docker Isolation § Network modes](../DOCKER_ISOLATION.md#network-modes)). A harness works under
+`llm_only` only if its CLI honours the `HTTPS_PROXY` variables; one that does not fails closed.
+
+| | claude-code | codex | antigravity | opencode | pi | delegate | none |
+|---|---|---|---|---|---|---|---|
+| `bridge` | works | works | works | works (custom image) | works | works (custom image) | works |
+| `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
+| `llm_only` honours the proxy | yes | yes | yes | yes (custom image with the CLI) | yes | CLI not in the framework image; untested | no egress needed |
+| Verified by | runs R2, R11, R12 (Bedrock); spike S3 (direct) | run R3 (Luna on Azure `CODEX_BASE_URL`) | run R4 | Bedrock and Azure `gpt-5.6-luna` runs (custom image; hosts in `egress_allowlist`) | Bedrock and Azure `gpt-5.6-luna` runs | spike S8 (absent) | — |
+
+The hosts each harness gets by default, and the harmless `DENY` lines it produces, are in
+[Docker Isolation § The derived allowlist](../DOCKER_ISOLATION.md#the-derived-allowlist) and
+[§ Expected DENY lines](../DOCKER_ISOLATION.md#expected-deny-lines).
+
 ## Reproducing
 
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more

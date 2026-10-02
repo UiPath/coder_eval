@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import warnings
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -101,6 +104,61 @@ def validate_template_sources_list(sources: list[TemplateSource]) -> None:
         )
 
 
+_EGRESS_HOST = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
+_EGRESS_PORT = re.compile(r"[0-9]{1,5}")
+
+
+def normalize_egress_target(entry: str) -> str:
+    """Normalize one ``host`` or ``host:port`` egress entry to ``host:port``.
+
+    The host is a DNS name or an IPv4 literal, lowercased; a bare host means port 443.
+
+    Raises:
+        ValueError: The entry carries a scheme, path, wildcard, IPv6 literal or an
+            invalid port, or is empty.
+    """
+    raw = entry.strip()
+    text = raw.lower()
+    host, sep, port_text = text.rpartition(":")
+    if not sep:
+        host, port_text = text, "443"
+    valid = raw.isascii() and _EGRESS_HOST.fullmatch(host) and _EGRESS_PORT.fullmatch(port_text)
+    if not valid or not 1 <= int(port_text) <= 65535:
+        raise ValueError(
+            f"egress_allowlist entry {entry!r} must be 'host' or 'host:port' (a DNS name or IPv4 address, "
+            + "port 1-65535), with no scheme, path, wildcard or IPv6 literal."
+        )
+    return f"{host}:{int(port_text)}"
+
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+logger = logging.getLogger(__name__)
+
+
+def url_egress_target(source: str, url: str) -> str | None:
+    """Normalized ``host:port`` of an ``http(s)`` URL, or None when it has no host or another scheme.
+
+    A loopback host is also None, with a warning: the egress sidecar cannot reach it.
+    ``source`` names the URL in the warning and the error; the URL itself is never
+    echoed, because it may carry credentials.
+
+    Raises:
+        ValueError: The URL's host or port cannot be allowlisted.
+    """
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        if parts.hostname in LOOPBACK_HOSTS:
+            logger.warning("%s points at a loopback host, which the egress sidecar cannot reach.", source)
+            return None
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
+        return normalize_egress_target(f"{parts.hostname}:{port}")
+    except ValueError:
+        raise ValueError(f"{source} has a host or port that network: llm_only cannot allowlist.") from None
+
+
 class DockerBuildConfig(BaseModel):
     """``docker build`` customization for a ``dockerfile_path`` task image.
 
@@ -192,9 +250,22 @@ class DockerDriverConfig(BaseModel):
             "`dockerfile_path` is set. Ignored when building is not in play."
         ),
     )
-    network: Literal["bridge", "none"] = Field(
+    network: Literal["bridge", "none", "llm_only"] = Field(
         default="bridge",
-        description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
+        description=(
+            "Container network. 'bridge' (default): full network. 'llm_only': the container reaches only the "
+            "model APIs and `egress_allowlist` through a proxy sidecar (see docs/DOCKER_ISOLATION.md § Network "
+            "modes). 'none': no network at all, so only `agent: {type: none}` tasks can run."
+        ),
+    )
+    egress_allowlist: list[str] = MergeField(
+        strategy="append",
+        default_factory=list,
+        description=(
+            "Extra `host` or `host:port` targets (default port 443) the container may reach under "
+            "`network: llm_only`, beyond the derived model-API hosts. Appended across config layers. "
+            "Ignored for other network modes. Example: ['pypi.org', 'files.pythonhosted.org']."
+        ),
     )
     working_dir: str | None = Field(
         default=None,
@@ -282,6 +353,11 @@ class DockerDriverConfig(BaseModel):
         default_factory=list,
         description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
     )
+
+    @field_validator("egress_allowlist")
+    @classmethod
+    def _normalize_egress_allowlist(cls, values: list[str]) -> list[str]:
+        return [normalize_egress_target(v) for v in values]
 
     @field_validator("working_dir")
     @classmethod

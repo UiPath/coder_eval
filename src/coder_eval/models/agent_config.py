@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal, Self, TypedDict
 
 from claude_agent_sdk import ClaudeAgentOptions
@@ -19,6 +20,7 @@ from pydantic import (
 
 from coder_eval.models.enums import AgentKind, PermissionMode
 from coder_eval.models.merge_strategy import MergeField
+from coder_eval.models.sandbox import url_egress_target
 
 
 type SettingSource = Literal["user", "project", "local"]
@@ -203,11 +205,24 @@ class BaseAgentConfig(BaseModel):
             raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
         return self
 
+    uses_api_backend: ClassVar[bool] = False
+    """True when the agent reaches its model through ``API_BACKEND``; ``llm_only`` then allows the backend's hosts."""
+
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """Normalized ``host:port`` targets this agent's own model API needs under ``network: llm_only``.
+
+        The API backend's hosts are added only when ``uses_api_backend`` is true.
+        ``env`` holds the host variables forwarded into the container. Pure: no I/O.
+        Override on a plugin agent's config class.
+        """
+        return ()
+
 
 class ClaudeCodeAgentConfig(BaseAgentConfig):
     """Claude Code agent configuration."""
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
+    uses_api_backend: ClassVar[bool] = True
 
     system_prompt_mode: SystemPromptMode = Field(
         default="append",
@@ -291,6 +306,20 @@ class CodexAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
 
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.
+
+        ``CodexAgent._resolve_base_url`` is the authority for that variable.
+
+        Raises:
+            ValueError: ``CODEX_BASE_URL`` names a host or port that cannot be allowlisted.
+        """
+        base_url = env.get("CODEX_BASE_URL")
+        if not base_url:
+            return ("api.openai.com:443",)
+        target = url_egress_target("CODEX_BASE_URL", base_url)
+        return (target,) if target is not None else ()
+
 
 # Mirrors google.antigravity.types.ThinkingLevel as a plain Literal so this module
 # imports without the optional SDK -- base installs must load every config class.
@@ -315,6 +344,10 @@ class AntigravityAgentConfig(BaseAgentConfig):
             "daily-driver default — the API otherwise defaults to the more expensive 'high'."
         ),
     )
+
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The Gemini API host, the only one the local harness contacts."""
+        return ("generativelanguage.googleapis.com:443",)
 
 
 class OpenCodeAgentConfig(BaseAgentConfig):
@@ -365,6 +398,13 @@ class OpenCodeAgentConfig(BaseAgentConfig):
 # forbid valid Pi levels. Confirmed against ``pi --help`` on Pi 0.87.1.
 type PiThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
+_PI_PROVIDER_HOSTS: dict[str, str] = {
+    "openrouter": "openrouter.ai:443",
+    "anthropic": "api.anthropic.com:443",
+    "openai": "api.openai.com:443",
+    "google": "generativelanguage.googleapis.com:443",
+}
+
 
 class PiAgentConfig(BaseAgentConfig):
     """Pi agent configuration (the ``pi`` Node coding agent — https://pi.dev/).
@@ -391,6 +431,14 @@ class PiAgentConfig(BaseAgentConfig):
         default="medium",
         description="Pi reasoning effort passed as --thinking (off/minimal/low/medium/high/xhigh/max).",
     )
+
+    def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The API host of the ``provider/`` prefix of ``model``; OpenRouter when unknown or unset.
+
+        Any other provider needs its host in ``sandbox.docker.egress_allowlist``.
+        """
+        provider, _, model_id = (self.model or "").partition("/")
+        return (_PI_PROVIDER_HOSTS.get(provider if model_id else "", "openrouter.ai:443"),)
 
 
 class DelegateAgentConfig(BaseAgentConfig):

@@ -14,10 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import (
-    DockerRunner,
-    _rewrite_loopback_for_container,
-)
+from coder_eval.isolation.docker_runner import DockerRunner
+from coder_eval.isolation.egress import rewrite_loopback_for_container
 from coder_eval.models import DockerDriverConfig, FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
@@ -28,19 +26,19 @@ class TestRewriteLoopbackForContainer:
     """localhost/127.0.0.1 -> host.docker.internal, preserving scheme/port/path."""
 
     def test_localhost_with_port(self):
-        assert _rewrite_loopback_for_container("http://localhost:4000") == "http://host.docker.internal:4000"
+        assert rewrite_loopback_for_container("http://localhost:4000") == "http://host.docker.internal:4000"
 
     def test_127_0_0_1_with_port(self):
-        assert _rewrite_loopback_for_container("http://127.0.0.1:4000") == "http://host.docker.internal:4000"
+        assert rewrite_loopback_for_container("http://127.0.0.1:4000") == "http://host.docker.internal:4000"
 
     def test_preserves_scheme_and_path(self):
-        assert _rewrite_loopback_for_container("https://localhost:8443/v1") == "https://host.docker.internal:8443/v1"
+        assert rewrite_loopback_for_container("https://localhost:8443/v1") == "https://host.docker.internal:8443/v1"
 
     def test_no_port(self):
-        assert _rewrite_loopback_for_container("http://localhost") == "http://host.docker.internal"
+        assert rewrite_loopback_for_container("http://localhost") == "http://host.docker.internal"
 
     def test_non_loopback_returns_none(self):
-        assert _rewrite_loopback_for_container("http://litellm.internal:4000") is None
+        assert rewrite_loopback_for_container("http://litellm.internal:4000") is None
 
 
 class TestLitellmEnvForwarding:

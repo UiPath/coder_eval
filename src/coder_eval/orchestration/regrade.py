@@ -37,7 +37,9 @@ from coder_eval.models import (
 )
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_LOG_FILENAME,
     GRADE_DOCKER_LOG_FILENAME,
+    GRADE_EGRESS_LOG_FILENAME,
     GRADE_LOG_FILENAME,
     PRE_GRADE_JSON_FILENAME,
     TASK_JSON_FILENAME,
@@ -284,6 +286,10 @@ def _container_dispatch_commands(task: TaskDefinition, task_file: Path | None) -
     parts += [f"-v {mount}" for mount in docker.extra_mounts or []]
     parts += [f"-v {path}" for path in _dispatch_host_exposure(task, task_file)]
     parts += [f"--env {name}" for name in docker.env_passthrough_extra or []]
+    if docker.network == "llm_only":
+        parts.append("--network llm_only")
+        if docker.egress_allowlist:
+            parts.append(f"(egress allowed to: {', '.join(docker.egress_allowlist)} plus the derived model-API hosts)")
     parts.append("(with your credentials in its environment and a writable copy of ~/.claude)")
     return [" ".join(parts)]
 
@@ -688,6 +694,7 @@ def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
     unhonored = f"{TASK_JSON_FILENAME}.unhonored"
     rescued = (
         (DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME),
+        (EGRESS_LOG_FILENAME, GRADE_EGRESS_LOG_FILENAME),
         (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME),
         (unhonored, unhonored),
     )
