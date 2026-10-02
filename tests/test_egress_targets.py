@@ -145,7 +145,7 @@ def test_url_vars_dropped_by_a_replaced_passthrough_do_not_count():
 
 def test_bedrock_region_is_lowercased_and_a_bad_region_is_named():
     targets = resolve_egress_targets(_task(), env={}, settings=_settings(ApiBackend.BEDROCK, "EU-North-1"))
-    assert "bedrock-runtime.eu-north-1.amazonaws.com:443" in targets
+    assert targets == ["bedrock-runtime.eu-north-1.amazonaws.com:443", "bedrock.eu-north-1.amazonaws.com:443"]
     with pytest.raises(ValueError, match="AWS_REGION"):
         resolve_egress_targets(_task(), env={}, settings=_settings(ApiBackend.BEDROCK, "eu north"))
 

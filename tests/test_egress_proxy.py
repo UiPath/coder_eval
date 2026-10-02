@@ -379,8 +379,7 @@ async def test_watchdog_stays_alive_while_the_counter_advances(tmp_path):
         await asyncio.sleep(0.2)
     assert not watcher.done()
     watcher.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await watcher
+    await asyncio.gather(watcher, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

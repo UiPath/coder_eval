@@ -352,8 +352,12 @@ class TestEgressScope:
         task = asyncio.create_task(_body())
         await entered.wait()
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        cancelled = False
+        try:
             await task
+        except asyncio.CancelledError:
+            cancelled = True
+        assert cancelled
         assert fake.verbs()[-3:] == ["logs c-egress", "rm -f", "network rm"]
 
     async def test_repeated_cancels_during_teardown_still_finish_it(
@@ -393,8 +397,12 @@ class TestEgressScope:
         await asyncio.sleep(0)
         task.cancel()
         release.set()
-        with pytest.raises(asyncio.CancelledError):
+        cancelled = False
+        try:
             await task
+        except asyncio.CancelledError:
+            cancelled = True
+        assert cancelled
         assert fake.verbs()[-3:] == ["logs c-egress", "rm -f", "network rm"]
 
     async def test_a_cancel_during_docker_create_waits_for_it_before_teardown(
@@ -434,8 +442,12 @@ class TestEgressScope:
         task.cancel()
         await asyncio.sleep(0.05)
         release_create.set()
-        with pytest.raises(asyncio.CancelledError):
+        cancelled = False
+        try:
             await task
+        except asyncio.CancelledError:
+            cancelled = True
+        assert cancelled
         assert order.index("create finished") < order.index("rm -f")
         assert order[-1] == "network rm"
 

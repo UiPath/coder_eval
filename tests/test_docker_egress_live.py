@@ -9,7 +9,6 @@ labelled behind.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import shutil
 import subprocess
 import sys
@@ -49,10 +48,11 @@ def framework_image() -> str:
             pytest.skip("docker daemon not running")
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pytest.skip("docker daemon not running")
-    for image in (get_default_docker_image_tag(), "coder-eval-agent:latest"):
-        if _docker("image", "inspect", image).returncode == 0:
-            return image
-    pytest.skip("framework image not built (make docker-image)")
+    candidates = (get_default_docker_image_tag(), "coder-eval-agent:latest")
+    image = next((i for i in candidates if _docker("image", "inspect", i).returncode == 0), None)
+    if image is None:
+        pytest.skip("framework image not built (make docker-image)")
+    return image
 
 
 def _curl(network: str, image: str, url: str) -> subprocess.CompletedProcess[str]:
@@ -126,8 +126,7 @@ async def test_allowlisted_http_works_denied_https_fails_and_nothing_leaks(frame
                 assert marker in bypass.stdout, (marker, bypass.stdout, bypass.stderr)
     finally:
         heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat_task
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
 
     log = log_path.read_text(encoding="utf-8")
     assert log.startswith("READY ")
