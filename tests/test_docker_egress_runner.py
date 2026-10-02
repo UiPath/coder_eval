@@ -265,7 +265,8 @@ async def test_repeated_cancels_during_teardown_still_finish_it(tmp_path: Path, 
     await asyncio.sleep(0)
     task.cancel()
     release.set()
-    assert await _cancelled(task)
+    cancelled = await _cancelled(task)
+    assert cancelled
     assert fake.verbs()[-3:] == TEARDOWN
 
 
@@ -296,7 +297,8 @@ async def test_a_cancel_during_docker_create_waits_for_it_before_teardown(
     task.cancel()
     await asyncio.sleep(0.05)
     release_create.set()
-    assert await _cancelled(task)
+    cancelled = await _cancelled(task)
+    assert cancelled
     assert order.index("create finished") < order.index("rm -f")
     assert order[-1] == "network rm"
 
@@ -380,8 +382,12 @@ async def test_llm_only_runs_the_container_inside_the_scope(
     monkeypatch.setattr(dr, "egress_scope", _fake_scope)
     with pytest.raises(FileNotFoundError):
         await _rt_runner(tmp_path, "llm_only").run()
-    assert seen.pop("targets") == ["api.anthropic.com:443", "platform.claude.com:443"]
-    assert seen == {"staged": True, "heartbeat": True, "exited": True}
+    assert seen == {
+        "targets": ["api.anthropic.com:443", "platform.claude.com:443"],
+        "staged": True,
+        "heartbeat": True,
+        "exited": True,
+    }
     assert launches[0][launches[0].index("--network") + 1] == "c-net"
 
 
