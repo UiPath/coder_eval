@@ -70,6 +70,7 @@ criterion, so `pr-checks.yml` preflights it. Run it on its own with `--tags syst
 |-----------|---------------|
 | `datasets/` | JSONL datasets referenced by dataset-backed tasks |
 | `dockerfile_build_example/` | A task that builds its own Dockerfile |
+| `docker_egress_probe/` | Thorough `network: llm_only` egress check: grading probes for every path out, plus a `bridge` control |
 | `mock_path_dirs_template_dir/` | Template dir (mock CLI bins) consumed by `mock_path_dirs_smoke` |
 | `python_cli_simulated_judged/` | Simulated multi-turn dialog + judged scoring |
 | `internal/` | Dev smoke tests exercising harness internals (e.g. session-resumption / context retention) |

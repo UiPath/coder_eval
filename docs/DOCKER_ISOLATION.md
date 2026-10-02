@@ -178,6 +178,7 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 | Claude Code with `API_BACKEND=direct` | `http-intake.logs.us5.datadoghq.com:443` (telemetry) |
 | Codex | `chatgpt.com:443`, `github.com:443`, `api.github.com:443` (update check, remote config) |
 | litellm without `LITELLM_LOCAL_MODEL_COST_MAP` | `raw.githubusercontent.com:443` (cost map) |
+| Claude Code `WebFetch` on Bedrock | `api.anthropic.com:443` (the domain safety check before a fetch; `WebFetch` then fails) |
 
 ### Egress limits
 
@@ -188,6 +189,10 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 - **No upstream proxy.** The sidecar connects directly. A host that can reach the internet only
   through a corporate proxy cannot use `llm_only`.
 - **Not exfiltration-proof.** The agent can still send data to an allowlisted host.
+- **Server-side tools are outside the boundary.** A tool that the model provider runs, such as
+  Claude Code's `WebSearch` on the direct API, fetches from the internet on the provider's side.
+  The container network cannot block it; remove it with `disallowed_tools` if the task needs no
+  internet at all.
 - **An exact host is a TCP destination, not a site.** A host behind a shared CDN front (for
   example `files.pythonhosted.org` or `deb.debian.org`) can serve other sites that the agent names
   in its `Host` header or TLS SNI.
@@ -202,6 +207,22 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 - **Plugin agents.** A third-party agent gets the API backend's hosts only when its config class
   sets `uses_api_backend = True`, and its own hosts only through `egress_hosts()`; see
   [Extending Coder Eval](EXTENDING.md#the-config-class).
+
+### Checking the boundary
+
+`tasks/docker_egress_probe/` tests the mode end to end. The agent tries to reach the internet in
+its own ways, and the grading criteria then probe each path out from inside the container: the
+proxy, direct IPv4 and IPv6, DNS, raw sockets, the docker host, `pip`, `git` and `npm`. Each
+probe passes only when its path is blocked, and the model host must stay reachable:
+
+```bash
+coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml            # expect 1.000
+coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml \
+  -D sandbox.docker.network=bridge                                          # control: expect a FAILURE
+```
+
+Run the probes alone in any `llm_only` container with
+`python3 egress_probe.py all`.
 
 ### Troubleshooting egress
 
