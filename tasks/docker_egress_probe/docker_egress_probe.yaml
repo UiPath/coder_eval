@@ -47,7 +47,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     command: python3 "$TASK_DIR/egress_probe.py" model_host_reachable model_host_other_port_blocked
-    description: "The model host is reachable through the proxy on 443 only."
+    description: "The model host is reachable through the proxy on its own port only."
     weight: 1.0
   - type: run_command
     command: python3 "$TASK_DIR/egress_probe.py" blocked_proxy_https blocked_proxy_http blocked_proxy_absolute_https blocked_urllib_through_env_proxy blocked_curl

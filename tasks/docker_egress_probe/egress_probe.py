@@ -42,12 +42,16 @@ def _raw_status(request: bytes) -> str:
         return sock.recv(256).split(b"\r\n", 1)[0].decode("latin-1")
 
 
-def _model_host() -> str | None:
+def _model_target() -> tuple[str, int] | None:
+    """The ``(host, port)`` the agent's model calls go to, or None when the backend is not known here."""
     backend = os.environ.get("API_BACKEND", "direct")
     if backend == "bedrock" and os.environ.get("AWS_REGION"):
-        return f"bedrock-runtime.{os.environ['AWS_REGION'].lower()}.amazonaws.com"
+        return f"bedrock-runtime.{os.environ['AWS_REGION'].lower()}.amazonaws.com", 443
     if backend == "direct":
-        return "api.anthropic.com"
+        return "api.anthropic.com", 443
+    parts = urlsplit(os.environ.get("LITELLM_BASE_URL", ""))
+    if backend == "litellm" and parts.hostname:
+        return parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
     return None
 
 
@@ -195,19 +199,21 @@ def blocked_npm_view() -> str | None:
 
 
 def model_host_reachable() -> str | None:
-    host = _model_host()
-    if host is None:
-        return None
-    status = _connect_status(f"{host}:443")
-    return None if " 200 " in f"{status} " else f"proxy answered {status!r} for the model host {host}:443"
+    target = _model_target()
+    if target is None:
+        return "the model backend is not known to this probe"
+    status = _connect_status(f"{target[0]}:{target[1]}")
+    return None if " 200 " in f"{status} " else f"proxy answered {status!r} for the model host {target[0]}:{target[1]}"
 
 
 def model_host_other_port_blocked() -> str | None:
-    host = _model_host()
-    if host is None:
-        return None
-    status = _raw_status(f"GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
-    return None if " 403 " in f"{status} " else f"proxy answered {status!r} for {host}:80"
+    target = _model_target()
+    if target is None:
+        return "the model backend is not known to this probe"
+    host, port = target
+    other = 8 if port != 8 else 9
+    status = _connect_status(f"{host}:{other}")
+    return None if " 403 " in f"{status} " else f"proxy answered {status!r} for {host}:{other}"
 
 
 CHECKS = {name: fn for name, fn in globals().items() if name.startswith(("blocked_", "model_")) and callable(fn)}
