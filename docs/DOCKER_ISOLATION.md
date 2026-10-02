@@ -178,6 +178,7 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 | Claude Code with `API_BACKEND=direct` | `http-intake.logs.us5.datadoghq.com:443` (telemetry) |
 | Codex | `chatgpt.com:443`, `github.com:443`, `api.github.com:443` (update check, remote config) |
 | litellm without `LITELLM_LOCAL_MODEL_COST_MAP` | `raw.githubusercontent.com:443` (cost map) |
+| OpenCode | `models.opencode.ai:443` (model catalog refresh), `registry.npmjs.org:443` (update check) |
 | Claude Code with `API_BACKEND=litellm` | `api.anthropic.com:443` (startup calls the CLI does not need on this route) |
 | Claude Code `WebFetch` on Bedrock | `api.anthropic.com:443` (the domain safety check before a fetch; `WebFetch` then fails) |
 
