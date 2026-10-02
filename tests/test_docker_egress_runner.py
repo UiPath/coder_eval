@@ -584,6 +584,7 @@ class TestRunWiring:
         launches = self._no_daemon(monkeypatch)
         monkeypatch.setattr(dr.settings, "api_backend", ApiBackend.BEDROCK)
         monkeypatch.setattr(dr.settings, "aws_region", "not a region")
+        monkeypatch.setattr(dr.settings, "aws_bearer_token_bedrock", "tok")
         runner = self._rt_runner(tmp_path, "llm_only")
         with pytest.raises(EgressSetupError, match="AWS_REGION"):
             await runner.run()
