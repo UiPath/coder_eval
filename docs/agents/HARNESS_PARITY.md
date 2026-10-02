@@ -747,14 +747,11 @@ full network, `none` gives it no network, and `llm_only` lets it reach only the 
 | `bridge` | works | works | works | works (custom image) | works | works (custom image) | works |
 | `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
 | `llm_only` honours the proxy | yes | yes | yes | yes (custom image with the CLI) | yes | CLI not in the framework image; untested | no egress needed |
-| Default egress hosts | the API backend's hosts | the `CODEX_BASE_URL` host, else `api.openai.com:443` (no backend hosts) | `generativelanguage.googleapis.com:443` (no backend hosts) | none: add the provider hosts to `egress_allowlist` | the `provider/` host of `agent.model` (default `openrouter.ai:443`) | none: add the backend hosts to `egress_allowlist` | none |
 | Verified by | runs R2, R11, R12 (Bedrock); spike S3 (direct) | run R3 (Luna on Azure `CODEX_BASE_URL`) | run R4 | Bedrock and Azure `gpt-5.6-luna` runs (custom image; hosts in `egress_allowlist`) | Bedrock and Azure `gpt-5.6-luna` runs | spike S8 (absent) | — |
 
-Expected harmless `DENY` lines: Codex calls `chatgpt.com`, `github.com` and `api.github.com`
-(update check and remote config); Claude Code with `API_BACKEND=direct` sends telemetry to
-`http-intake.logs.us5.datadoghq.com`. Neither needs the host. Codex without `CODEX_API_KEY` falls back to a
-ChatGPT login whose model host is `chatgpt.com`: that setup does not work under `llm_only` unless
-you allowlist it.
+The hosts each harness gets by default, and the harmless `DENY` lines it produces, are in
+[Docker Isolation § The derived allowlist](../DOCKER_ISOLATION.md#the-derived-allowlist) and
+[§ Expected DENY lines](../DOCKER_ISOLATION.md#expected-deny-lines).
 
 ## Reproducing
 

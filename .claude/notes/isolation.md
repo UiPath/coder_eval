@@ -1108,8 +1108,7 @@ The sidecar image is the framework image, never the task image: a task image is 
 may be a runtime-kit image with a different Python. The proxy code is NOT taken from the image:
 the host bind-mounts its own `egress_proxy.py` read-only, so the code under test is the boundary
 that runs and image skew cannot change it. That is also why the module is stdlib-only (five
-imports, guarded by a test) and why `ALLOW_IMAGE_SKEW` may fall back to `:latest` for the sidecar:
-the image only supplies `python3`.
+imports, guarded by a test): the image only supplies `python3`.
 
 ### Why the sidecar watches the heartbeat
 

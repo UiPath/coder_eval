@@ -181,7 +181,6 @@ EGRESS_PROXY_PORT = 3128
 EGRESS_LABEL = "org.coder-eval.egress"
 SIDECAR_EGRESS_DIR = "/work/egress"
 SIDECAR_HEARTBEAT = "/work/heartbeat"
-FALLBACK_SIDECAR_IMAGE = "coder-eval-agent:latest"
 PROXY_URL = f"http://{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}"
 NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"
 # Never forwarded from the host under llm_only: a host value would shadow the sidecar's.
@@ -369,21 +368,6 @@ async def _checked(what: str, *args: str, timeout: float = _DOCKER_TIMEOUT_SECON
     return result.stdout
 
 
-async def _resolve_sidecar_image(image: str, *, allow_image_skew: bool) -> str:
-    candidates = [image, FALLBACK_SIDECAR_IMAGE] if allow_image_skew and image != FALLBACK_SIDECAR_IMAGE else [image]
-    last_error: EgressSetupError | None = None
-    for candidate in candidates:
-        try:
-            await _checked(f"inspect image {candidate}", "image", "inspect", "--format", "{{.Id}}", candidate)
-            return candidate
-        except EgressSetupError as exc:
-            last_error = exc
-    raise EgressSetupError(
-        f"network: llm_only needs the framework image {image} for its egress sidecar. Run `make docker-image`. "
-        + f"({last_error})"
-    )
-
-
 async def _probe(sidecar: str, targets: Sequence[str]) -> None:
     try:
         result = await _docker(*build_probe_argv(sidecar, targets))
@@ -454,7 +438,6 @@ async def egress_scope(
     stale_seconds: float,
     targets: Sequence[str],
     log_path: Path,
-    allow_image_skew: bool = False,
 ) -> AsyncIterator[EgressHandle]:
     """Create the internal network and proxy sidecar, probe every target, yield, then tear both down.
 
@@ -470,7 +453,14 @@ async def egress_scope(
     created_network: str | None = None
     created_sidecar: str | None = None
     try:
-        sidecar_image = await _resolve_sidecar_image(image, allow_image_skew=allow_image_skew)
+        await _checked(
+            f"find the framework image {image} for its egress sidecar (run `make docker-image`)",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            image,
+        )
         created_network = network
         await _checked("create its per-task network", *build_network_create_argv(network))
         created_sidecar = sidecar
@@ -479,7 +469,7 @@ async def egress_scope(
             *build_sidecar_create_argv(
                 sidecar=sidecar,
                 network=network,
-                image=sidecar_image,
+                image=image,
                 egress_dir=egress_dir,
                 heartbeat=heartbeat,
                 stale_seconds=stale_seconds,

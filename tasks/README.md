@@ -56,8 +56,7 @@ Members: `hello_date`, `agentless_smoke_test`, `byod_smoke_test`,
 `dataset_example`, `opencode_smoke_test`, `pi_smoke_test`,
 `record_cli_responses`, `smoke_agent_judge`, `smoke_llm_judge`,
 `smoke_negative_path`, `smoke_budget_exceeded`, `smoke_cost_budget_exceeded`,
-`smoke_system_one_judge`, `smoke_task_timeout`, `smoke_variants`, `token_check`,
-`docker_egress_llm_only`.
+`smoke_system_one_judge`, `smoke_task_timeout`, `smoke_variants`, `token_check`.
 
 `smoke_system_one_judge` is the only smoke-pass task that needs `TYPESAFE_API_KEY`
 (the `system_one_judge` criterion calls TypeSafe directly, independent of the run's

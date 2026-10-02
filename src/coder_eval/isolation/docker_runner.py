@@ -696,7 +696,6 @@ class DockerRunner:
                     stale_seconds=HEARTBEAT_STALE_SECONDS,
                     targets=egress_targets,
                     log_path=self.rt.run_dir / EGRESS_LOG_FILENAME,
-                    allow_image_skew=settings.allow_image_skew,
                 )
                 if egress_targets is not None
                 else contextlib.nullcontext(None)
