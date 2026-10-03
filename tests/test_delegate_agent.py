@@ -905,6 +905,28 @@ class TestCommunicate:
         record = await agent.communicate("hi again")
         assert record.agent_output == "recovered"
 
+    @pytest.mark.parametrize(
+        ("host_message", "error_type"),
+        [
+            ("Auth required: token expired", AgentConfigError),
+            ("fetch failed", AgentCrashError),
+        ],
+        ids=["auth", "network"],
+    )
+    async def test_respawn_init_error_keeps_the_start_classification(
+        self, patch_exec, tmp_path, host_message, error_type
+    ):
+        """The same init error must be as retryable on a mid-run respawn as at ``start()``."""
+        agent, _ = await _started_agent(patch_exec, [], tmp_path)
+        with pytest.raises(AgentCrashError):
+            await agent.communicate("hi")
+        await agent.discard_pending_turn()
+
+        patch_exec([_line({"type": "error", "message": host_message})])
+        with pytest.raises(error_type, match="Delegate SDK init failed"):
+            await agent.communicate("hi again")
+        assert agent._process is None
+
     async def test_emits_exactly_one_start_and_end_event(self, patch_exec, tmp_path):
         events = [_result(response="done")]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)

@@ -819,7 +819,9 @@ tail at WARNING instead.
 
 **Only an init error that a retry cannot fix is non-retryable.** `AgentConfigError` only on
 `_INIT_CONFIG_ERROR_MARKERS` (auth missing/rejected, missing slugs, unknown env). Any other init error
-and the 60 s init deadline raise a retryable `AgentCrashError`.
+and the 60 s init deadline raise a retryable `AgentCrashError`. A mid-run respawn keeps the same
+classification: it once made every `AgentConfigError` retryable, so an expired token ended the task at
+`start()` but was retried later.
 
 **Clear the process handle on every path that leaves the host dead or dying** — EOF, `error` frame,
 timeout (pre-check AND mid-`wait_for`), stop, `max_turns`. A shipped bug left it set after a mid-read

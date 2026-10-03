@@ -733,14 +733,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if self._process is None or self._process.returncode is not None:
             # A prior cooperative stop or crash left no live host: respawn
             # fresh rather than fail fast.
-            try:
-                await self._spawn_and_init()
-            except AgentConfigError as exc:
-                # Node/the SDK install were already validated once in start();
-                # a failure respawning mid-run is a transient backend/auth
-                # hiccup, not a missing prerequisite -- make it retryable
-                # instead of ending the task outright.
-                raise AgentCrashError(str(exc)) from exc
+            await self._spawn_and_init()
 
         self._begin_turn()
         collector = EventCollector()
