@@ -217,7 +217,8 @@ _HOST_ENV_REMOVED = (
 )
 """Removed from the host's environment. The host reads the first six itself, but
 coder_eval sends their values as init options instead; and the agent's shell tools
-inherit the host env, so no spelling of the token may stay in it."""
+inherit the host env, so no spelling of the token may stay in it. This is defense in
+depth; docs/agents/DELEGATE.md lists the known gaps."""
 
 _GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
 
