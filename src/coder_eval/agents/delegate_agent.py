@@ -117,14 +117,24 @@ _INIT_CONFIG_ERROR_MARKERS = (
     "unauthorized",
     "invalid credentials",
     "invalid token",
-    "expired",
-    "401",
-    "403",
+    "token expired",
+    "signature has expired",
+    "jwt expired",
     "requires org/tenant slugs",
     "unknown env",
 )
 """Substrings of an init ``error`` message that a retry cannot fix: missing or rejected
 auth, or a bad ``DELEGATE_ENV``. Any other init error is retryable."""
+_INIT_CONFIG_ERROR_STATUS = re.compile(r"\b40[13]\b")
+"""An HTTP 401/403 as a whole word, so a port or a GUID that contains the digits does not match."""
+
+
+def _is_config_init_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _INIT_CONFIG_ERROR_MARKERS) or bool(
+        _INIT_CONFIG_ERROR_STATUS.search(message)
+    )
+
 
 _INIT_CONFIG_ERROR_HINT = (
     "coder_eval sends the auth and the org/tenant slugs as the host's `auth` init option, read from "
@@ -563,7 +573,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if ack.get("type") == "error":
             await self._force_kill_host()
             message = str(ack.get("message", "unknown error"))
-            if any(marker in message.lower() for marker in _INIT_CONFIG_ERROR_MARKERS):
+            if _is_config_init_error(message):
                 raise AgentConfigError(f"Delegate SDK init failed: {message} {_INIT_CONFIG_ERROR_HINT}")
             raise AgentCrashError(f"Delegate SDK init failed: {message}")
 

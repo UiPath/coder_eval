@@ -266,10 +266,25 @@ class TestStart:
         [
             ("Auth required: set AUTH_TOKEN/TENANT_ID/ORG_ID env vars", AgentConfigError),
             ('env="alpha" requires org/tenant slugs. Set ORG_LOGICAL_NAME and TENANT_NAME', AgentConfigError),
+            ("401 Invalid token: Signature has expired", AgentConfigError),
+            ("Request failed with status code 403", AgentConfigError),
             ("Token endpoint https://cloud.example/token returned HTTP 503: unavailable", AgentCrashError),
             ("fetch failed", AgentCrashError),
+            ("connect ECONNREFUSED 127.0.0.1:54013", AgentCrashError),
+            ("tenant c7a3f401-0000-4000-8000-000000000403 is not reachable", AgentCrashError),
+            ("cache entry expired before the backend replied", AgentCrashError),
         ],
-        ids=["no-auth", "no-slugs", "token-endpoint-5xx", "network"],
+        ids=[
+            "no-auth",
+            "no-slugs",
+            "expired-token",
+            "status-403",
+            "token-endpoint-5xx",
+            "network",
+            "port-with-401",
+            "guid-with-401-403",
+            "unrelated-expired",
+        ],
     )
     async def test_only_an_init_error_a_retry_cannot_fix_is_non_retryable(
         self, patch_exec, tmp_path, host_message, error_type
