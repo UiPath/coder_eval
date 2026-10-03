@@ -1372,7 +1372,6 @@ jobs:
       - name: Run fizzbuzz delegate task (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
@@ -1404,7 +1403,6 @@ jobs:
       - name: Run Delegate live unit tests (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
           DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
           DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}

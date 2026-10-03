@@ -19,7 +19,7 @@ Wire protocol (one JSON object per line; the package README is the SSOT)::
                                             {"type":"error","message":..}   (any command)
 
 Prerequisites are documented in ``docs/agents/DELEGATE.md`` and enforced with a
-clear ``AgentConfigError`` at ``start()`` (Node.js, ``npm install
+clear ``AgentConfigError`` at ``start()`` (Node.js, ``npm install -g
 @uipath/delegate-stdio``, UiPath auth).
 
 Rationale: .claude/notes/agents.md § Delegate agent
@@ -88,6 +88,7 @@ logger = logging.getLogger(__name__)
 
 _HOST_PACKAGE = "@uipath/delegate-stdio"
 _HOST_BUNDLE_NAME = "delegate_stdio.mjs"
+_HOST_BIN_NAME = "delegate-stdio"
 _HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / _HOST_BUNDLE_NAME
 _AGENT_INSTALL_ROOT = Path(__file__).resolve().parent / "delegate"
 """This agent's own directory; it ships a ``package.json`` that names the host package."""
@@ -231,71 +232,69 @@ def _strip_redundant_gateway_creds(env: dict[str, str]) -> tuple[str, ...]:
 
 
 def _candidate_install_roots() -> list[Path]:
-    """Search roots, in order: cwd and its ancestors, ``_AGENT_INSTALL_ROOT``, then home.
+    """Local search roots, in order: cwd and its ancestors, then ``_AGENT_INSTALL_ROOT``.
 
-    The cwd walk mirrors Node's own module resolution. Home is where npm lands a
-    package when the cwd has no ``package.json``.
+    The cwd walk mirrors Node's own module resolution.
     """
     cwd = Path.cwd().resolve()
     roots: list[Path] = [cwd, *cwd.parents]
-    for root in (_AGENT_INSTALL_ROOT, Path.home().resolve()):
-        if root not in roots:
-            roots.append(root)
+    if _AGENT_INSTALL_ROOT not in roots:
+        roots.append(_AGENT_INSTALL_ROOT)
     return roots
+
+
+def _global_install_candidates() -> list[Path]:
+    """Bundle paths implied by an ``npm install -g``, found through the package's shim on PATH.
+
+    On POSIX the shim is a symlink to the bundle; on Windows it is a ``.cmd`` file that
+    sits beside the global prefix's ``node_modules``.
+    """
+    shim = shutil.which(_HOST_BIN_NAME)
+    if shim is None:
+        return []
+    shim_path = Path(shim)
+    return [shim_path.resolve(), (shim_path.parent / _HOST_BUNDLE_REL_PATH).resolve()]
 
 
 def _resolve_host_bundle() -> Path:
     """Locate the installed ``@uipath/delegate-stdio``'s ``dist/delegate_stdio.mjs``.
 
-    Resolution order: ``DELEGATE_SDK_PATH`` (explicit file path) ->
-    ``DELEGATE_SDK_NODE_MODULES`` (explicit install root, probed exactly) ->
-    ``_candidate_install_roots()``, so an ``npm install`` in this agent's own
-    ``agents/delegate/`` directory is found from any cwd.
+    Resolution order: ``DELEGATE_STDIO_PATH`` (explicit file path) ->
+    ``_candidate_install_roots()`` -> a global install (``_global_install_candidates()``).
 
     Raises:
-        AgentConfigError: no install found anywhere searched, or ``DELEGATE_SDK_PATH``
+        AgentConfigError: no install found anywhere searched, or ``DELEGATE_STDIO_PATH``
             names another file, such as ``@uipath/delegate-sdk``'s ``dist/index.mjs``.
     """
-    explicit = os.environ.get("DELEGATE_SDK_PATH")
+    explicit = os.environ.get("DELEGATE_STDIO_PATH")
     if explicit:
         path = Path(explicit).expanduser().resolve()
         if not path.is_file():
             raise AgentConfigError(
-                f"DELEGATE_SDK_PATH={path} does not point to a file. Point it at "
+                f"DELEGATE_STDIO_PATH={path} does not point to a file. Point it at "
                 + f"{_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}."
             )
         if path.name != _HOST_BUNDLE_NAME:
             raise AgentConfigError(
-                f"DELEGATE_SDK_PATH={path} must point at {_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}, "
+                f"DELEGATE_STDIO_PATH={path} must point at {_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}, "
                 + "not at @uipath/delegate-sdk's dist/index.mjs or another file. "
-                + f"Run `npm install {_HOST_PACKAGE}`; see docs/agents/DELEGATE.md."
+                + "See docs/agents/DELEGATE.md."
             )
         return path
 
-    root_override = os.environ.get("DELEGATE_SDK_NODE_MODULES")
-    if root_override:
-        path = (Path(root_override).expanduser().resolve() / _HOST_BUNDLE_REL_PATH).resolve()
-        if not path.is_file():
-            raise AgentConfigError(
-                f"DELEGATE_SDK_NODE_MODULES={root_override}: {_HOST_PACKAGE} not found at {path}. "
-                + f"Run `npm install {_HOST_PACKAGE}` there, or set DELEGATE_SDK_PATH directly."
-            )
-        return path
-
-    searched: list[Path] = []
-    for root in _candidate_install_roots():
-        candidate = (root / _HOST_BUNDLE_REL_PATH).resolve()
-        searched.append(candidate)
-        if candidate.is_file():
+    candidates = [(root / _HOST_BUNDLE_REL_PATH).resolve() for root in _candidate_install_roots()]
+    candidates += _global_install_candidates()
+    for candidate in candidates:
+        if candidate.name == _HOST_BUNDLE_NAME and candidate.is_file():
             return candidate
 
-    searched_block = "\n  ".join(str(p) for p in searched)
+    searched_block = "\n  ".join(str(p) for p in candidates)
     raise AgentConfigError(
-        f"{_HOST_PACKAGE} not found. Searched the cwd, its ancestors, this agent's directory, and home:\n"
+        f"{_HOST_PACKAGE} not found. Install it with `npm install -g {_HOST_PACKAGE}` "
+        + "(public, no token needed). Searched the cwd, its ancestors, this agent's directory, "
+        + f"and the `{_HOST_BIN_NAME}` command on PATH:\n"
         + f"  {searched_block}\n"
-        + f"Run `npm install {_HOST_PACKAGE}` (plain, public install — no token needed), "
-        + f"e.g. in {_AGENT_INSTALL_ROOT}, or set DELEGATE_SDK_NODE_MODULES "
-        + f"to the install root, or DELEGATE_SDK_PATH to the dist/{_HOST_BUNDLE_NAME} file directly. "
+        + f"To use a build elsewhere, set DELEGATE_STDIO_PATH to its dist/{_HOST_BUNDLE_NAME}. "
         + "See docs/agents/DELEGATE.md."
     )
 
@@ -496,7 +495,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if shutil.which("node") is None:
             raise AgentConfigError(
                 "Node.js was not found on PATH. Install it (https://nodejs.org/), "
-                + f"then `npm install {_HOST_PACKAGE}`. See docs/agents/DELEGATE.md."
+                + f"then `npm install -g {_HOST_PACKAGE}`. See docs/agents/DELEGATE.md."
             )
         self._host_bundle = _resolve_host_bundle()
 

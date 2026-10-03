@@ -85,7 +85,7 @@ dev = [
 #     tasks that invoke `uv run uipath eval ...`)
 #   - the Delegate agent's home in the packaging metadata (`agent.type: delegate`).
 #     Like `opencode`/`pi` below, its real prerequisite is a Node package
-#     (`npm install @uipath/delegate-stdio`, public — no token needed),
+#     (`npm install -g @uipath/delegate-stdio`, public — no token needed),
 #     so nothing new is added to THIS list; it just shares this extra's name.
 # Without this extra, the framework still installs and runs; UiPath-dependent
 # code paths fail at dispatch with a clear hint pointing back here.

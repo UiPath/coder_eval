@@ -829,6 +829,16 @@ leaks into the retry.
 **Registered unconditionally**, like `codex`/`antigravity`; its extra is empty. Node and
 `@uipath/delegate-stdio` are the real prerequisite, resolved lazily in `start()`.
 
+**Host resolution: `DELEGATE_STDIO_PATH`, then local installs, then a global one.** Local means
+the cwd, its ancestors and `agents/delegate/`; a local install wins, as in Node. A global install
+is found through the package's `delegate-stdio` bin shim on `PATH`, not `npm root -g`, so the
+resolver runs no npm subprocess. On POSIX the shim is a symlink to the bundle. On Windows it is a
+`.cmd` file beside the prefix's `node_modules`. We never execute the `.cmd`: that would make
+`cmd.exe` parse the arguments again. The home probe and `DELEGATE_SDK_NODE_MODULES` are gone. The
+global search covers "install once, run from anywhere", and the root override only repeated the
+path override. The explicit path stays for CI: a source build has no install root, and an install
+in a temporary directory for each run keeps the runs on a shared host on their own versions.
+
 **Windows path length**: an install root that pushes the interop binary path past 260 characters makes
 the spawn fail with `ENOENT`. The docs tell users to install into a short path.
 

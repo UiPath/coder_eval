@@ -15,25 +15,19 @@ Under the hood, this agent spawns the host that the public [`@uipath/delegate-st
 
 ## Setup
 
-### 1. Install Node and the Delegate host
+### 1. Install the Delegate host
 
-1. **Node.js** on your `PATH`.
-2. **`@uipath/delegate-stdio`**, a public npm package (no token, no custom registry). Install it plain:
+With **Node.js** on your `PATH`, install the host once:
 
 ```bash
-npm install @uipath/delegate-stdio
+npm install -g @uipath/delegate-stdio
 ```
 
-**You usually don't need to set anything about where.** When neither `DELEGATE_SDK_NODE_MODULES` nor `DELEGATE_SDK_PATH` is set, coder_eval searches for the install in this order: the current directory and its ancestors (the same way Node resolves modules), then `src/coder_eval/agents/delegate/`, then your home directory. `src/coder_eval/agents/delegate/` is this agent's own directory, and it ships a `package.json` that names the dependency. An install there is found from any current directory.
+That is all. The package is public (no token, no custom registry). coder_eval finds the global install by itself, so you set no path.
 
-To override the auto-search, set **one** of:
+A local `npm install @uipath/delegate-stdio` also works: in your project, in a parent directory, or in `src/coder_eval/agents/delegate/` (it ships a `package.json`). A local install wins over a global one. On Windows, keep a local install in a short path: a path longer than 260 characters to the interop binary makes its spawn fail with `ENOENT`.
 
-| Variable | Purpose |
-|---|---|
-| `DELEGATE_SDK_NODE_MODULES` | Install root that holds `node_modules/@uipath/...`. |
-| `DELEGATE_SDK_PATH` | Absolute path straight to `@uipath/delegate-stdio/dist/delegate_stdio.mjs`. Any other file, such as `@uipath/delegate-sdk`'s `dist/index.mjs`, is an error. |
-
-On Windows, install into a short path. The interop binary sits deep inside `node_modules`, and a path longer than 260 characters makes its spawn fail with `ENOENT`.
+> **CI only.** To pin one exact build, for example a build from source or an install in a temporary directory, set `DELEGATE_STDIO_PATH` to its `dist/delegate_stdio.mjs`.
 
 ### 2. Choose a backend
 

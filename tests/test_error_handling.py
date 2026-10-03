@@ -252,7 +252,7 @@ class TestCategorizeError:
         """The typed check wins even when the message would match a retryable string pattern."""
         # "connection" would otherwise route to the retryable AGENT_API_ERROR.
         result = categorize_error(
-            AgentConfigError("DELEGATE_SDK_PATH unset; cannot establish connection"),
+            AgentConfigError("DELEGATE_STDIO_PATH unset; cannot establish connection"),
             {"component": "agent"},
         )
         assert result == ErrorCategory.AGENT_CONFIG_ERROR

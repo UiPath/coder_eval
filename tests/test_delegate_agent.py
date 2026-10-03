@@ -148,8 +148,7 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
 
 
 _DELEGATE_ENV_NAMES = (
-    "DELEGATE_SDK_PATH",
-    "DELEGATE_SDK_NODE_MODULES",
+    "DELEGATE_STDIO_PATH",
     "DELEGATE_ENV",
     "DELEGATE_BACKEND_URL",
     *(
@@ -183,49 +182,67 @@ async def _started_agent(
     return agent, proc
 
 
+def _write_bundle(root: Path) -> Path:
+    entry = root / "node_modules" / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("#!/usr/bin/env node")
+    return entry
+
+
 class TestResolveHostBundle:
+    @pytest.fixture
+    def no_installs(self, tmp_path, monkeypatch) -> Path:
+        """Pin every search root to an empty ``tmp_path`` and hide any real global install."""
+        monkeypatch.setattr(agent_module, "_candidate_install_roots", lambda: [tmp_path])
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        return tmp_path
+
     def test_explicit_path_env_var(self, tmp_path, monkeypatch):
         entry = tmp_path / "delegate_stdio.mjs"
         entry.write_text("#!/usr/bin/env node")
-        monkeypatch.setenv("DELEGATE_SDK_PATH", str(entry))
+        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(entry))
         assert _resolve_host_bundle() == entry.resolve()
 
     def test_explicit_path_to_another_file_raises(self, tmp_path, monkeypatch):
         sdk_entry = tmp_path / "node_modules" / "@uipath" / "delegate-sdk" / "dist" / "index.mjs"
         sdk_entry.parent.mkdir(parents=True)
         sdk_entry.write_text("export {}")
-        monkeypatch.setenv("DELEGATE_SDK_PATH", str(sdk_entry))
+        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(sdk_entry))
         with pytest.raises(AgentConfigError, match="must point at @uipath/delegate-stdio"):
             _resolve_host_bundle()
 
     def test_explicit_path_missing_file_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("DELEGATE_SDK_PATH", str(tmp_path / "nope.mjs"))
+        monkeypatch.setenv("DELEGATE_STDIO_PATH", str(tmp_path / "nope.mjs"))
         with pytest.raises(AgentConfigError, match="does not point to a file"):
             _resolve_host_bundle()
 
-    def test_node_modules_override(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
-        entry = tmp_path / "node_modules" / "@uipath" / "delegate-stdio" / "dist" / "delegate_stdio.mjs"
-        entry.parent.mkdir(parents=True)
-        entry.write_text("#!/usr/bin/env node")
+    def test_install_in_a_cwd_ancestor_is_found(self, tmp_path, monkeypatch):
+        entry = _write_bundle(tmp_path)
+        nested = tmp_path / "project" / "sub"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
         assert _resolve_host_bundle() == entry.resolve()
 
-    def test_node_modules_override_missing_raises(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.setenv("DELEGATE_SDK_NODE_MODULES", str(tmp_path))
-        with pytest.raises(AgentConfigError, match="not found"):
-            _resolve_host_bundle()
+    def test_global_install_found_through_a_posix_symlink_shim(self, no_installs, tmp_path, monkeypatch):
+        entry = _write_bundle(tmp_path / "prefix" / "lib")
+        monkeypatch.setattr("shutil.which", lambda _name: str(entry))
+        assert _resolve_host_bundle() == entry.resolve()
 
-    def test_no_config_and_not_found_raises_with_search_list(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("DELEGATE_SDK_PATH", raising=False)
-        monkeypatch.delenv("DELEGATE_SDK_NODE_MODULES", raising=False)
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))
-        # A real npm install under the developer's actual home directory must
-        # not make this test flaky -- pin every search root to tmp_path.
-        monkeypatch.setattr(agent_module, "_candidate_install_roots", lambda: [tmp_path])
-        with pytest.raises(AgentConfigError, match="Searched the cwd"):
+    def test_global_install_found_beside_a_windows_cmd_shim(self, no_installs, tmp_path, monkeypatch):
+        prefix = tmp_path / "npm"
+        entry = _write_bundle(prefix)
+        monkeypatch.setattr("shutil.which", lambda _name: str(prefix / "delegate-stdio.cmd"))
+        assert _resolve_host_bundle() == entry.resolve()
+
+    def test_local_install_wins_over_global(self, no_installs, tmp_path, monkeypatch):
+        local = _write_bundle(tmp_path)
+        global_prefix = tmp_path / "npm"
+        _write_bundle(global_prefix)
+        monkeypatch.setattr("shutil.which", lambda _name: str(global_prefix / "delegate-stdio.cmd"))
+        assert _resolve_host_bundle() == local.resolve()
+
+    def test_not_found_raises_with_install_hint(self, no_installs):
+        with pytest.raises(AgentConfigError, match=r"npm install -g @uipath/delegate-stdio"):
             _resolve_host_bundle()
 
 
