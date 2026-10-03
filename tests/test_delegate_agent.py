@@ -511,16 +511,12 @@ class TestCommunicate:
         assert categorize_error(excinfo.value, {"component": "agent"}) is ErrorCategory.AGENT_CRASH
         assert any("guardrail-validator" in r.getMessage() for r in caplog.records)
 
-    async def test_session_conflict_drops_the_session_id(self, patch_exec, tmp_path):
-        events = [
-            _line(
-                {
-                    "type": "error",
-                    "message": "HTTP 409: A reply is already being generated for this conversation.",
-                }
-            )
-        ]
-        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+    _SESSION_CONFLICT = _line(
+        {"type": "error", "message": "HTTP 409: A reply is already being generated for this conversation."}
+    )
+
+    async def test_session_conflict_before_a_finished_turn_drops_the_session_id(self, patch_exec, tmp_path):
+        agent, _ = await _started_agent(patch_exec, [self._SESSION_CONFLICT], tmp_path)
         agent._session_id = "wedged"
         with pytest.raises(AgentCrashError, match="already being generated"):
             await agent.communicate("hi")
@@ -530,6 +526,25 @@ class TestCommunicate:
         record = await agent.communicate("hi again")
         assert record.agent_output == "recovered"
         assert proc.stdin.written[1]["sessionId"] is None
+
+    async def test_session_conflict_after_a_finished_turn_keeps_the_session_id(self, patch_exec, tmp_path):
+        """A new conversation would continue the task without the earlier turns, yet be graded as one trajectory."""
+        events = [_result(response="one", sessionId="sess-1"), self._SESSION_CONFLICT]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        await agent.communicate("turn 1")
+        with pytest.raises(AgentCrashError, match="already being generated"):
+            await agent.communicate("turn 2")
+        await agent.discard_pending_turn()
+
+        proc = patch_exec([_line({"type": "init_ok"}), _result(response="two", sessionId="sess-1")])
+        await agent.communicate("turn 2")
+        assert proc.stdin.written[1]["sessionId"] == "sess-1"
+
+    async def test_session_conflict_keeps_a_session_pinned_in_config(self, patch_exec, tmp_path):
+        agent, _ = await _started_agent(patch_exec, [self._SESSION_CONFLICT], tmp_path, session_id="pinned")
+        with pytest.raises(AgentCrashError, match="already being generated"):
+            await agent.communicate("hi")
+        assert agent._session_id == "pinned"
 
     async def test_eof_mid_turn_raises_crash(self, patch_exec, tmp_path):
         agent, _ = await _started_agent(patch_exec, [], tmp_path)

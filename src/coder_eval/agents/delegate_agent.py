@@ -482,6 +482,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         self._session_id: str | None = None
+        self._conversation_has_history = False
         self._state = AgentState.WORKING
 
         self._host_bundle: Path | None = None
@@ -521,6 +522,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
         self._session_id = self.config.session_id
+        self._conversation_has_history = self.config.session_id is not None
         self._state = AgentState.WORKING
 
         await self._spawn_and_init()
@@ -829,6 +831,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 status = AgentEndStatus.COMPLETED
             self._warn_if_usage_missing(state, status)
             self._finalize_turn(state, status, emit)
+            self._conversation_has_history = True
             record = collector.build_turn_record()
             self._end_turn_ok()
             return record
@@ -1158,17 +1161,24 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     ) -> NoReturn:
         """Crash the turn on a host ``error`` frame; the host is never reused.
 
-        A session conflict also drops the remembered session id, because a retry
-        into the same conversation can only conflict again.
+        A session conflict drops the remembered session id only while no turn of
+        that conversation has finished, so a retry never continues without the
+        earlier turns' context.
         """
         reason = _describe_host_error(message)
         if reason is None:
             if _SESSION_CONFLICT_MARKER in message.lower():
-                logger.warning(
-                    "delegate: session %s is still generating a reply; the retry starts a new conversation",
-                    self._session_id,
-                )
-                self._session_id = None
+                if self._conversation_has_history:
+                    logger.warning(
+                        "delegate: session %s is still generating a reply; it holds earlier turns, so it is kept",
+                        self._session_id,
+                    )
+                else:
+                    logger.warning(
+                        "delegate: session %s is still generating a reply; the retry starts a new conversation",
+                        self._session_id,
+                    )
+                    self._session_id = None
             reason = f"Delegate send failed: {message}"
         await self._abandon_host_and_crash(state, collector, emit, reason)
 

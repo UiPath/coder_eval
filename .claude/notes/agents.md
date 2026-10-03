@@ -808,7 +808,15 @@ from the out-of-tree `delegate-sdk` adapter that drove the same host and backend
   "connection" (`AGENT_API_ERROR`, retried) with "timeout" removed, which would be `AGENT_TIMEOUT`
   (not retried).
 - **Session conflict** ("A reply is already being generated", 409): `_session_id` is dropped so the
-  retry starts a new conversation. A `session_id` pinned in config does not recover.
+  retry starts a new conversation, but only while no turn of that conversation has finished
+  (`_conversation_has_history`). On a later turn a new conversation would continue the task without
+  the earlier turns, and the row would still be graded as one trajectory. So the retry keeps the
+  session. The 409 is short-lived: the backend cancels the reply when the killed host's stream
+  disconnects, then releases its turn claim, so the 5 s and 10 s `AGENT_CRASH` retries usually
+  succeed. A claim it fails to release expires after `TURN_CLAIM_TTL_SECONDS` (900 s), and the task
+  ends as an error. A `session_id` pinned in config counts as history, and dropping it would not
+  help anyway: each respawn sends it in `init`, and the SDK falls back to it when `send` carries no
+  `sessionId` (`sessionId || this.options.sessionId` in the SDK's `sendMessage`).
 
 Not ported: stall-timeout+resend and the S2S token-file refresher. Port them when the need shows.
 
