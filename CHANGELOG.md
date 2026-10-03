@@ -2,6 +2,54 @@
 
 <!-- version list -->
 
+## v0.12.10 (2026-10-03)
+
+### Bug Fixes
+
+- **antigravity**: Enforce tool lists, non-interactive commands, bounded polling
+  ([#215](https://github.com/UiPath/coder_eval/pull/215),
+  [`7a5a4d0`](https://github.com/UiPath/coder_eval/commit/7a5a4d03ff962b7e47a10c28051b0ca286e2a046))
+
+- **cli-called**: Report a zero-match max_count: 0 guard as unproven
+  ([#205](https://github.com/UiPath/coder_eval/pull/205),
+  [`33bc3d7`](https://github.com/UiPath/coder_eval/commit/33bc3d70bd988a522801d75900aeb53ef8400225))
+
+### Chores
+
+- **deps**: Bump urllib3 2.8.0 and virtualenv 21.14.2 to clear pip-audit
+  ([#215](https://github.com/UiPath/coder_eval/pull/215),
+  [`7a5a4d0`](https://github.com/UiPath/coder_eval/commit/7a5a4d03ff962b7e47a10c28051b0ca286e2a046))
+
+
+## v0.12.9 (2026-09-29)
+
+### Bug Fixes
+
+- **docker**: Mount plugins at /coder_eval/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **docker**: Mount plugins at /work/plugins/<i> and point the staged task there
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Chores
+
+- **deps**: Bump pyjwt to 2.15.1 and ignore oauthlib CVE-2026-49265
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+- **deps**: Ignore oauthlib CVE-2026-49264 and drop the stale pyjwt ignore
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+### Refactoring
+
+- **docker**: Mount plugins under /work/plugins, not /coder_eval/plugins
+  ([#206](https://github.com/UiPath/coder_eval/pull/206),
+  [`03808c0`](https://github.com/UiPath/coder_eval/commit/03808c084cb28d72e5723a2e9fc30c714f398d14))
+
+
 ## v0.12.8 (2026-09-29)
 
 ### Bug Fixes

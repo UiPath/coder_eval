@@ -96,11 +96,19 @@ _RECEIVE_STEPS_REENTRY_RETRIES = 5
 _POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
 
 # Cap on poll *cycles* -- the SOLE bound when a task sets no timeout at all, and
-# a backstop against a very large one. 120 * 5s = 10 minutes, ~2x the worst real
+# a backstop against a very large one (applied alongside the deadline, whichever
+# is reached first). 120 * 5s = 10 minutes, ~2x the worst real
 # backgrounded-job duration observed (60-300s). Deliberately NOT "break after N
 # consecutive empty polls".
 # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _MAX_BACKGROUND_POLLS = 120
+
+# The only tool a model can background: a `run_command` left ACTIVE is a job
+# that may still finish. Any other tool left ACTIVE (edit_file on a read-only
+# mount, a paged view_file, start_subagent) never resolves, so it does not
+# justify polling.
+# Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
+_BACKGROUNDABLE_TOOL = "run_command"
 
 # Antigravity builtin tool name -> the canonical (Claude) vocabulary every
 # criterion is written against. Unmapped names pass through unchanged.
@@ -118,6 +126,45 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "generate_image": "GenerateImage",
     "ask_question": "AskUser",
     "finish": "Finish",
+}
+
+# Canonical (Claude) tool name -> the Antigravity builtin it enables, for
+# `allowed_tools` / `disallowed_tools`. "Skill" and "TodoWrite" have no builtin
+# (skills load through `skills_paths`), so they map to nothing; a name that is
+# already an Antigravity builtin passes through.
+# Rationale: .claude/notes/agents.md § Antigravity tool allowlist
+_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP: dict[str, str] = {
+    "Bash": "run_command",
+    "Read": "view_file",
+    "Write": "create_file",
+    "Edit": "edit_file",
+    "MultiEdit": "edit_file",
+    "Glob": "find_file",
+    "Grep": "search_directory",
+    "LS": "list_directory",
+    "Task": "start_subagent",
+    "WebSearch": "search_web",
+    "WebFetch": "read_url_content",
+    "AskUserQuestion": "ask_question",
+}
+
+# Kept on under any allowlist: `finish` is how a turn returns structured
+# output, not a capability an allowlist is meant to grant or withhold.
+_ALWAYS_ENABLED_TOOLS: frozenset[str] = frozenset({"finish"})
+
+# Set on every run_command unless the environment already sets them, so a
+# command that would stop to ask (`npx` installing a package, git credentials,
+# apt/pip confirmations, a pager) answers itself or fails instead of waiting on
+# a terminal no one types into.
+# Rationale: .claude/notes/agents.md § Antigravity non-interactive commands
+_NONINTERACTIVE_ENV: dict[str, str] = {
+    "CI": "1",
+    "npm_config_yes": "true",
+    "GIT_TERMINAL_PROMPT": "0",
+    "DEBIAN_FRONTEND": "noninteractive",
+    "PIP_NO_INPUT": "1",
+    "PAGER": "cat",
+    "GIT_PAGER": "cat",
 }
 
 # Tool-call arg keys the harness ADDS at completion (the result payload), not
@@ -303,18 +350,57 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def _harness_env(self) -> dict[str, str] | None:
         """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
 
-        Returns the mock-CLI PATH prepend as a one-key overlay, or ``None`` when no
-        mock dirs are configured. The SDK merges it over ``os.environ`` at spawn,
-        so naming only ``PATH`` leaves every other inherited variable untouched.
+        An overlay of the non-interactive variables (each only where the
+        environment does not already set it) plus, when mock dirs are configured,
+        the mock-CLI PATH prepend; ``None`` when there is nothing to add, so the
+        SDK spawns with a plain inherited env. The SDK merges it over
+        ``os.environ`` at spawn, so every other inherited variable is untouched.
         The same overlay becomes the harness's ``run_command`` environment.
         """
-        if not self._env_path_prepend:
+        env = {k: v for k, v in _NONINTERACTIVE_ENV.items() if k not in os.environ}
+        if self._env_path_prepend:
+            # Match the parent's own casing (Windows exports ``Path``) so the merge
+            # overrides the inherited entry instead of adding a sibling key.
+            path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
+            env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
+        return env or None
+
+    def _tool_capabilities(self, types: Any) -> Any:
+        """``CapabilitiesConfig`` restricting the builtin tools to the configured
+        ``allowed_tools`` / ``disallowed_tools``, or ``None`` when neither is set.
+
+        Names are mapped through ``_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP``; names with no
+        Antigravity builtin (``Skill``, ``TodoWrite``, MCP tools) are skipped. The
+        SDK takes an allowlist OR a denylist, so with both set the denied tools are
+        removed from the allowlist.
+
+        Rationale: .claude/notes/agents.md § Antigravity tool allowlist
+        """
+        allowed, disallowed = self.config.allowed_tools, self.config.disallowed_tools
+        if not allowed and not disallowed:
             return None
-        # Match the parent's own casing (Windows exports ``Path``) so the merge
-        # overrides the inherited entry instead of adding a sibling key.
-        path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
-        merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
-        return {path_key: merged}
+        builtin = {t.value for t in types.BuiltinTools}
+
+        def to_builtin(names: list[str] | None) -> set[str]:
+            mapped = {_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.get(n, n) for n in names or []}
+            return mapped & builtin
+
+        # `enable_subagents` is a separate switch from the toolset; it follows
+        # whether `start_subagent` survives the filter.
+        subagent = types.BuiltinTools.START_SUBAGENT.value
+        if allowed:
+            enabled = (to_builtin(allowed) | _ALWAYS_ENABLED_TOOLS) - to_builtin(disallowed)
+            self._log.debug("Enabled builtin tools: %s", ", ".join(sorted(enabled)))
+            return types.CapabilitiesConfig(
+                enabled_tools=[types.BuiltinTools(t) for t in sorted(enabled)],
+                enable_subagents=subagent in enabled,
+            )
+        disabled = to_builtin(disallowed) - _ALWAYS_ENABLED_TOOLS
+        self._log.debug("Disabled builtin tools: %s", ", ".join(sorted(disabled)))
+        return types.CapabilitiesConfig(
+            disabled_tools=[types.BuiltinTools(t) for t in sorted(disabled)],
+            enable_subagents=subagent not in disabled,
+        )
 
     async def start(
         self,
@@ -370,9 +456,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.
                 skills_paths=skills_paths,
-                # Mock-CLI PATH shadowing, per agent: two concurrent tasks never
-                # see each other's mock dirs.
+                # Mock-CLI PATH shadowing plus the non-interactive variables, per
+                # agent: two concurrent tasks never see each other's mock dirs.
                 env=self._harness_env(),
+                # The builtin toolset, narrowed to allowed_tools / disallowed_tools.
+                capabilities=self._tool_capabilities(types),
             )
             # Thinking level onto every resolved model's endpoint. The SDK
             # validates the model list in a model_validator, so options are set on
@@ -547,11 +635,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         and not state.max_turns_hit
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
-                        and (
-                            poll_count < _MAX_BACKGROUND_POLLS
-                            if poll_deadline is None
-                            else time.monotonic() < poll_deadline
-                        )
+                        and poll_count < _MAX_BACKGROUND_POLLS
+                        and (poll_deadline is None or time.monotonic() < poll_deadline)
                     ):
                         poll_count += 1
                         self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
@@ -577,9 +662,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         # stop/timeout: the call is force-closed as unresolved and
                         # the turn is still graded normally on everything else.
                         bound = (
-                            f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
-                            if poll_deadline is not None
-                            else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
+                            f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
+                            if poll_count >= _MAX_BACKGROUND_POLLS
+                            else f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
                         )
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)
@@ -761,6 +846,8 @@ class _AntigravityTurnState:
         # Most recently seen StepStatus per tool id, for has_orphaned_tool_call.
         # Separate from _closed_tools, which tracks only DONE/ERROR.
         self._tool_last_status: dict[str, Any] = {}
+        # Raw (Antigravity) tool name per tool id, for has_orphaned_tool_call.
+        self._tool_raw_names: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
         # Where the CURRENT generation started, advanced only by a flush that
@@ -865,6 +952,7 @@ class _AntigravityTurnState:
         step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
         cid = call.id or f"{raw_name}_{step_key}_{call_index}"
         self._tool_last_status[cid] = sstatus
+        self._tool_raw_names[cid] = raw_name
         if cid not in self._seen_tools:
             self._seen_tools.add(cid)
             seq = self._next_seq
@@ -990,8 +1078,8 @@ class _AntigravityTurnState:
         return ""
 
     def has_orphaned_tool_call(self) -> bool:
-        """True if any NOT-YET-CLOSED tool call's most recently seen status is
-        ACTIVE — the structural signature of a backgrounded task the model went
+        """True if any NOT-YET-CLOSED ``run_command``'s most recently seen status
+        is ACTIVE — the structural signature of a backgrounded task the model went
         idle on without waiting for. See ``communicate``'s poll loop.
 
         An ALLOWLIST on ACTIVE, never a denylist on "not yet closed": the SDK also
@@ -999,9 +1087,18 @@ class _AntigravityTurnState:
         should wait out. The `not in _closed_tools` guard is layered on top as a
         monotonicity backstop, not a substitute.
 
+        Also an allowlist on the TOOL: only ``run_command`` can be backgrounded.
+        Any other tool left ACTIVE never resolves, so waiting on it only burns
+        the poll budget; ``finalize`` force-closes it as unresolved.
+
         Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
         """
-        return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
+        return any(
+            cid not in self._closed_tools
+            and s == _STATUS_ACTIVE
+            and self._tool_raw_names.get(cid) == _BACKGROUNDABLE_TOOL
+            for cid, s in self._tool_last_status.items()
+        )
 
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools, flush leftover blocks, emit TurnEnd + AgentEnd.
