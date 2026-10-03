@@ -56,6 +56,12 @@ def test_effort_accepts_any_string_including_future_tiers():
     assert cfg.sdk_options == {"effort": "ultra-max"}
 
 
+@pytest.mark.parametrize("value", [5, ["high"], {"tier": "high"}, None], ids=["int", "list", "dict", "null"])
+def test_effort_rejects_a_value_that_is_not_a_string(value):
+    with pytest.raises(ValidationError, match=r"sdk_options\.effort must be a string"):
+        DelegateAgentConfig(type="delegate", sdk_options={"effort": value})
+
+
 def test_sdk_options_rejects_a_key_the_host_is_not_sent():
     with pytest.raises(ValidationError, match=r"valid keys: \['effort'\]"):
         DelegateAgentConfig(type="delegate", sdk_options={"backendUrl": "http://x"})

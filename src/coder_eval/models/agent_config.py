@@ -421,8 +421,8 @@ class DelegateAgentConfig(BaseAgentConfig):
         description=(
             "Pass-through dict of delegate-stdio init options that coder_eval does not own "
             f"directly. Allowed keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)}. 'effort' is the "
-            "reasoning-effort tier (documented values: low/medium/high/xhigh/max), forwarded "
-            "as-is: the SDK ignores a value it does not recognize."
+            "reasoning-effort tier (documented values: low/medium/high/xhigh/max): it must be a "
+            "string, forwarded as-is, and the host ignores a tier it does not recognize."
         ),
     )
     project_id: str | None = Field(
@@ -460,6 +460,8 @@ class DelegateAgentConfig(BaseAgentConfig):
                 f"sdk_options keys {unknown} are not delegate-stdio init options coder_eval forwards "
                 + f"(valid keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)})"
             )
+        if "effort" in v and not isinstance(v["effort"], str):
+            raise ValueError(f"sdk_options.effort must be a string tier, got {v['effort']!r}")
         return v
 
 
