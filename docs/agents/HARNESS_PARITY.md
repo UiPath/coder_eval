@@ -718,9 +718,10 @@ both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
   lowercase (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`), but the shared config
   default (`experiments/default.yaml`) sets Claude-namespaced names
   (`Bash`/`Read`/`Write`/…). Forwarding those to `--tools` would allowlist tools that
-  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them),
-  Codex (forwards `disallowed_tools` without SDK enforcement), and Antigravity (does not
-  read them), Pi ignores them and runs with its full native toolset. A task that needs a
+  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them)
+  and Codex (forwards `disallowed_tools` without SDK enforcement), Pi ignores them and
+  runs with its full native toolset. (Antigravity maps them onto its builtin tools; see
+  [Antigravity](ANTIGRAVITY.md).) A task that needs a
   restricted Pi toolset would have to name Pi's lowercase tools — a documented follow-up.
 - **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
   exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval

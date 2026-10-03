@@ -5,6 +5,7 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
+import enum
 import inspect
 import os
 import sys
@@ -489,6 +490,25 @@ async def test_communicate_requires_started_agent():
         await agent.communicate("x")
 
 
+class _FakeBuiltinTools(enum.StrEnum):
+    """The SDK's ``types.BuiltinTools`` values, for the stubbed SDK."""
+
+    LIST_DIR = "list_directory"
+    SEARCH_DIR = "search_directory"
+    FIND_FILE = "find_file"
+    VIEW_FILE = "view_file"
+    CREATE_FILE = "create_file"
+    EDIT_FILE = "edit_file"
+    RUN_COMMAND = "run_command"
+    ASK_QUESTION = "ask_question"
+    START_SUBAGENT = "start_subagent"
+    GENERATE_IMAGE = "generate_image"
+    SEARCH_WEB = "search_web"
+    READ_URL_CONTENT = "read_url_content"
+    SCHEDULE = "schedule"
+    FINISH = "finish"
+
+
 def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     """Stub ``google.antigravity`` in sys.modules so ``start()`` runs without the extra.
 
@@ -502,6 +522,8 @@ def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
         ThinkingLevel=lambda level: level,
         GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
         GeminiModelOptions=SimpleNamespace,
+        BuiltinTools=_FakeBuiltinTools,
+        CapabilitiesConfig=SimpleNamespace,
     )
     hooks = ModuleType("google.antigravity.hooks")
     hooks.policy = SimpleNamespace(
@@ -533,6 +555,7 @@ def test_has_orphaned_tool_call_detects_active_vs_other_statuses():
     state = _AntigravityTurnState.__new__(_AntigravityTurnState)
     state._closed_tools = set()
     state._tool_last_status = {}
+    state._tool_raw_names = {"t1": "run_command", "t2": "run_command"}
     assert state.has_orphaned_tool_call() is False  # no tool calls at all
 
     state._tool_last_status = {"t1": "ACTIVE"}
@@ -556,6 +579,14 @@ def test_has_orphaned_tool_call_detects_active_vs_other_statuses():
     state._closed_tools = {"t1"}
     state._tool_last_status = {"t1": "ACTIVE"}
     assert state.has_orphaned_tool_call() is False
+
+    # Only a run_command can be backgrounded: any other tool left ACTIVE never
+    # resolves on its own, so it must not arm the poll loop.
+    state._closed_tools = set()
+    for tool in ["edit_file", "view_file", "start_subagent"]:
+        state._tool_raw_names = {"t1": tool}
+        state._tool_last_status = {"t1": "ACTIVE"}
+        assert state.has_orphaned_tool_call() is False, f"an ACTIVE {tool} must not trigger polling"
 
 
 async def test_communicate_fast_path_when_no_orphaned_tools(monkeypatch):
@@ -850,6 +881,67 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+
+
+async def test_communicate_poll_cap_also_bounds_a_turn_with_a_large_timeout(monkeypatch):
+    """The cycle cap applies alongside the timeout-derived deadline, not only when
+    no timeout is set: under a large turn_timeout (1800s gives a 1440s deadline) a
+    never-closing job stops at _MAX_BACKGROUND_POLLS instead of the deadline."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "node server.js"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="server started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+    tr = await agent.communicate("start it", timeout=1800.0)
+
+    assert len(sleep_calls) == 3  # the cap, long before the 1440s deadline
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"
+    assert tr.agent_output == "server started"
+
+
+async def test_communicate_does_not_poll_a_non_command_tool_left_active(monkeypatch):
+    """Only a run_command can be backgrounded. An edit_file left ACTIVE (seen live:
+    an edit of a skill script on the read-only /work/plugins mount) never resolves,
+    so the turn finalizes at once instead of waiting out the poll budget."""
+    from coder_eval.agents import antigravity_agent
+
+    async def _sleep_should_not_be_called(_seconds: float) -> None:
+        raise AssertionError("asyncio.sleep must not be called for a non-command tool left ACTIVE")
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _sleep_should_not_be_called)
+
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("edit_file", "e1", {"file_path": "/work/plugins/0/skills/s/scripts/x.py"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("fix it", timeout=1800.0)
+
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 1  # poll loop never entered
+    edit = next(c for c in tr.commands if c.tool_name == "Edit")
+    assert edit.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+    assert tr.agent_output == "done"
 
 
 async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(monkeypatch):
@@ -1172,18 +1264,55 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
 # never mutated, which is what lets two tasks start harnesses concurrently.
 
 
+def _ni() -> dict[str, str]:
+    """The non-interactive variables the overlay adds: those the (possibly
+    monkeypatched) process env does not already set."""
+    from coder_eval.agents import antigravity_agent
+
+    return {k: v for k, v in antigravity_agent._NONINTERACTIVE_ENV.items() if k not in antigravity_agent.os.environ}
+
+
 async def test_harness_env_prepends_path_in_order(monkeypatch):
     """Mock dirs land at the FRONT of the overlay PATH, in order, ahead of the parent's."""
     monkeypatch.setenv("PATH", "/parent/bin")
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks", "/sandbox/bins"]
 
-    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
+    assert agent._harness_env() == {
+        **_ni(),
+        "PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin",
+    }
 
 
-async def test_harness_env_none_without_prepend(monkeypatch):
-    """No mock dirs → no overlay at all, so the SDK spawns with a plain inherited env."""
-    monkeypatch.setenv("PATH", "/parent/bin")
+async def test_harness_env_without_prepend_is_the_noninteractive_overlay(monkeypatch):
+    """No mock dirs → the overlay is just the non-interactive variables; PATH is inherited."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.os, "environ", {"PATH": "/parent/bin"})
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    assert agent._harness_env() == antigravity_agent._NONINTERACTIVE_ENV
+
+
+async def test_harness_env_keeps_an_inherited_noninteractive_value(monkeypatch):
+    """A variable the environment already sets is left to inheritance, not overridden."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.os, "environ", {"PATH": "/parent/bin", "CI": "false"})
+    env = AntigravityAgent(parse_agent_config(type="antigravity"))._harness_env()
+
+    assert env is not None and "CI" not in env
+    assert env["npm_config_yes"] == "true"
+
+
+async def test_harness_env_none_when_nothing_to_add(monkeypatch):
+    """Every non-interactive variable already set and no mock dirs → no overlay at all,
+    so the SDK spawns with a plain inherited env."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(
+        antigravity_agent.os, "environ", {"PATH": "/parent/bin", **antigravity_agent._NONINTERACTIVE_ENV}
+    )
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
 
     assert agent._harness_env() is None
@@ -1233,7 +1362,7 @@ async def test_harness_env_resolves_path_key_case_insensitively(monkeypatch):
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    assert agent._harness_env() == {"Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
+    assert agent._harness_env() == {**_ni(), "Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
 
 
 async def test_harness_env_handles_absent_path(monkeypatch):
@@ -1244,7 +1373,7 @@ async def test_harness_env_handles_absent_path(monkeypatch):
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}"}
+    assert agent._harness_env() == {**_ni(), "PATH": f"/sandbox/mocks{os.pathsep}"}
 
 
 async def test_concurrent_starts_get_isolated_mock_dirs(monkeypatch, tmp_path):
@@ -1288,8 +1417,8 @@ async def test_concurrent_starts_get_isolated_mock_dirs(monkeypatch, tmp_path):
 
     envs = [c.env for c in configs]
     assert envs == [
-        {"PATH": f"/a/mocks{os.pathsep}/parent/bin"},
-        {"PATH": f"/b/mocks{os.pathsep}/parent/bin"},
+        {**_ni(), "PATH": f"/a/mocks{os.pathsep}/parent/bin"},
+        {**_ni(), "PATH": f"/b/mocks{os.pathsep}/parent/bin"},
     ]
     assert os.environ["PATH"] == "/parent/bin"  # process env untouched throughout
 
@@ -1318,12 +1447,18 @@ async def test_start_passes_env_path_prepend_to_sdk_config(monkeypatch, tmp_path
     await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
 
     assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
-    assert configs[0].env == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
+    assert configs[0].env == {
+        **_ni(),
+        "PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin",
+    }
     assert os.environ["PATH"] == "/parent/bin"  # never mutated
 
 
-async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
-    """Without mock dirs the SDK gets env=None, so the harness inherits os.environ verbatim."""
+async def test_start_passes_only_the_noninteractive_env_when_no_mock_dirs(monkeypatch, tmp_path):
+    """Without mock dirs the SDK gets just the non-interactive overlay; PATH is inherited."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.os, "environ", {"PATH": "/parent/bin"})
 
     class _FakeSdkAgent:
         def __init__(self, cfg):
@@ -1341,7 +1476,7 @@ async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     await agent.start(str(tmp_path))
 
-    assert configs[0].env is None
+    assert configs[0].env == antigravity_agent._NONINTERACTIVE_ENV
 
 
 # --- permission_mode ----------------------------------------------------------------
@@ -1381,6 +1516,96 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
     await _agent(permission_mode=mode).start(str(tmp_path))
 
     assert [p.kind for p in configs[0].policies] == ["allow_all"]
+
+
+# --- allowed_tools / disallowed_tools --------------------------------------------------
+#
+# Mapped onto the harness's builtin toolset (CapabilitiesConfig), so an experiment's
+# allowlist confines Antigravity the way it confines Claude Code and Codex.
+
+
+def _capabilities(**cfg):
+    return _agent(**cfg)._tool_capabilities(
+        SimpleNamespace(BuiltinTools=_FakeBuiltinTools, CapabilitiesConfig=SimpleNamespace)
+    )
+
+
+def test_tool_capabilities_none_without_tool_lists():
+    """No allowed_tools / disallowed_tools → no CapabilitiesConfig, so the harness keeps its defaults."""
+    assert _capabilities() is None
+
+
+def test_allowed_tools_map_to_enabled_builtins():
+    """The default experiment allowlist enables exactly the matching builtins, plus `finish`.
+
+    `Skill` has no builtin (skills load through skills_paths) and is skipped; subagents,
+    web search and the rest stay off, as they do for Claude Code under the same list.
+    """
+    caps = _capabilities(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])
+
+    assert [t.value for t in caps.enabled_tools] == [
+        "create_file",
+        "edit_file",
+        "find_file",
+        "finish",
+        "run_command",
+        "search_directory",
+        "view_file",
+    ]
+    assert caps.enable_subagents is False
+
+
+def test_allowed_task_keeps_subagents():
+    caps = _capabilities(allowed_tools=["Bash", "Task"])
+
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "start_subagent", "finish"}
+    assert caps.enable_subagents is True
+
+
+def test_disallowed_tools_map_to_disabled_builtins():
+    caps = _capabilities(disallowed_tools=["Task", "WebSearch", "TodoWrite"])
+
+    assert [t.value for t in caps.disabled_tools] == ["search_web", "start_subagent"]
+    assert caps.enable_subagents is False
+
+
+def test_disallowed_tools_are_removed_from_the_allowlist():
+    """The SDK takes an allowlist OR a denylist, so with both the denied tools leave the allowlist."""
+    caps = _capabilities(allowed_tools=["Bash", "Read", "Task"], disallowed_tools=["Task"])
+
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish"}
+    assert caps.enable_subagents is False
+
+
+async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_path):
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(allowed_tools=["Bash", "Read"]).start(str(tmp_path))
+
+    assert {t.value for t in configs[0].capabilities.enabled_tools} == {"run_command", "view_file", "finish"}
+
+
+def test_installed_sdk_accepts_the_tool_capabilities():
+    """Pin the SDK-side half: the real CapabilitiesConfig takes what we build and
+    every mapped name is a real builtin, so a renamed tool fails here, not live."""
+    types = pytest.importorskip("google.antigravity").types
+
+    assert set(agent_module._CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.values()) <= {t.value for t in types.BuiltinTools}
+    caps = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])._tool_capabilities(types)
+    assert isinstance(caps, types.CapabilitiesConfig)
+    assert types.BuiltinTools.START_SUBAGENT not in caps.enabled_tools
 
 
 # --- max_turns cap -------------------------------------------------------------------
