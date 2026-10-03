@@ -206,6 +206,14 @@ def _auth_option() -> dict[str, str]:
     return {field: value for field, name in _AUTH_OPTION_FIELDS if (value := _env(name))}
 
 
+def _url_host(url: str) -> str | None:
+    """The host of ``url``, or ``None`` when ``urlparse`` cannot parse it (a malformed IPv6 literal raises)."""
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
 _HOST_ENV_REMOVED = (
     "AUTH_TOKEN",
     "TENANT_ID",
@@ -706,7 +714,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if "auth" in options:
             options["auth"] = sorted(options["auth"])
         if "backendUrl" in options:
-            options["backendUrl"] = urlparse(options["backendUrl"]).hostname
+            options["backendUrl"] = _url_host(options["backendUrl"])
         return options
 
     def get_environment_info(self) -> dict[str, Any]:
@@ -722,7 +730,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         backend_url = os.environ.get("DELEGATE_BACKEND_URL")
         environment = os.environ.get("DELEGATE_ENV")
         if backend_url:
-            info["delegate_backend_url_host"] = urlparse(backend_url).hostname
+            info["delegate_backend_url_host"] = _url_host(backend_url)
         elif environment:
             info["delegate_env"] = environment
         if self._session_id:

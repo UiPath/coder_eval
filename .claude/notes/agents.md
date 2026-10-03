@@ -775,7 +775,9 @@ hour. `_strip_redundant_gateway_creds` mirrors the host's lookup exactly
 
 **Effort rides `sdk_options.effort`** — the same key as Claude Code, so one `-D` drives both.
 `get_sdk_options()` returns the whole `init` dict (so the reports show Model and Effort), with
-credentials redacted: `auth` → its field names, `backendUrl` → its host. It is persisted in
+credentials redacted: `auth` → its field names, `backendUrl` → its host (`None` when `urlparse` cannot
+parse the URL: the orchestrator reads it while it persists `task.json`, so a raise there would lose
+the file and hide the original error). It is persisted in
 `task.json`.
 
 **`enableSkills` must be sent explicitly**: the host default is `false`, so `bundledSkillsPath` alone

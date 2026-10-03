@@ -373,6 +373,13 @@ class TestStart:
         assert options["backendUrl"] == "backend.example"
         assert "tok-1" not in json.dumps(options)
 
+    async def test_a_malformed_backend_url_records_no_host(self, patch_exec, tmp_path, monkeypatch):
+        """The orchestrator reads these while it persists task.json, so a raise there would lose the file."""
+        monkeypatch.setenv("DELEGATE_BACKEND_URL", "https://[fd00::1:8080/api")
+        agent, _proc = await _started_agent(patch_exec, [], tmp_path)
+        assert (agent.get_sdk_options() or {})["backendUrl"] is None
+        assert agent.get_environment_info()["delegate_backend_url_host"] is None
+
     @pytest.mark.parametrize(
         ("token_file_env", "stripped"),
         [
