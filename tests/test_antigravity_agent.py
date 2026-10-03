@@ -1553,11 +1553,12 @@ def test_tool_capabilities_none_without_tool_lists():
 
 
 def test_allowed_tools_map_to_enabled_builtins():
-    """The default experiment allowlist enables exactly the matching default builtins, plus `finish` and `schedule`.
+    """The default experiment allowlist enables exactly the matching default builtins, plus
+    `finish`, `schedule` and `start_subagent`.
 
     `Skill` has no builtin (skills load through skills_paths) and is skipped; `Glob` / `Grep`
-    map to tools the harness ships off, so they stay off; subagents, web search and the rest
-    stay off, as they do for Claude Code under the same list.
+    map to tools the harness ships off, so they stay off; web search and the rest stay off, as
+    they do for Claude Code under the same list.
     """
     caps = _capabilities(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])
 
@@ -1567,37 +1568,61 @@ def test_allowed_tools_map_to_enabled_builtins():
         "finish",
         "run_command",
         "schedule",
+        "start_subagent",
         "view_file",
     ]
-    assert caps.enable_subagents is False
 
 
 def test_allowlist_never_enables_tools_the_harness_ships_off():
     caps = _capabilities(allowed_tools=["Bash", "Glob", "Grep", "LS", "AskUserQuestion"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "finish", "schedule"}
-
-
-def test_allowed_task_keeps_subagents():
-    caps = _capabilities(allowed_tools=["Bash", "Task"])
-
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "start_subagent", "finish", "schedule"}
-    assert caps.enable_subagents is True
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "finish", "schedule", "start_subagent"}
 
 
 def test_disallowed_tools_map_to_disabled_builtins():
     caps = _capabilities(disallowed_tools=["Task", "WebSearch", "TodoWrite"])
 
-    assert [t.value for t in caps.disabled_tools] == ["search_web", "start_subagent"]
-    assert caps.enable_subagents is False
+    assert [t.value for t in caps.disabled_tools] == ["search_web"]
 
 
 def test_disallowed_tools_are_removed_from_the_allowlist():
     """The SDK takes an allowlist OR a denylist, so with both the denied tools leave the allowlist."""
-    caps = _capabilities(allowed_tools=["Bash", "Read", "Task"], disallowed_tools=["Task"])
+    caps = _capabilities(allowed_tools=["Bash", "Read", "WebSearch"], disallowed_tools=["WebSearch"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish", "schedule"}
-    assert caps.enable_subagents is False
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish", "schedule", "start_subagent"}
+
+
+@pytest.mark.parametrize(
+    ("cfg", "denied"),
+    [
+        ({}, []),
+        ({"allowed_tools": ["Bash", "Task"]}, []),
+        ({"allowed_tools": ["Bash", "Read"]}, ["invoke_subagent"]),
+        ({"disallowed_tools": ["Task"]}, ["invoke_subagent"]),
+        ({"allowed_tools": ["Bash", "Task"], "disallowed_tools": ["Task"]}, ["invoke_subagent"]),
+    ],
+)
+async def test_subagent_calls_are_denied_unless_task_is_allowed(monkeypatch, tmp_path, cfg, denied):
+    """`start_subagent` stays on so the harness keeps its default system prompt, whose only
+    "you will be notified, do not poll" guidance sits in its subagents section. A subagent the
+    tool lists withhold is denied at the call that runs it instead."""
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(**cfg).start(str(tmp_path))
+
+    assert [p.tool for p in configs[0].policies if p.kind == "deny"] == denied
 
 
 async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_path):
@@ -1622,6 +1647,7 @@ async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_pat
         "view_file",
         "finish",
         "schedule",
+        "start_subagent",
     }
 
 
@@ -1634,7 +1660,7 @@ def test_installed_sdk_accepts_the_tool_capabilities():
     assert mapped <= {t.value for t in types.BuiltinTools}
     caps = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])._tool_capabilities(types)
     assert isinstance(caps, types.CapabilitiesConfig)
-    assert types.BuiltinTools.START_SUBAGENT not in caps.enabled_tools
+    assert types.BuiltinTools.START_SUBAGENT in caps.enabled_tools
     assert types.BuiltinTools.FIND_FILE not in caps.enabled_tools
 
 

@@ -479,9 +479,19 @@ An allowlist only narrows the harness's default toolset (`BuiltinTools.default()
 harness ships off, so an allowlist naming them leaves them off. Turned on, Gemini used them
 in place of shell scripts (1,429 calls in 333 of 348 SkillsBench rows, none before), often
 one search per turn.
-`enable_subagents` is a separate switch from the toolset and follows whether
-`start_subagent` survives. The SDK takes an allowlist OR a denylist, so with both set the
-denied tools are removed from the allowlist.
+
+`start_subagent` also stays on under any allowlist, because the harness builds its system
+prompt from the toolset: with `start_subagent` off it drops the whole subagents section
+(4,801 → 2,783 characters), and with it the prompt's only "you do NOT need to poll ... you
+will be notified" guidance. Without that, Gemini polls a backgrounded command with status
+checks and short "liveness" timers: rows doing so rose from 1% (0.12.9) to 8-10%, and
+max-turn rows from 2 to 12 of 148. The tool descriptions are identical either way, and
+`enable_subagents` alone does not restore the section. Subagents the tool lists withhold
+(no `Task`) are denied by policy at `invoke_subagent` instead, which covers both the
+built-in `research` subagent and one the model defines with `define_subagent`; both get
+`search_web` regardless of the parent's toolset, and a parent policy on `search_web` does
+not reach a model-defined one. The SDK takes an allowlist OR a denylist, so with both set
+the denied tools are removed from the allowlist, except the always-enabled ones.
 
 ## Antigravity non-interactive commands
 

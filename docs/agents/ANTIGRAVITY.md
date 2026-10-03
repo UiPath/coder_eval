@@ -145,7 +145,9 @@ sandbox working directory plus any skill roots).
 onto the harness's builtin tools (`Bash` → `run_command`, `Read` → `view_file`, `Write` →
 `create_file`, `Edit` → `edit_file`, `Glob` → `find_file`, `Grep` → `search_directory`,
 `Task` → `start_subagent`, `WebSearch` → `search_web`, `WebFetch` → `read_url_content`).
-`Skill` has no builtin and is skipped; `finish` always stays on.
+`Skill` has no builtin and is skipped. `finish`, `schedule` and `start_subagent` always
+stay on, the last so the harness keeps its default system prompt; when the lists do not
+allow `Task`, running a subagent (`invoke_subagent`) is denied by policy instead.
 
 `run_command` also gets non-interactive environment variables (`CI=1`,
 `npm_config_yes=true`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`,

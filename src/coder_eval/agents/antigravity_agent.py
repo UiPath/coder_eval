@@ -146,10 +146,15 @@ _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP: dict[str, str] = {
     "AskUserQuestion": "ask_question",
 }
 
-# Kept on under any allowlist: `finish` returns a turn's structured output and
-# `schedule` is how the model waits on a backgrounded command. Neither is a
-# capability an allowlist is meant to grant or withhold.
-_ALWAYS_ENABLED_TOOLS: frozenset[str] = frozenset({"finish", "schedule"})
+# Kept on under any allowlist: `finish` returns a turn's structured output,
+# `schedule` is how the model waits on a backgrounded command, and the harness
+# drops its "you will be notified, do not poll" guidance with `start_subagent`.
+# Withheld subagents are denied at `_SUBAGENT_CALL` instead.
+# Rationale: .claude/notes/agents.md § Antigravity tool allowlist
+_ALWAYS_ENABLED_TOOLS: frozenset[str] = frozenset({"finish", "schedule", "start_subagent"})
+
+# The one call that runs a subagent, built-in or model-defined.
+_SUBAGENT_CALL = "invoke_subagent"
 
 # Set on every run_command unless the environment already sets them, so a
 # command that would stop to ask (`npx` installing a package, git credentials,
@@ -374,6 +379,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         ``LS`` never turn on the tools the harness ships off (``find_file``,
         ``search_directory``, ``list_directory``). The SDK takes an allowlist OR a
         denylist, so with both set the denied tools are removed from the allowlist.
+        ``_ALWAYS_ENABLED_TOOLS`` are never removed.
 
         Rationale: .claude/notes/agents.md § Antigravity tool allowlist
         """
@@ -387,22 +393,22 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             mapped = {_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.get(n, n) for n in names or []}
             return mapped & builtin
 
-        # `enable_subagents` is a separate switch from the toolset; it follows
-        # whether `start_subagent` survives the filter.
-        subagent = types.BuiltinTools.START_SUBAGENT.value
         if allowed:
-            enabled = ((to_builtin(allowed) & harness_default) | _ALWAYS_ENABLED_TOOLS) - to_builtin(disallowed)
+            enabled = ((to_builtin(allowed) & harness_default) - to_builtin(disallowed)) | _ALWAYS_ENABLED_TOOLS
             self._log.debug("Enabled builtin tools: %s", ", ".join(sorted(enabled)))
-            return types.CapabilitiesConfig(
-                enabled_tools=[types.BuiltinTools(t) for t in sorted(enabled)],
-                enable_subagents=subagent in enabled,
-            )
+            return types.CapabilitiesConfig(enabled_tools=[types.BuiltinTools(t) for t in sorted(enabled)])
         disabled = to_builtin(disallowed) - _ALWAYS_ENABLED_TOOLS
         self._log.debug("Disabled builtin tools: %s", ", ".join(sorted(disabled)))
-        return types.CapabilitiesConfig(
-            disabled_tools=[types.BuiltinTools(t) for t in sorted(disabled)],
-            enable_subagents=subagent not in disabled,
-        )
+        return types.CapabilitiesConfig(disabled_tools=[types.BuiltinTools(t) for t in sorted(disabled)])
+
+    def _subagents_allowed(self) -> bool:
+        """Whether ``allowed_tools`` / ``disallowed_tools`` let the model run subagents (``Task``)."""
+
+        def names_task(names: list[str] | None) -> bool:
+            return any(_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.get(n, n) == "start_subagent" for n in names or [])
+
+        allowed, disallowed = self.config.allowed_tools, self.config.disallowed_tools
+        return (not allowed or names_task(allowed)) and not names_task(disallowed)
 
     async def start(
         self,
@@ -453,8 +459,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # policy would deny. ``permission_mode`` is deliberately NOT mapped
                 # here — it does not confine this agent, exactly as on Codex, and
                 # docs/agents/HARNESS_PARITY.md says so rather than leaving it
-                # silent. The isolation boundary is the driver.
-                policies=[policy.allow_all()],
+                # silent. The isolation boundary is the driver. Subagents the tool
+                # lists withhold are denied here, since `start_subagent` stays on.
+                policies=[policy.allow_all()] + ([] if self._subagents_allowed() else [policy.deny(_SUBAGENT_CALL)]),
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.
                 skills_paths=skills_paths,
