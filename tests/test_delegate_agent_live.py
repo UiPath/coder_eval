@@ -1,14 +1,15 @@
 """Live integration tests for DelegateAgent.
 
 Hit a real Delegate backend through a real Node subprocess; skipped by default,
-only run with ``pytest -m live``. Needs Node + a real ``@uipath/delegate-sdk``
-install, UiPath auth (``AUTH_TOKEN``/``TENANT_ID``/``ORG_ID`` or a saved login),
-a backend (``DELEGATE_ENV``/``DELEGATE_BACKEND_URL``), and optionally
+only run with ``pytest -m live``. Needs Node + a real ``@uipath/delegate-stdio``
+install, UiPath auth (``DELEGATE_AUTH_TOKEN``/``DELEGATE_TENANT_ID``/``DELEGATE_ORG_ID``, or the
+same names without ``DELEGATE_``, or a saved login), a backend
+(``DELEGATE_ENV``/``DELEGATE_BACKEND_URL``), and optionally
 ``DELEGATE_MODEL``.
 
-Also the mechanism for empirically confirming this agent's ``# UNVERIFIED``
-field-name guesses (see ``.claude/notes/agents.md`` § Delegate agent) against a
-real payload — a failure here is the first place to check them.
+A failure here while the unit tests pass usually means the host's frame shapes
+moved: compare a real ``delegate-stdio`` transcript against ``tests/test_delegate_agent.py``'s
+``_ev`` / ``_result`` / ``_tool_call`` / ``_tool_result`` builders.
 """
 
 import os
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.agents.delegate_agent import DelegateAgent, _resolve_sdk_entry
+from coder_eval.agents.delegate_agent import DelegateAgent, _resolve_host_bundle
 from coder_eval.errors import AgentConfigError
 from coder_eval.models import AgentKind, parse_agent_config
 
@@ -29,15 +30,16 @@ def _have_prerequisites() -> bool:
     if shutil.which("node") is None:
         return False
     try:
-        _resolve_sdk_entry()
+        _resolve_host_bundle()
     except AgentConfigError:
         return False
-    has_auth = bool(os.getenv("AUTH_TOKEN")) or (Path.home() / ".aria" / "sdk-auth.json").is_file()
+    has_token = bool(os.getenv("DELEGATE_AUTH_TOKEN") or os.getenv("AUTH_TOKEN"))
+    has_auth = has_token or (Path.home() / ".aria" / "sdk-auth.json").is_file()
     has_backend = bool(os.getenv("DELEGATE_ENV") or os.getenv("DELEGATE_BACKEND_URL"))
     return has_auth and has_backend
 
 
-_skip_reason = "Live Delegate tests need Node + @uipath/delegate-sdk + UiPath auth + a backend"
+_skip_reason = "Live Delegate tests need Node + @uipath/delegate-stdio + UiPath auth + a backend"
 pytestmark = [_live, pytest.mark.skipif(not _have_prerequisites(), reason=_skip_reason)]
 
 
@@ -83,6 +85,7 @@ async def test_delegate_live_runs_shell_command_captured_as_telemetry(tmp_path):
 
     assert record.crashed is False
     assert record.commands, "expected at least one command in telemetry"
+    assert any("coder-eval-live" in (c.result_summary or "") for c in record.commands)
 
 
 @_live
@@ -123,12 +126,7 @@ async def test_delegate_live_two_turns_reuse_session(tmp_path):
 
 @_live
 async def test_delegate_live_token_usage_populated(tmp_path):
-    """Token usage is captured from the SDK and attached to the TurnRecord.
-
-    If this fails while the turn otherwise completes, the `_parse_usage`
-    UNVERIFIED bucket-name guesses in delegate_agent.py are the first thing
-    to check against the real payload.
-    """
+    """Token usage and the call count are read off the host's ``result`` frame."""
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
@@ -139,3 +137,4 @@ async def test_delegate_live_token_usage_populated(tmp_path):
     assert record.crashed is False
     assert record.token_usage is not None
     assert record.token_usage.output_tokens > 0
+    assert record.num_turns is not None and record.num_turns >= 1

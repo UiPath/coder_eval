@@ -25,7 +25,7 @@ def test_importable_from_models():
 def test_validates_and_defaults():
     cfg = DelegateAgentConfig(type="delegate")
     assert cfg.type == AgentKind.DELEGATE
-    assert cfg.effort is None
+    assert cfg.sdk_options == {}
     assert cfg.project_id is None
     assert cfg.session_id is None
     assert cfg.enable_computer_use is False
@@ -35,7 +35,7 @@ def test_round_trips_through_model_dump():
     cfg = DelegateAgentConfig(
         type="delegate",
         model="virtuoso-1-5",
-        effort="high",
+        sdk_options={"effort": "high"},
         project_id="invoice-approval",
         session_id="abc-123",
         enable_computer_use=True,
@@ -43,7 +43,7 @@ def test_round_trips_through_model_dump():
     restored = DelegateAgentConfig.model_validate(cfg.model_dump())
     assert restored == cfg
     assert restored.model == "virtuoso-1-5"
-    assert restored.effort == "high"
+    assert restored.sdk_options == {"effort": "high"}
     assert restored.project_id == "invoice-approval"
     assert restored.session_id == "abc-123"
     assert restored.enable_computer_use is True
@@ -52,7 +52,19 @@ def test_round_trips_through_model_dump():
 def test_effort_accepts_any_string_including_future_tiers():
     # Deliberately permissive: the SDK ignores an unrecognized value, so a
     # strict Literal here would reject a tier a future SDK release adds.
-    assert DelegateAgentConfig(type="delegate", effort="ultra-max").effort == "ultra-max"
+    cfg = DelegateAgentConfig(type="delegate", sdk_options={"effort": "ultra-max"})
+    assert cfg.sdk_options == {"effort": "ultra-max"}
+
+
+@pytest.mark.parametrize("value", [5, ["high"], {"tier": "high"}, None], ids=["int", "list", "dict", "null"])
+def test_effort_rejects_a_value_that_is_not_a_string(value):
+    with pytest.raises(ValidationError, match=r"sdk_options\.effort must be a string"):
+        DelegateAgentConfig(type="delegate", sdk_options={"effort": value})
+
+
+def test_sdk_options_rejects_a_key_the_host_is_not_sent():
+    with pytest.raises(ValidationError, match=r"valid keys: \['effort'\]"):
+        DelegateAgentConfig(type="delegate", sdk_options={"backendUrl": "http://x"})
 
 
 def test_unknown_extra_field_rejected():

@@ -89,6 +89,18 @@ def _assign_nested(patch: dict[str, Any], segments: list[str], value: Any) -> No
     cursor[segments[-1]] = value
 
 
+def _kinds_accepting_sdk_options() -> list[str]:
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
+
+    ensure_plugins_loaded()
+    return [
+        kind
+        for kind in sorted(AgentRegistry.list_kinds())
+        if (reg := AgentRegistry.get(kind)) is not None and "sdk_options" in reg.config_class.model_fields
+    ]
+
+
 def apply_overrides(
     task: TaskDefinition,
     overrides: Mapping[str, Any],
@@ -132,15 +144,17 @@ def apply_overrides(
 
     if agent_patch:
         assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
-        # Preserve the friendly "sdk_options only for claude-code" message before
-        # reconstruction, keyed on the type the agent is *becoming*.
+        # Preserve a friendly sdk_options message before reconstruction, keyed on
+        # the type the agent is *becoming*.
         if "sdk_options" in agent_patch:
             becoming = agent_patch.get("type", task.agent.type)
             type_value = becoming.value if isinstance(becoming, AgentKind) else becoming
-            if type_value != AgentKind.CLAUDE_CODE.value:
+            accepting = _kinds_accepting_sdk_options()
+            if type_value not in accepting:
                 where = "no agent type is set" if type_value is None else f"agent type {type_value}"
                 raise OverrideError(
-                    f"sdk_options cannot be used with {where}. This option is only supported for claude-code agents."
+                    f"sdk_options cannot be used with {where}. This option is only supported for "
+                    + f"{', '.join(accepting)} agents."
                 )
         # Seed with only the explicitly-set fields (exclude_unset) so switching the
         # agent subclass via --type doesn't drag subclass-only defaults into a model

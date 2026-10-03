@@ -2,18 +2,25 @@
 
 The reasoning runs in the UiPath backend; tools (shell, file, Office, PDF) execute
 locally through the SDK's bundled interop process, so file-based success criteria
-work as usual. This agent spawns a first-party Node host this framework ships,
-``agents/delegate/delegate_host.mjs``, wrapping the public ``@uipath/delegate-sdk``
-package's ``DelegateAgent`` class in a newline-JSON stdio protocol — see that
-file's header for the exact wire format.
+work as usual. This agent spawns the host that the public ``@uipath/delegate-stdio``
+npm package ships (``dist/delegate_stdio.mjs``). That host runs the Delegate agent
+as a subprocess speaking newline-delimited JSON over stdio. ``@uipath/delegate-sdk``
+is a dependency of that package, so installing it is the complete install.
+
+Wire protocol (one JSON object per line; the package README is the SSOT)::
+
+    stdin                                   stdout
+    {"cmd":"init","options":{...}}      ->  {"type":"init_ok"}
+    {"cmd":"send","prompt":..,              {"type":"event","event":{...}}  (zero or more)
+            "sessionId":..}                 {"type":"usage","usage":{..}}   (one per model call)
+                                        ->  {"type":"result","response":..,"sessionId":..,
+                                             "usage":{..},"turnUsages":[..],"model":..}
+    {"cmd":"destroy"}                   ->  {"type":"destroyed"}
+                                            {"type":"error","message":..}   (any command)
 
 Prerequisites are documented in ``docs/agents/DELEGATE.md`` and enforced with a
-clear ``AgentConfigError`` at ``start()`` (Node.js, ``npm install
-@uipath/delegate-sdk``, UiPath auth). Deliberate scope reductions versus the
-UiPath-internal sibling agent's more hardened adapter (no multi-generation
-transcript splitting, no WAF/SSE/session-conflict/stall-resend recovery) and
-every remaining ``# UNVERIFIED`` spot's rationale live in one place, not
-scattered:
+clear ``AgentConfigError`` at ``start()`` (Node.js, ``npm install -g
+@uipath/delegate-stdio``, UiPath auth).
 
 Rationale: .claude/notes/agents.md § Delegate agent
 """
@@ -25,6 +32,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import time
@@ -78,8 +86,12 @@ logger = logging.getLogger(__name__)
 
 # --- Host resolution ---------------------------------------------------------
 
-_HOST_SCRIPT = Path(__file__).parent / "delegate" / "delegate_host.mjs"
-_SDK_ENTRY_REL_PATH = Path("node_modules") / "@uipath" / "delegate-sdk" / "dist" / "index.mjs"
+_HOST_PACKAGE = "@uipath/delegate-stdio"
+_HOST_BUNDLE_NAME = "delegate_stdio.mjs"
+_HOST_BIN_NAME = "delegate-stdio"
+_HOST_BUNDLE_REL_PATH = Path("node_modules") / "@uipath" / "delegate-stdio" / "dist" / _HOST_BUNDLE_NAME
+_AGENT_INSTALL_ROOT = Path(__file__).resolve().parent / "delegate"
+"""This agent's own directory; it ships a ``package.json`` that names the host package."""
 
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "allowed_tools",
@@ -99,89 +111,208 @@ _INIT_TIMEOUT_SEC = 60.0
 indefinitely, unlike every turn-scoped read, which is deadline-bounded."""
 _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 
-# The SDK event types this host forwards verbatim that carry model-turn content.
-# `session_start` / `step` / `done` are recognized-but-informational; anything
-# else is logged and ignored rather than silently dropped.
+_INIT_CONFIG_ERROR_MARKERS = (
+    "auth required",
+    "authentication",
+    "unauthorized",
+    "invalid credentials",
+    "invalid token",
+    "token expired",
+    "signature has expired",
+    "jwt expired",
+    "requires org/tenant slugs",
+    "unknown env",
+)
+"""Substrings of an init ``error`` message that a retry cannot fix: missing or rejected
+auth, or a bad ``DELEGATE_ENV``. Any other init error is retryable."""
+_INIT_CONFIG_ERROR_STATUS = re.compile(r"\b40[13]\b")
+"""An HTTP 401/403 as a whole word, so a port or a GUID that contains the digits does not match."""
+
+
+def _is_config_init_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _INIT_CONFIG_ERROR_MARKERS) or bool(
+        _INIT_CONFIG_ERROR_STATUS.search(message)
+    )
+
+
+_INIT_CONFIG_ERROR_HINT = (
+    "coder_eval sends the auth and the org/tenant slugs as the host's `auth` init option, read from "
+    + "DELEGATE_AUTH_TOKEN / DELEGATE_TENANT_ID / DELEGATE_ORG_ID / DELEGATE_ORG_SLUG / DELEGATE_TENANT_SLUG "
+    + "(or the same names without DELEGATE_), and keeps the host's own AUTH_TOKEN / TENANT_ID / ORG_ID / "
+    + "ORG_LOGICAL_NAME / TENANT_NAME out of its environment. See docs/agents/DELEGATE.md."
+)
+"""Appended to a config-class init error, whose host message names the host's own variables."""
+
+# Event types (inside the host's `event` frames) that carry model-turn content.
+# `session_start` / `done` are informational; anything else is logged and ignored.
 _TEXT_EVENT_TYPES = frozenset({"thinking", "message"})
+_FAILED_TOOL_STATUSES = frozenset({"failed", "interrupted"})
+"""``toolStatus`` values the SDK's ``tool_result`` carries for a tool that did not complete."""
+
+# The host reports most tools under their canonical (Claude) names already
+# (ReadFile -> Read, ...), but not LoadSkill, which loads a catalog skill by name.
+# Keyed by the host's name, not the canonical one: the host also reports
+# ExecuteSkillApi as `Skill`, and that call's `name` is an API call, not a skill load.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
+_TOOL_NAME_MAP: dict[str, str] = {"LoadSkill": "Skill"}
+_DELEGATE_ARG_RENAME: dict[str, dict[str, str]] = {"LoadSkill": {"name": "skill"}}
 
 
-def _tool_id(msg: dict[str, Any]) -> str:
-    return str(msg.get("toolId") or msg.get("id") or msg.get("callId") or "")
+def _tool_id(event: dict[str, Any]) -> str:
+    return str(event.get("toolId") or "")
+
+
+def _canonical_tool(tool_name: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map a host tool name and its argument keys onto the canonical cross-agent vocabulary."""
+    rename = _DELEGATE_ARG_RENAME.get(tool_name, {})
+    return _TOOL_NAME_MAP.get(tool_name, tool_name), {rename.get(key, key): value for key, value in params.items()}
+
+
+def _orphan_tool_name(event: dict[str, Any], tool_id: str) -> str:
+    """The name on a ``tool_result`` with no open call; the SDK falls back to the tool id when it has none."""
+    name = event.get("toolName")
+    return name if isinstance(name, str) and name and name != tool_id else "unknown"
+
+
+def _orphan_tool_args(output: Any) -> dict[str, Any]:
+    """The call's args, which a failed lookup echoes back in its ``toolResult``."""
+    args = output.get("args") if isinstance(output, dict) else None
+    return args if isinstance(args, dict) else {}
 
 
 def _env(bare_name: str) -> str | None:
-    """Read a ``DELEGATE_``-namespaced auth var, falling back to the bare name.
+    """Read a ``DELEGATE_``-namespaced variable, falling back to the bare name.
 
-    coder_eval controls these names (it forwards the values into the SDK's
-    ``auth`` object; the SDK never reads process.env itself), so the bare
-    spellings (``AUTH_TOKEN``, ``TENANT_ID``, ...) collide with names other
-    tooling (npm, Vault, Terraform) commonly exports. The namespaced spelling
-    is checked first; the bare one stays for delegate-cli compatibility.
+    The bare spellings (``AUTH_TOKEN``, ``TENANT_ID``, ...) collide with names
+    other tooling (npm, Vault, Terraform) commonly exports, so the namespaced
+    spelling is checked first.
     """
     return os.environ.get(f"DELEGATE_{bare_name}") or os.environ.get(bare_name)
 
 
-def _candidate_install_roots() -> list[Path]:
-    """Ancestor-walk search roots: cwd, its ancestors, and home.
+_AUTH_OPTION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("accessToken", "AUTH_TOKEN"),
+    ("tenantId", "TENANT_ID"),
+    ("organizationId", "ORG_ID"),
+    ("orgLogicalName", "ORG_SLUG"),
+    ("tenantName", "TENANT_SLUG"),
+)
+"""``(field of the host's auth init option, name read through _env)``."""
 
-    Mirrors Node's own module resolution so an ``npm install`` run in the
-    launch directory, any ancestor, or (where npm lands a package when the cwd
-    has no ``package.json``) home, is found with zero configuration.
+
+def _auth_option() -> dict[str, str]:
+    """The host's ``auth`` init option, built from the variables that are set."""
+    return {field: value for field, name in _AUTH_OPTION_FIELDS if (value := _env(name))}
+
+
+def _url_host(url: str) -> str | None:
+    """The host of ``url``, or ``None`` when ``urlparse`` cannot parse it (a malformed IPv6 literal raises)."""
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
+_HOST_ENV_REMOVED = (
+    "AUTH_TOKEN",
+    "TENANT_ID",
+    "ORG_ID",
+    "ORG_LOGICAL_NAME",
+    "TENANT_NAME",
+    "BACKEND_URL",
+    "DELEGATE_AUTH_TOKEN",
+)
+"""Removed from the host's environment. The host reads the first six itself, but
+coder_eval sends their values as init options instead; and the agent's shell tools
+inherit the host env, so no spelling of the token may stay in it. This is defense in
+depth; docs/agents/DELEGATE.md lists the known gaps."""
+
+_GATEWAY_S2S_ENV_VARS = ("LLMGW_CLIENT_ID", "LLMGW_CLIENT_SECRET", "LLMGW_URL")
+
+
+def _strip_redundant_gateway_creds(env: dict[str, str]) -> tuple[str, ...]:
+    """Remove the ``LLMGW_*`` S2S pair from ``env`` when the host would not use it.
+
+    The agent's shell tools inherit the host env, so a live client secret there is
+    exposed to the code under test. The host refreshes its token from that pair
+    only when no token file is configured; a token file wins. This mirrors the
+    host's own lookup (``DELEGATE_AUTH_TOKEN_FILE``, else ``AUTH_TOKEN_FILE``,
+    split on ``os.pathsep``) and keeps the pair when it is the refresh source.
+    Returns the names removed.
+    """
+    raw = env.get("DELEGATE_AUTH_TOKEN_FILE")
+    if raw is None:
+        raw = env.get("AUTH_TOKEN_FILE", "")
+    if not any(entry.strip() for entry in raw.split(os.pathsep)):
+        return ()
+    return tuple(name for name in _GATEWAY_S2S_ENV_VARS if env.pop(name, None) is not None)
+
+
+def _candidate_install_roots() -> list[Path]:
+    """Local search roots, in order: cwd and its ancestors, then ``_AGENT_INSTALL_ROOT``.
+
+    The cwd walk mirrors Node's own module resolution.
     """
     cwd = Path.cwd().resolve()
     roots: list[Path] = [cwd, *cwd.parents]
-    home = Path.home().resolve()
-    if home not in roots:
-        roots.append(home)
+    if _AGENT_INSTALL_ROOT not in roots:
+        roots.append(_AGENT_INSTALL_ROOT)
     return roots
 
 
-def _resolve_sdk_entry() -> Path:
-    """Locate the installed ``@uipath/delegate-sdk``'s ``dist/index.mjs``.
+def _global_install_candidates() -> list[Path]:
+    """Bundle paths implied by an ``npm install -g``, found through the package's shim on PATH.
 
-    Resolution order: ``DELEGATE_SDK_PATH`` (explicit file path) ->
-    ``DELEGATE_SDK_NODE_MODULES`` (explicit install root, probed exactly) ->
-    ancestor walk from cwd (plus home), so an ``npm install`` anywhere in that
-    chain — including this module's own ``agents/delegate/`` directory, which
-    ships a ``package.json`` naming the dependency — is found automatically.
+    On POSIX the shim is a symlink to the bundle; on Windows it is a ``.cmd`` file that
+    sits beside the global prefix's ``node_modules``.
+    """
+    shim = shutil.which(_HOST_BIN_NAME)
+    if shim is None:
+        return []
+    shim_path = Path(shim)
+    return [shim_path.resolve(), (shim_path.parent / _HOST_BUNDLE_REL_PATH).resolve()]
+
+
+def _resolve_host_bundle() -> Path:
+    """Locate the installed ``@uipath/delegate-stdio``'s ``dist/delegate_stdio.mjs``.
+
+    Resolution order: ``DELEGATE_STDIO_PATH`` (explicit file path) ->
+    ``_candidate_install_roots()`` -> a global install (``_global_install_candidates()``).
 
     Raises:
-        AgentConfigError: no install found anywhere searched.
+        AgentConfigError: no install found anywhere searched, or ``DELEGATE_STDIO_PATH``
+            names another file, such as ``@uipath/delegate-sdk``'s ``dist/index.mjs``.
     """
-    explicit = os.environ.get("DELEGATE_SDK_PATH")
+    explicit = os.environ.get("DELEGATE_STDIO_PATH")
     if explicit:
         path = Path(explicit).expanduser().resolve()
         if not path.is_file():
             raise AgentConfigError(
-                f"DELEGATE_SDK_PATH={path} does not point to a file. Point it at "
-                + "@uipath/delegate-sdk's dist/index.mjs."
+                f"DELEGATE_STDIO_PATH={path} does not point to a file. Point it at "
+                + f"{_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}."
             )
-        return path
-
-    root_override = os.environ.get("DELEGATE_SDK_NODE_MODULES")
-    if root_override:
-        path = (Path(root_override).expanduser().resolve() / _SDK_ENTRY_REL_PATH).resolve()
-        if not path.is_file():
+        if path.name != _HOST_BUNDLE_NAME:
             raise AgentConfigError(
-                f"DELEGATE_SDK_NODE_MODULES={root_override}: @uipath/delegate-sdk not found at {path}. "
-                + "Run `npm install @uipath/delegate-sdk` there, or set DELEGATE_SDK_PATH directly."
+                f"DELEGATE_STDIO_PATH={path} must point at {_HOST_PACKAGE}'s dist/{_HOST_BUNDLE_NAME}, "
+                + "not at @uipath/delegate-sdk's dist/index.mjs or another file. "
+                + "See docs/agents/DELEGATE.md."
             )
         return path
 
-    searched: list[Path] = []
-    for root in _candidate_install_roots():
-        candidate = (root / _SDK_ENTRY_REL_PATH).resolve()
-        searched.append(candidate)
-        if candidate.is_file():
+    candidates = [(root / _HOST_BUNDLE_REL_PATH).resolve() for root in _candidate_install_roots()]
+    candidates += _global_install_candidates()
+    for candidate in candidates:
+        if candidate.name == _HOST_BUNDLE_NAME and candidate.is_file():
             return candidate
 
-    searched_block = "\n  ".join(str(p) for p in searched)
+    searched_block = "\n  ".join(str(p) for p in candidates)
     raise AgentConfigError(
-        "@uipath/delegate-sdk not found. Searched the cwd, its ancestors, and home:\n"
+        f"{_HOST_PACKAGE} not found. Install it with `npm install -g {_HOST_PACKAGE}` "
+        + "(public, no token needed). Searched the cwd, its ancestors, this agent's directory, "
+        + f"and the `{_HOST_BIN_NAME}` command on PATH:\n"
         + f"  {searched_block}\n"
-        + "Run `npm install @uipath/delegate-sdk` (plain, public install — no token needed), "
-        + "e.g. in this framework's own agents/delegate/ directory, or set DELEGATE_SDK_NODE_MODULES "
-        + "to the install root, or DELEGATE_SDK_PATH to the dist/index.mjs file directly. "
+        + f"To use a build elsewhere, set DELEGATE_STDIO_PATH to its dist/{_HOST_BUNDLE_NAME}. "
         + "See docs/agents/DELEGATE.md."
     )
 
@@ -209,24 +340,17 @@ def _resolve_bundled_skills_path(plugins: list[dict[str, Any]] | None) -> str | 
     return str(Path(first["path"]) / "skills")
 
 
-def _parse_usage(raw: Any) -> TokenUsage | None:
-    """Parse the SDK's per-turn usage payload (from ``getLastTurnUsage()``) into ``TokenUsage``.
+_USAGE_BUCKETS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
-    CONFIRMED (reading the installed ``@uipath/delegate-sdk@0.1.12``'s bundled
-    ``dist/index.mjs``): no event this host forwards ever carries a ``usage``
-    field -- the SDK's per-turn token accounting lives only in its internal
-    store, reachable through ``DelegateAgent.getLastTurnUsage()``, which
-    ``delegate_host.mjs`` calls after ``sendMessage()`` resolves and attaches
-    to the ``send_ok`` message as ``usage``. That getter's shape, from the
-    SDK's own ``setUsage`` store action: ``{promptTokens, completionTokens,
-    promptTokensCached, cacheCreationTokens, turnTokenUnits,
-    contextBreakdown}``. ``promptTokens`` is the TOTAL input token count
-    (cached + uncached, OpenAI-style); ``promptTokensCached`` is the
-    cache-READ subset of it, so ``uncached = promptTokens - promptTokensCached``.
-    Falls back to 0 for anything absent (e.g. before the backend's first
-    internal usage report), mirroring the project's "warn on drift, never
-    raise" contract -- a future SDK release renaming one of these fields
-    degrades to zero tokens for that bucket, not a crash.
+
+def _parse_usage(raw: Any) -> TokenUsage | None:
+    """Parse a host ``usage`` payload (a ``usage`` frame's, or the ``result``'s) into ``TokenUsage``.
+
+    The host follows the Anthropic convention: ``input_tokens`` excludes cache
+    reads and writes, which arrive separately as ``cache_read_input_tokens`` /
+    ``cache_creation_input_tokens``. An absent or invalid bucket reads as 0, and
+    an all-zero payload returns ``None``. One with no recognised bucket also
+    warns — a renamed field degrades to zero tokens, never a crash.
     """
     if not isinstance(raw, dict):
         return None
@@ -237,28 +361,67 @@ def _parse_usage(raw: Any) -> TokenUsage | None:
             return 0
         return value if isinstance(value, int) and value >= 0 else 0
 
-    prompt_total = _int("promptTokens")
-    prompt_cached = _int("promptTokensCached")
-    output_tokens = _int("completionTokens")
-    cache_creation = _int("cacheCreationTokens")
-    if prompt_total == 0 and output_tokens == 0 and prompt_cached == 0 and cache_creation == 0:
-        if raw:
+    usage = TokenUsage(
+        uncached_input_tokens=_int("input_tokens"),
+        output_tokens=_int("output_tokens"),
+        cache_creation_input_tokens=_int("cache_creation_input_tokens"),
+        cache_read_input_tokens=_int("cache_read_input_tokens"),
+    )
+    if usage.is_empty():
+        if raw and not any(bucket in raw for bucket in _USAGE_BUCKETS):
             logger.warning("delegate: usage payload matched none of the known bucket spellings: %r", sorted(raw))
         return None
-    return TokenUsage(
-        uncached_input_tokens=max(prompt_total - prompt_cached, 0),
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation,
-        cache_read_input_tokens=prompt_cached,
-    )
+    return usage
+
+
+_WAF_BLOCK_PAGE_MARKERS = ("continue with uipath platform", "not available in your country")
+"""Fingerprints of UiPath's Cloudflare block page, served as a 403 when a WAF managed
+rule matches shell-like text in the REQUEST BODY. It is not a geo or auth block."""
+
+_SESSION_CONFLICT_MARKER = "already being generated"
+"""The backend's 409 for a send into a conversation whose previous generation still runs."""
+
+_SSE_CONNECT_TIMEOUT_MARKER = "sse connect timeout"
+"""The SDK's error once its SSE connect watchdog has failed all of its internal retries."""
+
+
+def _describe_host_error(message: str) -> str | None:
+    """A correctly categorized crash reason for a known host failure, or ``None``.
+
+    The raw message would mis-route under ``errors/categorization.py``: a WAF
+    block reads as geo/auth but is deterministic per payload (stamped "content
+    filter", non-retryable), and an SSE connect failure says "timeout" but is a
+    transient backend window (stamped "connection", retryable, "timeout" defanged).
+    A session conflict keeps its raw message; the caller handles it.
+
+    Rationale: .claude/notes/agents.md § Delegate agent
+    """
+    lowered = message.lower()
+    if any(marker in lowered for marker in _WAF_BLOCK_PAGE_MARKERS):
+        prefix = message.split("<", 1)[0].strip().rstrip(":").strip()
+        return (
+            "Delegate backend request blocked by the Cloudflare WAF content filter in front of the UiPath "
+            + "backend (the generic 'not available in your country' 403 page, not a geo or auth problem): "
+            + "shell-like text in the prompt or a tool result matched a managed rule, and the same payload "
+            + f"would be blocked again on retry. [{prefix}]"
+        )
+    if _SSE_CONNECT_TIMEOUT_MARKER in lowered and _SESSION_CONFLICT_MARKER not in lowered:
+        original = message[lowered.find(_SSE_CONNECT_TIMEOUT_MARKER) :]
+        defanged = re.sub("timeout", "time-out", original, flags=re.IGNORECASE)
+        return (
+            "Delegate backend connection failure: the turn's request got no response headers within the "
+            + "SDK's SSE connect watchdog, on every internal attempt. This is a transient backend "
+            + f"availability window, not a task-budget breach. [{defanged}]"
+        )
+    return None
 
 
 class _TurnState:
     """Per-``communicate()`` accumulator.
 
-    One ``AssistantMessage`` per turn (see module docstring's "No
-    multi-generation transcript splitting"), so this is far smaller than the
-    per-round-trip segment machinery a richer transcript would need.
+    One ``AssistantMessage`` per turn (see .claude/notes/agents.md § Delegate
+    agent), so this is far smaller than the per-round-trip segment machinery a
+    richer transcript would need.
     """
 
     def __init__(self, *, iteration: int, user_input: str, model: str | None) -> None:
@@ -278,11 +441,12 @@ class _TurnState:
         # after the first opens once the previous call's tools have all returned.
         self.api_calls = 0
         # A result arrived while other tools were still open, so the next call is not
-        # counted yet. If the model speaks or calls a new tool first, those tools never
-        # returned and the next call has begun.
+        # counted yet. If the model speaks or calls a new tool first, the next call has
+        # begun; the open tools stay open, because the SDK can still deliver their results.
         self.results_incomplete = False
 
         self.model_used: str | None = model
+        # The sum of the per-call `usage` frames, until the `result` replaces it with the turn total.
         self.usage: TokenUsage | None = None
         self.final_response: str | None = None
         self.error_message: str | None = None
@@ -298,8 +462,7 @@ class _TurnState:
 class DelegateAgent(Agent[DelegateAgentConfig]):
     """Drives UiPath Autopilot's Delegate agent through a persistent Node host subprocess.
 
-    See module docstring for prerequisites and the deliberate scope reductions
-    versus the UiPath-only sibling plugin's more hardened adapter.
+    See the module docstring for prerequisites and the wire protocol.
     """
 
     # The host streams one event per model/tool step, checked after each.
@@ -327,9 +490,11 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         self._session_id: str | None = None
+        self._conversation_has_history = False
         self._state = AgentState.WORKING
 
-        self._sdk_entry: Path | None = None
+        self._host_bundle: Path | None = None
+        self._init_options: dict[str, Any] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -349,9 +514,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if shutil.which("node") is None:
             raise AgentConfigError(
                 "Node.js was not found on PATH. Install it (https://nodejs.org/), "
-                + "then `npm install @uipath/delegate-sdk`. See docs/agents/DELEGATE.md."
+                + f"then `npm install -g {_HOST_PACKAGE}`. See docs/agents/DELEGATE.md."
             )
-        self._sdk_entry = _resolve_sdk_entry()
+        self._host_bundle = _resolve_host_bundle()
 
         ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
         if ignored:
@@ -365,12 +530,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
         self._session_id = self.config.session_id
+        self._conversation_has_history = self.config.session_id is not None
         self._state = AgentState.WORKING
 
         await self._spawn_and_init()
 
     async def _spawn_and_init(self) -> None:
-        assert self._sdk_entry is not None, "start() must resolve the SDK entry before spawning"
+        assert self._host_bundle is not None, "start() must resolve the host bundle before spawning"
         env = dict(os.environ)
         if self._env_path_prepend:
             env["PATH"] = os.pathsep.join([*self._env_path_prepend, env.get("PATH", "")])
@@ -378,15 +544,18 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         # Respect an operator's own telemetry choice; only default it off.
         env.setdefault("DELEGATE_TELEMETRY_DISABLED", "1")
+        if stripped := _strip_redundant_gateway_creds(env):
+            logger.debug("delegate: a token file is configured; removed %s from the host env", ", ".join(stripped))
+        for name in _HOST_ENV_REMOVED:
+            env.pop(name, None)
 
         await self._cancel_drain_tasks()
         self._stdout_queue = asyncio.Queue()
         self._stderr_lines.clear()
         self._process = await asyncio.create_subprocess_exec(
             "node",
-            str(_HOST_SCRIPT),
-            str(self._sdk_entry),
-            cwd=str(_HOST_SCRIPT.parent),
+            str(self._host_bundle),
+            cwd=self.working_directory,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -402,29 +571,31 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._stdout_task = asyncio.create_task(self._drain_stdout(self._process.stdout))
         self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
 
-        init_options = self._build_init_options()
-        await self._send_command({"cmd": "init", "options": init_options})
+        self._init_options = self._build_init_options()
+        await self._send_command({"cmd": "init", "options": self._init_options})
         try:
-            ack = await asyncio.wait_for(self._read_until(("init_ok", "init_error")), timeout=_INIT_TIMEOUT_SEC)
+            ack = await asyncio.wait_for(self._read_until(("init_ok", "error")), timeout=_INIT_TIMEOUT_SEC)
         except TimeoutError as exc:
             await self._force_kill_host()
-            self._process = None
-            raise AgentConfigError(
+            raise AgentCrashError(
                 f"Delegate SDK init did not respond within {_INIT_TIMEOUT_SEC:.0f}s "
                 + "(hung auth refresh or backend connect?)."
             ) from exc
-        if ack.get("type") == "init_error":
-            raise AgentConfigError(f"Delegate SDK init failed: {ack.get('message', 'unknown error')}")
+        if ack.get("type") == "error":
+            await self._force_kill_host()
+            message = str(ack.get("message", "unknown error"))
+            if _is_config_init_error(message):
+                raise AgentConfigError(f"Delegate SDK init failed: {message} {_INIT_CONFIG_ERROR_HINT}")
+            raise AgentCrashError(f"Delegate SDK init failed: {message}")
 
     def _build_init_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
+            **self.config.sdk_options,
             "workingDirectory": self.working_directory,
             "enableComputerUse": self.config.enable_computer_use,
         }
         if self.config.model:
             options["model"] = self.config.model
-        if self.config.effort:
-            options["effort"] = self.config.effort
         if self.config.project_id:
             options["projectId"] = self.config.project_id
         if self.config.session_id:
@@ -436,29 +607,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             options["backendUrl"] = backend_url
         environment = os.environ.get("DELEGATE_ENV")
         if environment:
-            options["environment"] = environment
-        auth_token = _env("AUTH_TOKEN")
-        if auth_token:
-            auth: dict[str, Any] = {
-                "accessToken": auth_token,
-                "tenantId": _env("TENANT_ID"),
-                "organizationId": _env("ORG_ID"),
-            }
-            # CONFIRMED LIVE: when `environment` (rather than `backendUrl`) is set,
-            # the SDK resolves the backend URL from THIS auth object's
-            # organizationName/tenantName fields, not from ORG_SLUG/TENANT_SLUG
-            # process.env directly (that pairing is documented only in the SDK's
-            # own error message, aimed at delegate-cli's env-var-driven wrapper —
-            # the SDK class we drive here never reads those two vars itself).
-            org_slug = _env("ORG_SLUG")
-            tenant_slug = _env("TENANT_SLUG")
-            if org_slug:
-                auth["organizationName"] = org_slug
-            if tenant_slug:
-                auth["tenantName"] = tenant_slug
+            options["env"] = environment
+        if auth := _auth_option():
             options["auth"] = auth
         # list[LocalPluginConfig] is not list[dict[str, Any]] under list invariance.
         skills_path = _resolve_bundled_skills_path(self.config.plugins)  # type: ignore[arg-type]
+        options["enableSkills"] = skills_path is not None
         if skills_path:
             options["bundledSkillsPath"] = skills_path
         return options
@@ -486,7 +640,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self._sweep_pgid()
 
     async def _force_kill_host(self) -> None:
+        """SIGKILL the host and drop its handle, so the next ``communicate()`` respawns.
+
+        The handle is dropped even when the reap times out: a dying host must never
+        receive the next ``send``.
+        """
         proc = self._process
+        self._process = None
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
@@ -541,25 +701,36 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 await asyncio.wait_for(self._process.wait(), timeout=_STOP_TIMEOUT_SEC)
         await self._force_kill_host()
         await self._cancel_drain_tasks()
-        self._process = None
+
+    def get_sdk_options(self) -> dict[str, Any] | None:
+        """The ``init`` options sent to the last host spawned, or ``None`` before ``start()``.
+
+        Credentials are redacted, because the result is persisted with the run:
+        ``auth`` becomes the names of its fields, and ``backendUrl`` its host.
+        """
+        if self._init_options is None:
+            return None
+        options = dict(self._init_options)
+        if "auth" in options:
+            options["auth"] = sorted(options["auth"])
+        if "backendUrl" in options:
+            options["backendUrl"] = _url_host(options["backendUrl"])
+        return options
 
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             **super().get_environment_info(),
             "delegate_model": self.config.model,
         }
-        if self.config.effort:
-            info["delegate_effort"] = self.config.effort
         if self.config.enable_computer_use:
             info["delegate_enable_computer_use"] = True
-        # DELEGATE_BACKEND_URL wins over DELEGATE_ENV when both are set (see
-        # _build_init_options/docs/agents/DELEGATE.md), so recording delegate_env
-        # here too would assert a routing decision the SDK never made. Host only
-        # (never the full URL, which can carry embedded credentials).
+        # The host ranks backendUrl over the env slug (see docs/agents/DELEGATE.md),
+        # so recording delegate_env here too would assert a routing decision the SDK
+        # never made. Host only (never the full URL, which can carry embedded credentials).
         backend_url = os.environ.get("DELEGATE_BACKEND_URL")
         environment = os.environ.get("DELEGATE_ENV")
         if backend_url:
-            info["delegate_backend_url_host"] = urlparse(backend_url).hostname
+            info["delegate_backend_url_host"] = _url_host(backend_url)
         elif environment:
             info["delegate_env"] = environment
         if self._session_id:
@@ -582,17 +753,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
         if self._process is None or self._process.returncode is not None:
             # A prior cooperative stop or crash left no live host: respawn
-            # fresh rather than fail fast. Session-conflict-specific recovery
-            # is deferred (see module docstring); this simpler policy covers
-            # both "the previous turn stopped cleanly" and "it crashed".
-            try:
-                await self._spawn_and_init()
-            except AgentConfigError as exc:
-                # Node/the SDK install were already validated once in start();
-                # a failure respawning mid-run is a transient backend/auth
-                # hiccup, not a missing prerequisite -- make it retryable
-                # instead of ending the task outright.
-                raise AgentCrashError(str(exc)) from exc
+            # fresh rather than fail fast.
+            await self._spawn_and_init()
 
         self._begin_turn()
         collector = EventCollector()
@@ -645,38 +807,28 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     )
 
                 mtype = msg.get("type")
-                if mtype == "send_ok":
-                    self._handle_send_ok(msg, state)
+                if mtype == "result":
+                    self._handle_result(msg, state)
                     break
-                if mtype == "send_error":
-                    # Reuse of a live host after a recoverable `send_error` is
-                    # not attempted: force-kill so the next communicate() always
-                    # respawns onto a fresh queue rather than risk consuming a
-                    # stale onEvent callback the SDK fires after this rejection.
-                    await self._abandon_host_and_crash(
-                        state, collector, emit, f"Delegate send failed: {msg.get('message', 'unknown error')}"
-                    )
-                if mtype == "fatal":
-                    # The host exits right after writing this line (every
-                    # `fatal` site calls process.exit) -- force-kill is then a
-                    # no-op, but stays here to match the EOF branch exactly
-                    # rather than trust that invariant from this side too.
-                    await self._abandon_host_and_crash(
-                        state, collector, emit, f"Delegate host crashed: {msg.get('message', 'unknown error')}"
-                    )
-                if mtype in ("protocol_error", "destroy_error"):
-                    logger.warning("delegate: host reported %s: %s", mtype, msg.get("message"))
+                if mtype == "error":
+                    await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
+                if mtype == "usage":
+                    self._add_call_usage(msg, state)
+                    continue
+                event = msg.get("event")
+                if mtype != "event" or not isinstance(event, dict):
+                    logger.debug("delegate: ignoring host message %r", mtype)
                     continue
 
-                self._handle_event(msg, state, emit)
+                self._handle_event(event, state, emit)
 
                 if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
-                    await self._abandon_host_after_loop_exit()
+                    await self._force_kill_host()
                     break
                 if should_stop is not None and should_stop():
                     stopped_early = True
-                    await self._abandon_host_after_loop_exit()
+                    await self._force_kill_host()
                     break
 
             if stopped_early:
@@ -685,7 +837,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 status = AgentEndStatus.MAX_TURNS_EXHAUSTED
             else:
                 status = AgentEndStatus.COMPLETED
+            self._warn_if_usage_missing(state, status)
             self._finalize_turn(state, status, emit)
+            self._conversation_has_history = True
             record = collector.build_turn_record()
             self._end_turn_ok()
             return record
@@ -707,68 +861,67 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             # from a dead stdin) -- force-kill so a retry always respawns
             # rather than write into, or read stale events from, this host.
             await self._force_kill_host()
-            self._process = None
             self._crash_turn(state, collector, emit, f"Delegate turn failed: {e!s}", cause=e)
             raise  # unreachable — _crash_turn is NoReturn
 
-    def _handle_event(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
-        """Dispatch one forwarded SDK event. Never raises on unrecognized shape."""
-        event_type = msg.get("type")
-        session_id = msg.get("sessionId")
+    def _handle_event(self, event: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
+        """Dispatch one SDK event unwrapped from an ``event`` frame. Never raises on unrecognized shape."""
+        event_type = event.get("type")
+        session_id = event.get("sessionId")
         if isinstance(session_id, str) and session_id:
             self._session_id = session_id
-        model = msg.get("model")
-        if isinstance(model, str) and model:
-            state.model_used = model
-        usage = _parse_usage(msg.get("usage"))
-        if usage is not None:
-            state.usage = usage
 
         if state.api_calls == 0 and (event_type in _TEXT_EVENT_TYPES or event_type == "tool_call"):
             state.api_calls = 1
         elif state.results_incomplete and (
-            event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(msg) not in state.open_tools)
+            event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(event) not in state.open_tools)
         ):
-            self._close_open_tools(state, emit)
             state.api_calls += 1
             state.results_incomplete = False
 
-        if event_type in _TEXT_EVENT_TYPES:
-            text = msg.get("content")
+        if event_type == "message":
+            text = event.get("content")
             if isinstance(text, str) and text:
-                state.text_parts.append(text)
-                if event_type == "message":
-                    state.message_events += 1
-                    state.content_blocks.append(
-                        ContentBlock(block_type="text", sequence=len(state.content_blocks), text=text)
-                    )
-                    emit(TextChunkEvent(task_id=self.task_id, turn_id=state.turn_id, text=text))
-                else:
-                    state.content_blocks.append(
-                        ContentBlock(block_type="thinking", sequence=len(state.content_blocks), thinking=text)
-                    )
+                self._append_message_text(state, text, starts_step=event.get("isStepStart") is not False)
+                emit(TextChunkEvent(task_id=self.task_id, turn_id=state.turn_id, text=text))
+        elif event_type == "thinking":
+            text = event.get("content")
+            if isinstance(text, str) and text:
+                state.content_blocks.append(
+                    ContentBlock(block_type="thinking", sequence=len(state.content_blocks), thinking=text)
+                )
         elif event_type == "tool_call":
-            self._handle_tool_call(msg, state, emit)
+            self._handle_tool_call(event, state, emit)
         elif event_type == "tool_result":
-            self._handle_tool_result(msg, state, emit)
+            self._handle_tool_result(event, state, emit)
             state.results_incomplete = bool(state.open_tools)
             if not state.open_tools:
                 state.api_calls += 1
         elif event_type == "error":
-            message = msg.get("message") or msg.get("content") or "unknown error"
-            state.error_message = str(message)
+            state.error_message = str(event.get("error") or "unknown error")
             logger.warning("delegate: SDK reported an error event: %s", state.error_message)
-        elif event_type in ("session_start", "step", "done"):
+        elif event_type in ("session_start", "done"):
             pass  # informational; no telemetry to record
         else:
             logger.debug("delegate: unrecognized event type %r", event_type)
 
-    def _handle_tool_call(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
-        # UNVERIFIED: exact id-field spelling.
-        tool_id = _tool_id(msg) or str(uuid.uuid4())
-        tool_name = str(msg.get("toolName") or msg.get("tool") or "unknown")
-        parameters = msg.get("input")
-        parameters = parameters if isinstance(parameters, dict) else {}
+    @staticmethod
+    def _append_message_text(state: _TurnState, text: str, *, starts_step: bool) -> None:
+        """Record assistant text; a streamed delta (``isStepStart: false``) extends the open text block."""
+        state.text_parts.append(text)
+        last = state.content_blocks[-1] if state.content_blocks else None
+        if not starts_step and last is not None and last.block_type == "text":
+            last.text = (last.text or "") + text
+            return
+        state.message_events += 1
+        state.content_blocks.append(ContentBlock(block_type="text", sequence=len(state.content_blocks), text=text))
+
+    def _handle_tool_call(self, event: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
+        tool_id = _tool_id(event) or str(uuid.uuid4())
+        raw_args = event.get("toolArgs")
+        tool_name, parameters = _canonical_tool(
+            str(event.get("toolName") or "unknown"), raw_args if isinstance(raw_args, dict) else {}
+        )
         state.sequence += 1
         telemetry = CommandTelemetry(
             tool_name=tool_name,
@@ -786,34 +939,30 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         )
         emit(ToolStartEvent(task_id=self.task_id, turn_id=state.turn_id, tool=telemetry))
 
-    def _handle_tool_result(self, msg: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
-        tool_id = _tool_id(msg)
+    def _handle_tool_result(
+        self, event: dict[str, Any], state: _TurnState, emit: Callable[[StreamEvent], None]
+    ) -> None:
+        tool_id = _tool_id(event)
         telemetry = state.open_tools.pop(tool_id, None)
+        output = event.get("toolResult")
         if telemetry is None:
-            # A result with no matching open call (id mismatch or unknown shape).
-            # Never drop it: synthesize a telemetry row rather than lose the
-            # event.
+            # The SDK sends no tool_call for a tool name it cannot resolve, only
+            # this result, so the row takes its name and args from the result.
             state.sequence += 1
             telemetry = CommandTelemetry(
-                tool_name="unknown",
+                tool_name=_orphan_tool_name(event, tool_id),
                 tool_id=tool_id or str(uuid.uuid4()),
                 assistant_turn_index=state.message_events,
                 timestamp=datetime.now(),
+                parameters=_orphan_tool_args(output),
                 sequence_number=state.sequence,
             )
-        error_text = msg.get("error")
-        output = msg.get("output") if "output" in msg else msg.get("content")
+        if isinstance(output, dict) and isinstance(output.get("content"), str):
+            output = output["content"]
         completed = datetime.now()
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
-        if error_text:
-            status = ToolEndStatus.ERROR
-            telemetry.result_status = "error"
-            telemetry.error_message = str(error_text)
-        else:
-            status = ToolEndStatus.OK
-            telemetry.result_status = "success"
         if isinstance(output, str):
             telemetry.result_summary = output
         elif output is not None:
@@ -822,24 +971,73 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             telemetry.result_summary = json.dumps(output)
         else:
             telemetry.result_summary = None
+        if event.get("toolStatus") in _FAILED_TOOL_STATUSES:
+            status = ToolEndStatus.ERROR
+            telemetry.result_status = "error"
+            telemetry.error_message = telemetry.result_summary or "tool failed"
+        else:
+            status = ToolEndStatus.OK
+            telemetry.result_status = "success"
         emit(ToolEndEvent(task_id=self.task_id, turn_id=state.turn_id, tool=telemetry, status=status))
 
-    def _handle_send_ok(self, msg: dict[str, Any], state: _TurnState) -> None:
-        # CONFIRMED (reading the installed SDK's bundled source):
-        # sendMessage()'s resolved value is always a plain string, never an
-        # object -- `usage`/`sessionId` are NOT nested under it. delegate_host.mjs
-        # instead reads them off `getLastTurnUsage()`/`getSessionId()` after
-        # sendMessage() resolves and attaches them to this message's own
-        # top level (see delegate_host.mjs's wire-protocol header comment).
-        result = msg.get("result")
-        if isinstance(result, str):
-            state.final_response = result
+    @staticmethod
+    def _add_call_usage(msg: dict[str, Any], state: _TurnState) -> None:
+        """Add one model call's ``usage`` frame to the turn's running total.
+
+        The host writes a call's frame before any tool result that call caused,
+        so a turn cut at ``max_turns`` or by an early stop keeps the usage of
+        every call that finished.
+        """
+        usage = _parse_usage(msg.get("usage"))
+        if usage is not None:
+            state.usage = usage if state.usage is None else state.usage + usage
+
+    @staticmethod
+    def _warn_if_usage_missing(state: _TurnState, status: AgentEndStatus) -> None:
+        """Warn when model calls finished but no usage arrived, so the turn books no tokens or cost.
+
+        A cut turn's in-flight call is not finished, so it is not counted.
+        """
+        if state.usage is not None:
+            return
+        if status is AgentEndStatus.COMPLETED:
+            if state.api_calls > 0:
+                logger.warning(
+                    "delegate: the host reported no token usage for a turn with %d model call(s); "
+                    + "its tokens and cost are unknown",
+                    state.api_calls,
+                )
+        elif state.api_calls > 1:
+            logger.warning(
+                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for its %d "
+                + "finished model call(s) are unknown",
+                status.value,
+                state.api_calls - 1,
+            )
+
+    def _handle_result(self, msg: dict[str, Any], state: _TurnState) -> None:
+        """Fold the host's terminal ``result`` frame into the turn state.
+
+        Its ``usage`` is the turn total, so it replaces the running sum of the
+        ``usage`` frames. ``turnUsages`` has one entry per backend round-trip, so
+        its length is the authoritative call count and replaces the running
+        estimate.
+        """
+        response = msg.get("response")
+        if isinstance(response, str):
+            state.final_response = response
         session_id = msg.get("sessionId")
         if isinstance(session_id, str) and session_id:
             self._session_id = session_id
+        model = msg.get("model")
+        if isinstance(model, str) and model:
+            state.model_used = model
         usage = _parse_usage(msg.get("usage"))
         if usage is not None:
             state.usage = usage
+        turn_usages = msg.get("turnUsages")
+        if isinstance(turn_usages, list) and turn_usages:
+            state.api_calls = len(turn_usages)
 
     def _close_open_tools(self, state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         for tool_id, telemetry in list(state.open_tools.items()):
@@ -880,9 +1078,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         messages = []
         if state.content_blocks:
             completed = datetime.now()
-            # Single generation window for the whole turn (see module docstring's
-            # "No multi-generation transcript splitting"): tiles from the turn's
-            # own start, since there is no prior emission to tile from.
+            # Single generation window for the whole turn (see .claude/notes/agents.md
+            # § Delegate agent): tiles from the turn's own start, since there is no
+            # prior emission to tile from.
             started, generation_ms = close_window(mark=state.started_dt, now=completed)
             messages.append(
                 AssistantMessage(
@@ -933,19 +1131,25 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             )
         )
 
-    async def _abandon_host_after_loop_exit(self) -> None:
-        """Force-kill after ``max_turns``/cooperative-stop; next turn respawns."""
-        await self._force_kill_host()
-        self._process = None
+    def _log_stderr_tail(self, reason: str) -> None:
+        """Log the host's stderr tail beside ``reason``.
+
+        Never put the tail in a raised reason: ``errors/categorization.py`` matches
+        substrings of the reason, and the tail holds incidental text (the sandbox
+        path, which names the task) that can match a non-retryable rule.
+
+        Rationale: .claude/notes/agents.md § Delegate agent
+        """
+        logger.warning("delegate: %s. stderr tail:\n%s", reason, self._stderr_tail())
 
     async def _abandon_host_and_crash(
         self,
         state: _TurnState,
         collector: EventCollector,
         emit: Callable[[StreamEvent], None],
-        message: str,
+        reason: str,
     ) -> NoReturn:
-        """Force-kill the current host, drop the handle, and crash the turn.
+        """Force-kill the current host and crash the turn with ``reason``.
 
         Shared by every mid-``communicate()`` failure kernel that must not let
         the NEXT ``communicate()`` reuse this host: reuse risks writing a
@@ -953,8 +1157,38 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         fires after this failure as the retry's own result.
         """
         await self._force_kill_host()
-        self._process = None
-        self._crash_turn(state, collector, emit, f"{message}. stderr tail:\n{self._stderr_tail()}")
+        self._log_stderr_tail(reason)
+        self._crash_turn(state, collector, emit, reason)
+
+    async def _crash_on_host_error(
+        self,
+        state: _TurnState,
+        collector: EventCollector,
+        emit: Callable[[StreamEvent], None],
+        message: str,
+    ) -> NoReturn:
+        """Crash the turn on a host ``error`` frame; the host is never reused.
+
+        A session conflict drops the remembered session id only while no turn of
+        that conversation has finished, so a retry never continues without the
+        earlier turns' context.
+        """
+        reason = _describe_host_error(message)
+        if reason is None:
+            if _SESSION_CONFLICT_MARKER in message.lower():
+                if self._conversation_has_history:
+                    logger.warning(
+                        "delegate: session %s is still generating a reply; it holds earlier turns, so it is kept",
+                        self._session_id,
+                    )
+                else:
+                    logger.warning(
+                        "delegate: session %s is still generating a reply; the retry starts a new conversation",
+                        self._session_id,
+                    )
+                    self._session_id = None
+            reason = f"Delegate send failed: {message}"
+        await self._abandon_host_and_crash(state, collector, emit, reason)
 
     def _crash_turn(
         self,
@@ -977,9 +1211,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         self, state: _TurnState, collector: EventCollector, emit: Callable[[StreamEvent], None], timeout: float
     ) -> NoReturn:
         await self._force_kill_host()
-        # Drop the handle so the NEXT communicate() respawns rather than reuse
-        # a killed process (or, worse, a "send" still nominally in flight).
-        self._process = None
 
         def finalize(status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
             self._finalize_turn(state, status, emit, crashed=crashed, crash_reason=crash_reason)
@@ -1009,13 +1240,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 # As in communicate()'s loop: the host may still be alive
                 # (a buffer overrun or drain exception, not necessarily exit).
                 await self._force_kill_host()
-                self._process = None
-                tail = self._stderr_tail()
-                raise AgentCrashError(f"Delegate host exited before responding. stderr tail:\n{tail}")
+                reason = "Delegate host exited before responding"
+                self._log_stderr_tail(reason)
+                raise AgentCrashError(reason)
             if msg.get("type") in accepted_types:
                 return msg
-            if msg.get("type") in ("protocol_error", "fatal"):
-                logger.warning("delegate: host reported %s during init: %s", msg.get("type"), msg.get("message"))
+            logger.debug("delegate: ignoring host message %r during init", msg.get("type"))
 
     async def _drain_stdout(self, stream: asyncio.StreamReader) -> None:
         try:
@@ -1042,6 +1272,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     continue
                 if isinstance(obj, dict):
                     await self._stdout_queue.put(obj)
+        except asyncio.CancelledError:
+            raise
         except BaseException:
             logger.exception("delegate: stdout drain failed")
             await self._stdout_queue.put(None)
