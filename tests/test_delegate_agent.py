@@ -26,6 +26,7 @@ from coder_eval.criteria.skill_triggered import _engaged_skill_names
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
 from coder_eval.errors.categories import ErrorCategory
 from coder_eval.errors.categorization import categorize_error
+from coder_eval.errors.retry import should_retry
 from coder_eval.models import AgentKind, DelegateAgentConfig
 from coder_eval.reports.markdown import collect_agent_settings_rows
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
@@ -215,9 +216,11 @@ class TestStart:
     ):
         patch_exec([_line({"type": "error", "message": host_message, "stack": "Error: ..."})])
         agent = DelegateAgent(_config())
-        with pytest.raises(error_type, match="Delegate SDK init failed"):
+        with pytest.raises(error_type, match="Delegate SDK init failed") as excinfo:
             await agent.start(str(tmp_path))
         assert agent._process is None
+        category = categorize_error(excinfo.value, {"component": "agent"})
+        assert should_retry(category, 0) is (error_type is AgentCrashError), category
 
     async def test_a_config_init_error_names_the_variables_coder_eval_reads(self, patch_exec, tmp_path):
         """The host's message names the host's own variables, which coder_eval keeps out of its env."""

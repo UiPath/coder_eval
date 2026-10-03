@@ -5,6 +5,7 @@ and maps them to appropriate ErrorCategory values for retry logic.
 """
 
 import logging
+import re
 from typing import Any
 
 from .agent import AgentConfigError, AgentCrashError
@@ -68,6 +69,11 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
     return None
 
 
+def _mentions_status(error_str: str, *codes: str) -> bool:
+    """True when an HTTP status code appears as a whole word, so a port or a GUID holding its digits does not match."""
+    return any(re.search(rf"\b{code}\b", error_str) for code in codes)
+
+
 def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | None:
     """String-pattern matching on the already-lowercased error message.
 
@@ -78,20 +84,23 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
     reaches ``PACKAGE_INSTALL_ERROR`` (retryable) instead of ``UNKNOWN``.
     """
     # Authentication errors
-    if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key", "401"]):
+    if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key"]) or _mentions_status(
+        error_str, "401"
+    ):
         return ErrorCategory.AGENT_AUTH_ERROR
 
     # Billing/credit errors (NOT retryable). Broad patterns are intentional: a false
     # positive skips one retry, a false negative wastes every retry on an error that
     # will never succeed.
     if any(
-        pat in error_str
-        for pat in ["credit", "billing", "payment", "insufficient", "402", "quota exceeded", "spending limit"]
-    ):
+        pat in error_str for pat in ["credit", "billing", "payment", "insufficient", "quota exceeded", "spending limit"]
+    ) or _mentions_status(error_str, "402"):
         return ErrorCategory.AGENT_BILLING_ERROR
 
     # Rate limiting
-    if any(pat in error_str for pat in ["rate limit", "429", "ratelimit", "too many requests"]):
+    if any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"]) or _mentions_status(
+        error_str, "429"
+    ):
         return ErrorCategory.AGENT_RATE_LIMIT
 
     # Timeouts
@@ -105,7 +114,9 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
         return ErrorCategory.AGENT_INVALID_OUTPUT
 
     # API/Network errors
-    if any(pat in error_str for pat in ["api error", "connection", "network", "502", "503", "504"]):
+    if any(pat in error_str for pat in ["api error", "connection", "network"]) or _mentions_status(
+        error_str, "502", "503", "504"
+    ):
         if component == "agent":
             return ErrorCategory.AGENT_API_ERROR
         return None  # fall through: let the component group categorize it
