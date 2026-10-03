@@ -144,7 +144,7 @@ class TestApplyOverrides:
 
     def test_sdk_options_on_codex_raises(self):
         task = _make_task(agent=parse_agent_config(type="codex"))
-        with pytest.raises(OverrideError, match="only supported for claude-code, delegate agents"):
+        with pytest.raises(OverrideError, match=r"agent type codex\. This option is only supported for "):
             apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_sdk_options_effort_on_delegate_applies(self):
@@ -152,9 +152,34 @@ class TestApplyOverrides:
         apply_overrides(task, {"agent.sdk_options.effort": "high"})
         assert task.agent.sdk_options == {"effort": "high"}
 
+    def test_sdk_options_applies_to_any_registered_kind_that_declares_it(self):
+        """A plugin kind whose config declares ``sdk_options`` passes the guard, not only the built-ins."""
+        from typing import Any, Literal
+
+        from pydantic import Field
+
+        from coder_eval.agents.registry import AgentRegistry
+        from coder_eval.models import BaseAgentConfig
+
+        class _PluginConfig(BaseAgentConfig):
+            type: Literal["sdk-options-plugin"]  # type: ignore[assignment]
+            sdk_options: dict[str, Any] = Field(default_factory=dict)
+
+        class _PluginAgent:
+            def __init__(self, config, route=None, **kwargs):
+                self.config = config
+
+        AgentRegistry.register("sdk-options-plugin", _PluginConfig)(_PluginAgent)
+        try:
+            task = _make_task(agent=parse_agent_config(type="sdk-options-plugin"))
+            apply_overrides(task, {"agent.sdk_options.mode": "fast"})
+            assert task.agent.sdk_options == {"mode": "fast"}
+        finally:
+            AgentRegistry._registry.pop("sdk-options-plugin", None)
+
     def test_sdk_options_with_agent_type_codex_raises(self):
         task = _make_task(agent=parse_agent_config(type="claude-code"))
-        with pytest.raises(OverrideError, match="only supported for claude-code, delegate agents"):
+        with pytest.raises(OverrideError, match=r"agent type codex\. This option is only supported for "):
             apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
 
     def test_unknown_root_raises(self):

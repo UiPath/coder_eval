@@ -306,7 +306,7 @@ class TestLayer5Current:
 
     def test_sdk_options_on_codex_raises_friendly(self):
         task = _live_task(agent={"type": "codex"})
-        with pytest.raises(OverrideError, match="only supported for claude-code, delegate agents"):
+        with pytest.raises(OverrideError, match=r"agent type codex\. This option is only supported for "):
             apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_lineage_cli_source_for_touched_paths_only(self):
