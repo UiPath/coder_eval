@@ -23,7 +23,7 @@ With **Node.js** on your `PATH`, install the host once:
 npm install -g @uipath/delegate-stdio
 ```
 
-That is all. The package is public (no token, no custom registry). coder_eval finds the global install by itself, so you set no path.
+That is all. The package is public (no token, no custom registry). coder_eval finds the global install by itself, so you set no path. coder_eval needs version 1.203.0 or later, the first release that accepts the `auth` init option and writes a `usage` frame for each model call.
 
 A local `npm install @uipath/delegate-stdio` also works: in your project, in a parent directory, or in `src/coder_eval/agents/delegate/` (it ships a `package.json`). A local install wins over a global one. On Windows, keep a local install in a short path: a path longer than 260 characters to the interop binary makes its spawn fail with `ENOENT`.
 
@@ -44,7 +44,7 @@ Either:
 - **Environment token** — `DELEGATE_AUTH_TOKEN`, `DELEGATE_TENANT_ID`, `DELEGATE_ORG_ID` env vars. When `DELEGATE_ENV` (not `DELEGATE_BACKEND_URL`) resolves the backend, also set `DELEGATE_ORG_SLUG` and `DELEGATE_TENANT_SLUG`. These are the human-readable org/tenant names, not the GUIDs. Without the slugs, init fails with `env="alpha" requires org/tenant slugs`. To skip the slugs, set `DELEGATE_BACKEND_URL` instead. Each variable also accepts the bare spelling (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_SLUG`, `TENANT_SLUG`) as a fallback. Prefer the `DELEGATE_` spelling in a shared environment, because the bare names collide with what other tooling (npm, Vault, Terraform) commonly exports.
 - **Saved login** — a prior `npx @uipath/delegate-cli login --env <env>` that wrote `~/.aria/sdk-auth.json`. The host reads and refreshes this file itself when no token is supplied. This agent does not parse that file in Python, so auth-freshness logic lives in exactly one place. The saved login already carries the slugs, so `DELEGATE_ORG_SLUG` / `DELEGATE_TENANT_SLUG` are not needed.
 
-coder_eval sends these values to the host as its `auth` init option, on stdin. It also removes the host's own variable names (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`, `BACKEND_URL`) and `DELEGATE_AUTH_TOKEN` from the host's environment. So the agent's shell commands cannot read the token, and a variable that another tool exports does not change where the host connects. The `auth` init option needs a `@uipath/delegate-stdio` release that accepts it: version 1.202.1 and older ignore it, and then init fails with `Auth required` unless a saved login exists.
+coder_eval sends these values to the host as its `auth` init option, on stdin. It also removes the host's own variable names (`AUTH_TOKEN`, `TENANT_ID`, `ORG_ID`, `ORG_LOGICAL_NAME`, `TENANT_NAME`, `BACKEND_URL`) and `DELEGATE_AUTH_TOKEN` from the host's environment. So the agent's shell commands cannot read the token, and a variable that another tool exports does not change where the host connects.
 
 The host also reads its own advanced variables directly, such as `DELEGATE_AUTH_TOKEN_FILE` (a token file that an external process keeps fresh) and `DELEGATE_STDIO_VERBOSE=1` (trace every frame to stderr). See the [package README](https://www.npmjs.com/package/@uipath/delegate-stdio).
 

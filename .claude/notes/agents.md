@@ -751,9 +751,11 @@ release adding an unclassified field fails loudly instead of silently passing th
 `DelegateAgent` drives UiPath Autopilot's Delegate agent: reasoning in the UiPath backend, tools run
 locally. It spawns the host from the public `@uipath/delegate-stdio` npm package
 (`dist/delegate_stdio.mjs`), which pulls in `@uipath/delegate-sdk` and the interop binaries. The
-package README is the wire-protocol SSOT. Every frame shape the adapter reads was confirmed against a
-live `1.202.1` transcript; `tests/test_delegate_agent.py`'s frame builders replay those shapes. (An
-earlier first-party `delegate_host.mjs` wrapper is gone; see git history.)
+package README is the wire-protocol SSOT. `agents/delegate/package.json` sets the floor at `1.203.0`, the
+first release with the `auth` init option and the `usage` frame (UiPath/Autopilot#6656). The other frame
+shapes were confirmed against a live `1.202.1` transcript; `tests/test_delegate_agent.py`'s frame
+builders replay those shapes. (An earlier first-party `delegate_host.mjs` wrapper is gone; see git
+history.)
 
 **Auth goes to the host as the `auth` init option, not through its env.** `_env` reads the
 `DELEGATE_*` name first, then the bare `AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` /
@@ -762,8 +764,8 @@ host's own names (`ORG_LOGICAL_NAME`, `BACKEND_URL`, …): bare names collide wi
 secrets use the `DELEGATE_*` names. `_HOST_ENV_REMOVED` strips the host's names and the token from the
 host env, because the agent's shells inherit it (token leak to code under test) and a stray
 `BACKEND_URL` would reroute the host. A refresh source still writes the fresh token into the host's
-own `process.env.AUTH_TOKEN`. An older host ignores the option and fails init with `Auth required`;
-`_INIT_CONFIG_ERROR_HINT` names our variables beside the host's message. `env=<slug>` without org/tenant
+own `process.env.AUTH_TOKEN`. `_INIT_CONFIG_ERROR_HINT` names our variables beside the host's message,
+which names the host's own. `env=<slug>` without org/tenant
 slugs fails init.
 
 **`LLMGW_*` leaves the host env only when a token file is set.** Without a token file, the host's
@@ -789,7 +791,7 @@ opens; `len(turnUsages)` from the `result` then replaces the estimate as `num_tu
 when it arrives. Ordering (from SDK/backend source, not a live transcript): call N's `usage` frame
 always precedes the `tool_result` that opens call N+1. The frame is NOT a call boundary — it arrives
 before its call's tools run — so the cap stays on "the previous call's tools have all returned". The
-adapter warns when a cut turn had finished calls but no usage (an old host).
+adapter warns when a cut turn had finished calls but no usage.
 
 **One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one

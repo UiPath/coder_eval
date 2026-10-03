@@ -4,6 +4,6 @@
   "description": "npm install target for the delegate agent's Node prerequisite (@uipath/delegate-stdio, which pulls in @uipath/delegate-sdk). coder_eval finds an install here from any cwd; a global `npm install -g` is found too.",
   "type": "module",
   "dependencies": {
-    "@uipath/delegate-stdio": "^1.202.1"
+    "@uipath/delegate-stdio": "^1.203.0"
   }
 }

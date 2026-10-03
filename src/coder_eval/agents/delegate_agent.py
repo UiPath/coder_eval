@@ -130,8 +130,7 @@ _INIT_CONFIG_ERROR_HINT = (
     "coder_eval sends the auth and the org/tenant slugs as the host's `auth` init option, read from "
     + "DELEGATE_AUTH_TOKEN / DELEGATE_TENANT_ID / DELEGATE_ORG_ID / DELEGATE_ORG_SLUG / DELEGATE_TENANT_SLUG "
     + "(or the same names without DELEGATE_), and keeps the host's own AUTH_TOKEN / TENANT_ID / ORG_ID / "
-    + "ORG_LOGICAL_NAME / TENANT_NAME out of its environment. A @uipath/delegate-stdio without the `auth` "
-    + "init option ignores it. See docs/agents/DELEGATE.md."
+    + "ORG_LOGICAL_NAME / TENANT_NAME out of its environment. See docs/agents/DELEGATE.md."
 )
 """Appended to a config-class init error, whose host message names the host's own variables."""
 
@@ -996,8 +995,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         elif state.api_calls > 1:
             logger.warning(
                 "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for its %d "
-                + "finished model call(s) are unknown (a @uipath/delegate-stdio without per-call usage "
-                + "frames reports usage only on its result frame, which a cut turn never gets)",
+                + "finished model call(s) are unknown",
                 status.value,
                 state.api_calls - 1,
             )
