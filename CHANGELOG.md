@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.12.10 (2026-10-03)
+
+### Bug Fixes
+
+- **antigravity**: Enforce tool lists, non-interactive commands, bounded polling
+  ([#215](https://github.com/UiPath/coder_eval/pull/215),
+  [`7a5a4d0`](https://github.com/UiPath/coder_eval/commit/7a5a4d03ff962b7e47a10c28051b0ca286e2a046))
+
+- **cli-called**: Report a zero-match max_count: 0 guard as unproven
+  ([#205](https://github.com/UiPath/coder_eval/pull/205),
+  [`33bc3d7`](https://github.com/UiPath/coder_eval/commit/33bc3d70bd988a522801d75900aeb53ef8400225))
+
+### Chores
+
+- **deps**: Bump urllib3 2.8.0 and virtualenv 21.14.2 to clear pip-audit
+  ([#215](https://github.com/UiPath/coder_eval/pull/215),
+  [`7a5a4d0`](https://github.com/UiPath/coder_eval/commit/7a5a4d03ff962b7e47a10c28051b0ca286e2a046))
+
+
 ## v0.12.9 (2026-09-29)
 
 ### Bug Fixes
