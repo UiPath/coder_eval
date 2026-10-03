@@ -148,9 +148,10 @@ _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP: dict[str, str] = {
     "AskUserQuestion": "ask_question",
 }
 
-# Kept on under any allowlist: `finish` is how a turn returns structured
-# output, not a capability an allowlist is meant to grant or withhold.
-_ALWAYS_ENABLED_TOOLS: frozenset[str] = frozenset({"finish"})
+# Kept on under any allowlist: `finish` returns a turn's structured output and
+# `schedule` is how the model waits on a backgrounded command. Neither is a
+# capability an allowlist is meant to grant or withhold.
+_ALWAYS_ENABLED_TOOLS: frozenset[str] = frozenset({"finish", "schedule"})
 
 # Set on every run_command unless the environment already sets them, so a
 # command that would stop to ask (`npx` installing a package, git credentials,

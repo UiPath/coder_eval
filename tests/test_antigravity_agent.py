@@ -1536,7 +1536,7 @@ def test_tool_capabilities_none_without_tool_lists():
 
 
 def test_allowed_tools_map_to_enabled_builtins():
-    """The default experiment allowlist enables exactly the matching builtins, plus `finish`.
+    """The default experiment allowlist enables exactly the matching builtins, plus `finish` and `schedule`.
 
     `Skill` has no builtin (skills load through skills_paths) and is skipped; subagents,
     web search and the rest stay off, as they do for Claude Code under the same list.
@@ -1549,6 +1549,7 @@ def test_allowed_tools_map_to_enabled_builtins():
         "find_file",
         "finish",
         "run_command",
+        "schedule",
         "search_directory",
         "view_file",
     ]
@@ -1558,7 +1559,7 @@ def test_allowed_tools_map_to_enabled_builtins():
 def test_allowed_task_keeps_subagents():
     caps = _capabilities(allowed_tools=["Bash", "Task"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "start_subagent", "finish"}
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "start_subagent", "finish", "schedule"}
     assert caps.enable_subagents is True
 
 
@@ -1573,7 +1574,7 @@ def test_disallowed_tools_are_removed_from_the_allowlist():
     """The SDK takes an allowlist OR a denylist, so with both the denied tools leave the allowlist."""
     caps = _capabilities(allowed_tools=["Bash", "Read", "Task"], disallowed_tools=["Task"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish"}
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish", "schedule"}
     assert caps.enable_subagents is False
 
 
@@ -1594,7 +1595,12 @@ async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_pat
 
     await _agent(allowed_tools=["Bash", "Read"]).start(str(tmp_path))
 
-    assert {t.value for t in configs[0].capabilities.enabled_tools} == {"run_command", "view_file", "finish"}
+    assert {t.value for t in configs[0].capabilities.enabled_tools} == {
+        "run_command",
+        "view_file",
+        "finish",
+        "schedule",
+    }
 
 
 def test_installed_sdk_accepts_the_tool_capabilities():
@@ -1602,7 +1608,8 @@ def test_installed_sdk_accepts_the_tool_capabilities():
     every mapped name is a real builtin, so a renamed tool fails here, not live."""
     types = pytest.importorskip("google.antigravity").types
 
-    assert set(agent_module._CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.values()) <= {t.value for t in types.BuiltinTools}
+    mapped = set(agent_module._CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.values()) | agent_module._ALWAYS_ENABLED_TOOLS
+    assert mapped <= {t.value for t in types.BuiltinTools}
     caps = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])._tool_capabilities(types)
     assert isinstance(caps, types.CapabilitiesConfig)
     assert types.BuiltinTools.START_SUBAGENT not in caps.enabled_tools

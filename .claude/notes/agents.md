@@ -464,7 +464,12 @@ after the model had already finished. `finalize` force-closes them as unresolved
 way it confines Claude Code. Without it Antigravity ran with every builtin, including
 `start_subagent` and `search_web`, under a list that gave Claude Code neither. `Skill` and
 `TodoWrite` have no builtin (skills load through `skills_paths`) and are skipped. `finish`
-stays on under any allowlist: it returns structured output, not a capability.
+and `schedule` stay on under any allowlist: `finish` returns structured output, and
+`schedule` is the timer the model sleeps on while a backgrounded `run_command` finishes.
+Without `schedule`, Gemini re-checks the background task every few seconds and each check
+is a model call against `max_turns`: on the SkillsBench Gemini 4-arm campaign mean turns
+rose 36.8 → 50.2 and max-turn rows 4 → 16 on the same 110 rows, and the skill arms were hit
+2-3x harder than baseline. With `schedule` on they came back to 35.4 and 1.
 `enable_subagents` is a separate switch from the toolset and follows whether
 `start_subagent` survives. The SDK takes an allowlist OR a denylist, so with both set the
 denied tools are removed from the allowlist.
