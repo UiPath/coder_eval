@@ -753,9 +753,9 @@ locally. It spawns the host from the public `@uipath/delegate-stdio` npm package
 (`dist/delegate_stdio.mjs`), which pulls in `@uipath/delegate-sdk` and the interop binaries. The
 package README is the wire-protocol SSOT. `agents/delegate/package.json` sets the floor at `1.203.0`, the
 first release with the `auth` init option and the `usage` frame (UiPath/Autopilot#6656). The other frame
-shapes were confirmed against a live `1.202.1` transcript; `tests/test_delegate_agent.py`'s frame
-builders replay those shapes. (An earlier first-party `delegate_host.mjs` wrapper is gone; see git
-history.)
+shapes were confirmed against a live `1.202.1` transcript; the frame builders in
+`tests/_fixtures/golden_streams/delegate_fixtures.py` replay those shapes. (An earlier first-party
+`delegate_host.mjs` wrapper is gone; see git history.)
 
 **Auth goes to the host as the `auth` init option, not through its env.** `_env` reads the
 `DELEGATE_*` name first, then the bare `AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` /
@@ -875,14 +875,13 @@ un-mirrored gap, with the same caveat comment). The two tables can price the SAM
 differently until someone reconciles them — a known, pre-existing state, not something this port
 introduced or should silently "fix" by picking one number over the other.
 
-### Delegate agent golden-master and timing-identity coverage
+### Delegate agent golden-master coverage
 
-`AgentKind.DELEGATE` is excluded from `tests/test_agent_golden_master.py`'s `_NO_GOLDEN_COVERAGE`
-allowlist rather than given fixture scenarios: a golden snapshot pins a byte-identical `TurnRecord`
-for a scripted event stream. The frame shapes are now confirmed live, so record real scenarios to
-lift this; until then `tests/test_delegate_agent.py` replays the shapes.
-
-This does NOT extend to `tests/test_timing_identity_contract.py::test_delegate_buckets_tile_the_turn`,
-which IS a real, unexempted case: the ms-exact four-bucket identity depends only on this agent's own
-`close_window`/`_finalize_turn` code (a single window per turn, opened at `_TurnState.__init__` and
-closed at finalize), never on the SDK's field names, so there is nothing unverified for it to guess at.
+`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for four
+scenarios: a tool call, a `max_turns` cut, an `error`-frame crash and an orphaned tool. The `event`,
+`result` and `error` frames mirror the live `1.202.1` transcript. The `usage` frame and the `result`
+fields new in `1.203.0` follow the host source of UiPath/Autopilot#6656 (`src/usage.ts` and
+`handleSend`): every usage object carries all four buckets with `input_tokens` exclusive of cache,
+the frames flush before each event and before the `result` or `error`, and `result.usage` is the sum
+of `turnUsages`. No live `1.203.0` transcript has been compared yet. If one differs, change the
+builders and regenerate the snapshots with `GOLDEN_REGEN=1`.

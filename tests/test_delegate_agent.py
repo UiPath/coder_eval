@@ -3,7 +3,9 @@
 The Node host is never spawned for real: ``asyncio.create_subprocess_exec`` is
 patched with a fake process whose stdout/stderr are pre-scripted byte lines and
 whose stdin captures every write for assertion, mirroring this repo's existing
-CLI-agent test convention (see ``tests/test_opencode_agent.py``).
+CLI-agent test convention (see ``tests/test_opencode_agent.py``). The frame
+builders and the fake process live in
+``tests/_fixtures/golden_streams/delegate_fixtures.py``, beside the golden scenarios.
 """
 
 from __future__ import annotations
@@ -27,95 +29,17 @@ from coder_eval.errors.categorization import categorize_error
 from coder_eval.models import AgentKind, DelegateAgentConfig
 from coder_eval.reports.markdown import collect_agent_settings_rows
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
-
-
-def _line(obj: dict[str, Any]) -> bytes:
-    return (json.dumps(obj) + "\n").encode("utf-8")
-
-
-def _ev(**event: Any) -> bytes:
-    """One ``event`` frame wrapping an SDK event, as ``delegate-stdio`` writes it."""
-    return _line({"type": "event", "event": event})
-
-
-def _result(**fields: Any) -> bytes:
-    return _line({"type": "result", **fields})
-
-
-def _usage(input_tokens: int, output_tokens: int) -> bytes:
-    """One model call's ``usage`` frame, written before any tool result that call caused."""
-    return _line({"type": "usage", "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})
-
-
-def _tool_call(tool_id: str, name: str = "shell", /, **args: Any) -> bytes:
-    return _ev(type="tool_call", toolId=tool_id, toolName=name, toolArgs=args, toolStatus="pending")
-
-
-def _tool_result(tool_id: str, content: str = "ok", *, status: str = "completed") -> bytes:
-    return _ev(
-        type="tool_result",
-        toolId=tool_id,
-        toolName="shell",
-        toolResult={"responseType": "success", "content": content},
-        toolStatus=status,
-    )
-
-
-class _FakeStreamReader:
-    def __init__(self, lines: list[bytes], *, hang_after: bool = False) -> None:
-        self._lines = list(lines)
-        self._hang_after = hang_after
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        if self._hang_after:
-            # Never resolves -- for exercising a timeout that elapses WHILE
-            # blocked reading, not just the loop's own top-of-iteration
-            # pre-check.
-            await asyncio.Event().wait()
-        return b""
-
-
-class _FakeStdin:
-    def __init__(self) -> None:
-        self.written: list[dict[str, Any]] = []
-        self.closed = False
-
-    def write(self, data: bytes) -> None:
-        self.written.append(json.loads(data.decode("utf-8").strip()))
-
-    async def drain(self) -> None:
-        return None
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeProcess:
-    def __init__(
-        self, stdout_lines: list[bytes], stderr_lines: list[bytes] | None = None, *, hang_after: bool = False
-    ) -> None:
-        self.stdin = _FakeStdin()
-        self.stdout = _FakeStreamReader(stdout_lines, hang_after=hang_after)
-        self.stderr = _FakeStreamReader(stderr_lines or [])
-        self.returncode: int | None = None
-        self.pid = 4242
-        self._killed = False
-        self.spawn_args: tuple[Any, ...] = ()
-        self.spawn_kwargs: dict[str, Any] = {}
-
-    async def wait(self) -> int:
-        while self.returncode is None:
-            await asyncio.sleep(0.01)
-        return self.returncode
-
-    def kill(self) -> None:
-        self._killed = True
-        self.returncode = -9
-
-    def terminate(self) -> None:
-        self.kill()
+from tests._fixtures.golden_streams.delegate_fixtures import (
+    _ev,
+    _FakeProcess,
+    _host_result,
+    _line,
+    _result,
+    _tool_call,
+    _tool_result,
+    _totals,
+    _usage,
+)
 
 
 @pytest.fixture
@@ -995,6 +919,28 @@ class TestCommunicate:
         assert record.token_usage.output_tokens == expected_output
         assert record.token_usage.cache_read_input_tokens == expected_cache_read
         assert record.token_usage.cache_creation_input_tokens == expected_cache_write
+
+    async def test_reconciliation_invariant(self, patch_exec, tmp_path):
+        """Summing the four buckets across messages must equal token_usage exactly."""
+        events = [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(100, 20, cache_read=40),
+            _tool_call("a"),
+            _tool_result("a"),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(50, 30, cache_write=10),
+            _host_result("done", [_totals(100, 20, cache_read=40), _totals(50, 30, cache_write=10)]),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+
+        usage = record.token_usage
+        assert usage is not None
+        assert (usage.cache_read_input_tokens, usage.cache_creation_input_tokens) == (40, 10)
+        assert sum(m.input_tokens for m in record.messages) == usage.uncached_input_tokens
+        assert sum(m.output_tokens for m in record.messages) == usage.output_tokens
+        assert sum(m.cache_creation_tokens for m in record.messages) == usage.cache_creation_input_tokens
+        assert sum(m.cache_read_tokens for m in record.messages) == usage.cache_read_input_tokens
 
     async def test_usage_all_zero_is_none_and_warns(self, patch_exec, tmp_path, caplog):
         events = [_result(response="done", usage={"weird_bucket": 3})]

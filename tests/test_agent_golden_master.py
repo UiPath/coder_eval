@@ -27,6 +27,7 @@ from coder_eval.models import AgentKind
 from tests._fixtures.golden_streams import assert_reconciliation, assert_timing_captured, scrub
 from tests._fixtures.golden_streams.antigravity_fixtures import ANTIGRAVITY_SCENARIOS, run_antigravity_scenario
 from tests._fixtures.golden_streams.claude_fixtures import CLAUDE_SCENARIOS, run_claude_scenario
+from tests._fixtures.golden_streams.delegate_fixtures import DELEGATE_SCENARIOS, run_delegate_scenario
 from tests._fixtures.golden_streams.opencode_fixtures import OPENCODE_SCENARIOS, run_opencode_scenario
 from tests._fixtures.golden_streams.pi_fixtures import PI_SCENARIOS, run_pi_scenario
 
@@ -222,6 +223,26 @@ async def test_pi_reconciliation_invariant(scenario, tmp_path):
     assert_reconciliation(await run_pi_scenario(scenario, str(tmp_path)))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", DELEGATE_SCENARIOS, ids=lambda s: s.name)
+async def test_delegate_golden(scenario, tmp_path):
+    raw = await run_delegate_scenario(scenario, str(tmp_path))
+    assert_reconciliation(raw)
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("delegate", scenario.name),
+        check_identity=_check_identity("delegate", scenario.name),
+    )
+    _compare_or_regen(f"delegate_{scenario.name}", scrub(raw))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", DELEGATE_SCENARIOS, ids=lambda s: s.name)
+async def test_delegate_reconciliation_invariant(scenario, tmp_path):
+    """The per-bucket reconciliation invariant holds for every Delegate snapshot."""
+    assert_reconciliation(await run_delegate_scenario(scenario, str(tmp_path)))
+
+
 # The ONE place a harness is listed for golden coverage. Keyed on AgentKind, not register_builtins, which
 # exposes no set of built-ins.
 SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
@@ -230,14 +251,13 @@ SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
     AgentKind.ANTIGRAVITY: ANTIGRAVITY_SCENARIOS,
     AgentKind.OPENCODE: OPENCODE_SCENARIOS,
     AgentKind.PI: PI_SCENARIOS,
+    AgentKind.DELEGATE: DELEGATE_SCENARIOS,
 }
 
 # An ALLOWLIST of exclusions: a new AgentKind member fails the coverage test until someone decides which it is.
 _NO_GOLDEN_COVERAGE: dict[AgentKind, str] = {
     AgentKind.NONE: "agentless backend — runs no model, streams nothing",
     AgentKind.UNKNOWN: "sentinel for an undeterminable type — never registered",
-    # Rationale: .claude/notes/agents.md § Delegate agent golden-master and timing-identity coverage
-    AgentKind.DELEGATE: "no recorded delegate-stdio scenarios yet — tests/test_delegate_agent.py replays the frames",
 }
 
 
