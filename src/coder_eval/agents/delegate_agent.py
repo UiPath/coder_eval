@@ -580,12 +580,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
     def _build_init_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
+            **self.config.sdk_options,
             "workingDirectory": self.working_directory,
             "enableComputerUse": self.config.enable_computer_use,
         }
         if self.config.model:
             options["model"] = self.config.model
-        options.update(self.config.sdk_options)
         if self.config.project_id:
             options["projectId"] = self.config.project_id
         if self.config.session_id:

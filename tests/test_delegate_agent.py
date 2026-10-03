@@ -260,6 +260,20 @@ class TestStart:
         rows = dict(collect_agent_settings_rows(agent.get_sdk_options() or {}, is_sdk=True))
         assert (rows["Model"], rows["Effort"]) == ("virtuoso-1-5", "high")
 
+    async def test_framework_owned_init_keys_win_over_sdk_options(self, patch_exec, tmp_path):
+        """A writer that skips validation (``model_copy``) still cannot move the cwd or swap the model."""
+        proc = patch_exec([_line({"type": "init_ok"})])
+        config = _config(model="virtuoso-1-5").model_copy(
+            update={"sdk_options": {"effort": "high", "workingDirectory": "/", "model": "other"}}
+        )
+        await DelegateAgent(config, task_id="t1").start(str(tmp_path))
+        options = proc.stdin.written[0]["options"]
+        assert (options["workingDirectory"], options["model"], options["effort"]) == (
+            str(tmp_path),
+            "virtuoso-1-5",
+            "high",
+        )
+
     async def test_enable_computer_use_default_false(self, patch_exec, tmp_path):
         _agent, proc = await _started_agent(patch_exec, [], tmp_path)
         assert proc.stdin.written[0]["options"]["enableComputerUse"] is False
