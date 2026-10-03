@@ -434,7 +434,10 @@ agent had produced; bounding it only by a fixed cycle count disconnected from `t
 path unreachable — the watchdog always wins, and the same spurious-orphan turn burns the
 full turn timeout before crashing with zero criteria evaluated.
 
-The cycle cap is the SOLE bound when a task sets no timeout at all. It is deliberately not
+The cycle cap applies alongside that deadline, whichever comes first, and is the SOLE
+bound when a task sets no timeout at all. Under a long `turn_timeout` (1800 s gives a
+1440 s deadline) the deadline alone let a never-ending command (a dev server, an
+unanswered prompt) idle the turn for 24 minutes. It is deliberately not
 "break after N consecutive empty polls": `receive_steps()` returns identically empty
 whether a backgrounded job is still running or will never resolve, and there is no signal
 that tells the two apart except waiting. A count small enough to matter would abort real
@@ -446,6 +449,36 @@ succeeding); one large enough to be safe barely improves on a flat cap.
 answer in a headless eval), CANCELED and UNKNOWN — none of which the closed set ever marks
 done, and none of which the poll loop should wait out, since they will never become DONE
 on their own.
+
+It is also an allowlist on the TOOL: only a `run_command` can be backgrounded. Any other
+tool left ACTIVE never resolved in practice: an `edit_file` on the read-only skill mount,
+a `view_file` paged at a large `content_offset`, a `start_subagent`. In a 370-task
+SkillSpec run, 12 of 21 turns that polled to the deadline were waiting on one of those,
+after the model had already finished. `finalize` force-closes them as unresolved.
+
+## Antigravity tool allowlist
+
+`allowed_tools` / `disallowed_tools` map onto the harness's builtin toolset
+(`CapabilitiesConfig.enabled_tools` / `disabled_tools`) through
+`_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP`, so an experiment's allowlist confines Antigravity the
+way it confines Claude Code. Without it Antigravity ran with every builtin, including
+`start_subagent` and `search_web`, under a list that gave Claude Code neither. `Skill` and
+`TodoWrite` have no builtin (skills load through `skills_paths`) and are skipped. `finish`
+stays on under any allowlist: it returns structured output, not a capability.
+`enable_subagents` is a separate switch from the toolset and follows whether
+`start_subagent` survives. The SDK takes an allowlist OR a denylist, so with both set the
+denied tools are removed from the allowlist.
+
+## Antigravity non-interactive commands
+
+`run_command` runs in a real terminal: a command that blocks becomes a background task the
+model can check on and type into. A command that stops to ask (`npx` installing a missing
+package, git credentials, an apt/pip confirmation, a pager) and that the model then leaves
+behind keeps the turn waiting on a prompt no one answers. `_NONINTERACTIVE_ENV`
+(`CI`, `npm_config_yes`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND`, `PIP_NO_INPUT`,
+`PAGER`/`GIT_PAGER=cat`) rides the per-agent `env` seam, each variable only where the
+environment does not already set it, so those commands answer themselves or fail fast. It
+cannot close the terminal: a bare `read` or a server still runs until the poll cap.
 
 ## The receive_steps re-entrancy window
 

@@ -27,7 +27,7 @@ working directory — both required for an unattended eval.
 pip install 'coder-eval[antigravity]'
 ```
 
-This pulls in `google-antigravity` (pinned to `0.1.18`), whose wheel bundles the
+This pulls in `google-antigravity` (pinned to `0.1.20`), whose wheel bundles the
 platform `localharness` binary. As with the other agents the SDK is imported lazily
 — a base install without the extra still runs end-to-end; Antigravity tasks fail at
 dispatch with a clear hint to install the extra.
@@ -136,18 +136,28 @@ can't be resolved or if zero skills are discovered.
 
 ## Permissions & tools — important differences
 
-**Antigravity ignores `permission_mode`, `allowed_tools`, and `disallowed_tools`.**
-The local harness runs in a single unconditional mode: every tool call (including
-`run_command`) is approved via an allow-all policy, and file tools are restricted to
-the configured `workspaces` (the sandbox working directory plus any skill roots).
+**Antigravity ignores `permission_mode`.** The local harness runs in a single
+unconditional mode: every tool call (including `run_command`) is approved via an
+allow-all policy, and file tools are restricted to the configured `workspaces` (the
+sandbox working directory plus any skill roots).
+
+**`allowed_tools` / `disallowed_tools` are enforced** by mapping the Claude tool names
+onto the harness's builtin tools (`Bash` → `run_command`, `Read` → `view_file`, `Write` →
+`create_file`, `Edit` → `edit_file`, `Glob` → `find_file`, `Grep` → `search_directory`,
+`Task` → `start_subagent`, `WebSearch` → `search_web`, `WebFetch` → `read_url_content`).
+`Skill` has no builtin and is skipped; `finish` always stays on.
+
+`run_command` also gets non-interactive environment variables (`CI=1`,
+`npm_config_yes=true`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`,
+`PIP_NO_INPUT=1`, `PAGER=cat`), each only where the environment does not already set it.
 
 The trust boundary for an Antigravity run is therefore the **sandbox**, not the
 agent config. Run untrusted tasks under the [Docker driver](../DOCKER_ISOLATION.md);
 the `tempdir` driver is not a security boundary. This mirrors the reality that the
 `bypassPermissions`-equivalent behavior is always on for this backend.
 
-Those inherited fields still exist on the config for schema uniformity but have no
-runtime effect here — don't rely on them to gate Antigravity.
+`permission_mode` still exists on the config for schema uniformity but has no runtime
+effect here — don't rely on it to gate Antigravity.
 
 ## Telemetry
 
@@ -187,19 +197,18 @@ as every other agent.
 4. **`permission_mode` does not confine the harness.** Every mode runs
    `policy.allow_all()`; coder_eval's write boundary is the sandbox driver, and a
    headless eval has no human to approve anything.
-5. **`allowed_tools` / `disallowed_tools` are not read.** The harness runs with its
-   full builtin tool set, so an Antigravity run has tools (web search, subagents,
-   URL fetch) that the same task file denies on Claude Code and Codex.
-6. **`max_turns` is counted by the harness.** One `communicate()` is a single SDK turn
+5. **`max_turns` is counted by the harness.** One `communicate()` is a single SDK turn
    here, so the harness counts model API calls itself (a MODEL step at a new
    `step_index` opens one) and enforces the cap on the step loop. See
    [Run-Limit Parity](HARNESS_PARITY.md).
-7. **Shell commands over ~10s are moved to the background.** The localharness has a
+6. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
-   of finalizing on an idle step stream, so slow work does complete — but the wait is
-   bounded by 80% of `turn_timeout`, and a job that outlives it is force-closed as
-   `result_status: unknown` and graded as an ordinary low score rather than a timeout.
+   of finalizing on an idle step stream, so slow work does complete — but only an
+   orphaned `run_command` is waited on, the wait is bounded by 10 minutes or 80% of
+   `turn_timeout` (whichever is shorter), and a job that outlives it (typically a server
+   the model left running) is force-closed as `result_status: unknown` and graded
+   normally rather than as a timeout.
    Measured in [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Running in Docker
