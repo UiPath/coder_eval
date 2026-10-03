@@ -672,10 +672,12 @@ class EvaluationResult(BaseModel):
         description="Agent configuration used for the evaluation (from task YAML)",
     )
 
-    # SDK options (raw dump of all ClaudeAgentOptions fields including defaults)
     sdk_options: dict[str, Any] | None = Field(
         default=None,
-        description="Raw SDK options dump from ClaudeAgentOptions (all fields including defaults)",
+        description=(
+            "Options the agent sent to its SDK; the shape depends on the agent "
+            "(Claude Code: raw ClaudeAgentOptions dump; Delegate: host init options, credentials redacted)"
+        ),
     )
 
     # Artifacts
