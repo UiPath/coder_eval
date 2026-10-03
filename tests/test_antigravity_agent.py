@@ -888,10 +888,10 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
 
 
-async def test_communicate_poll_cap_also_bounds_a_turn_with_a_large_timeout(monkeypatch):
-    """The cycle cap applies alongside the timeout-derived deadline, not only when
-    no timeout is set: under a large turn_timeout (1800s gives a 1440s deadline) a
-    never-closing job stops at _MAX_BACKGROUND_POLLS instead of the deadline."""
+async def test_communicate_poll_cap_does_not_cut_short_a_job_inside_the_deadline(monkeypatch):
+    """With a turn_timeout the deadline alone bounds the wait: a solver still running
+    past _MAX_BACKGROUND_POLLS cycles is waited on until it finishes. Seen live: a MIP
+    solve that passed at 1211s was force-closed at the 10-minute cap."""
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
@@ -902,22 +902,34 @@ async def test_communicate_poll_cap_also_bounds_a_turn_with_a_large_timeout(monk
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
 
-    never_closing = [
+    started = [
         _step(
             "TOOL_CALL",
             "ACTIVE",
             target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "stuck", {"command_line": "node server.js"})],
+            tool_calls=[_tc("run_command", "solve", {"command_line": "python solve.py"})],
         ),
-        _step("TEXT_RESPONSE", "DONE", content="server started", complete=True, usage=_usage(10, 0, 1, 0)),
+        _step("TEXT_RESPONSE", "DONE", content="solver running", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
-    agent = _agent_with_steps([never_closing])
-    tr = await agent.communicate("start it", timeout=1800.0)
+    finished = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command", "solve", {"command_line": "python solve.py", "exit_code": 0, "combined_output": "ok"}
+                )
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="solved", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([started, [], [], [], [], finished])
+    tr = await agent.communicate("solve it", timeout=1800.0)
 
-    assert len(sleep_calls) == 3  # the cap, long before the 1440s deadline
+    assert len(sleep_calls) == 5
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
-    assert bash.result_status == "unknown"
-    assert tr.agent_output == "server started"
+    assert bash.result_status == "success"
 
 
 async def test_communicate_does_not_poll_a_non_command_tool_left_active(monkeypatch):

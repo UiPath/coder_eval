@@ -95,11 +95,9 @@ _RECEIVE_STEPS_REENTRY_RETRIES = 5
 # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
 
-# Cap on poll *cycles* -- the SOLE bound when a task sets no timeout at all, and
-# a backstop against a very large one (applied alongside the deadline, whichever
-# is reached first). 120 * 5s = 10 minutes, ~2x the worst real
-# backgrounded-job duration observed (60-300s). Deliberately NOT "break after N
-# consecutive empty polls".
+# Cap on poll *cycles*, the bound only when a task sets no timeout at all; with
+# one, the deadline alone bounds the wait. 120 * 5s = 10 minutes. Deliberately
+# NOT "break after N consecutive empty polls".
 # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _MAX_BACKGROUND_POLLS = 120
 
@@ -639,8 +637,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         and not state.max_turns_hit
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
-                        and poll_count < _MAX_BACKGROUND_POLLS
-                        and (poll_deadline is None or time.monotonic() < poll_deadline)
+                        and (
+                            poll_count < _MAX_BACKGROUND_POLLS
+                            if poll_deadline is None
+                            else time.monotonic() < poll_deadline
+                        )
                     ):
                         poll_count += 1
                         self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
@@ -666,9 +667,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         # stop/timeout: the call is force-closed as unresolved and
                         # the turn is still graded normally on everything else.
                         bound = (
-                            f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
-                            if poll_count >= _MAX_BACKGROUND_POLLS
-                            else f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
+                            f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
+                            if poll_deadline is not None
+                            else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
                         )
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)

@@ -205,8 +205,8 @@ as every other agent.
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
    of finalizing on an idle step stream, so slow work does complete — but only an
-   orphaned `run_command` is waited on, the wait is bounded by 10 minutes or 80% of
-   `turn_timeout` (whichever is shorter), and a job that outlives it (typically a server
+   orphaned `run_command` is waited on, the wait is bounded by 80% of `turn_timeout`
+   (10 minutes when the task sets none), and a job that outlives it (typically a server
    the model left running) is force-closed as `result_status: unknown` and graded
    normally rather than as a timeout.
    Measured in [Run-Limit Parity](HARNESS_PARITY.md).

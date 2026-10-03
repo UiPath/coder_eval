@@ -434,10 +434,13 @@ agent had produced; bounding it only by a fixed cycle count disconnected from `t
 path unreachable — the watchdog always wins, and the same spurious-orphan turn burns the
 full turn timeout before crashing with zero criteria evaluated.
 
-The cycle cap applies alongside that deadline, whichever comes first, and is the SOLE
-bound when a task sets no timeout at all. Under a long `turn_timeout` (1800 s gives a
-1440 s deadline) the deadline alone let a never-ending command (a dev server, an
-unanswered prompt) idle the turn for 24 minutes. It is deliberately not
+The cycle cap (120 × 5 s) bounds the wait only when a task sets no timeout at all. With
+one, the deadline alone bounds it, so a never-ending command (a dev server, an unanswered
+prompt) can idle up to 80% of the turn, but a slow job gets the time the task author
+budgeted for it. Applying the cap under a timeout as well force-closed real solvers and
+simulations at 10 minutes: on the SkillsBench Gemini 4-arm campaign it ended 22 of 348
+rows, 4 of which had passed with the deadline alone (an exam-scheduling MIP solve that
+passed at 1211 s among them). It is deliberately not
 "break after N consecutive empty polls": `receive_steps()` returns identically empty
 whether a backgrounded job is still running or will never resolve, and there is no signal
 that tells the two apart except waiting. A count small enough to matter would abort real
@@ -489,7 +492,7 @@ behind keeps the turn waiting on a prompt no one answers. `_NONINTERACTIVE_ENV`
 (`CI`, `npm_config_yes`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND`, `PIP_NO_INPUT`,
 `PAGER`/`GIT_PAGER=cat`) rides the per-agent `env` seam, each variable only where the
 environment does not already set it, so those commands answer themselves or fail fast. It
-cannot close the terminal: a bare `read` or a server still runs until the poll cap.
+cannot close the terminal: a bare `read` or a server still runs until the poll deadline.
 
 ## The receive_steps re-entrancy window
 
