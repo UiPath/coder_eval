@@ -470,6 +470,12 @@ Without `schedule`, Gemini re-checks the background task every few seconds and e
 is a model call against `max_turns`: on the SkillsBench Gemini 4-arm campaign mean turns
 rose 36.8 → 50.2 and max-turn rows 4 → 16 on the same 110 rows, and the skill arms were hit
 2-3x harder than baseline. With `schedule` on they came back to 35.4 and 1.
+
+An allowlist only narrows the harness's default toolset (`BuiltinTools.default()`). `Glob`,
+`Grep` and `LS` map to `find_file`, `search_directory` and `list_directory`, which the
+harness ships off, so an allowlist naming them leaves them off. Turned on, Gemini used them
+in place of shell scripts (1,429 calls in 333 of 348 SkillsBench rows, none before), often
+one search per turn.
 `enable_subagents` is a separate switch from the toolset and follows whether
 `start_subagent` survives. The SDK takes an allowlist OR a denylist, so with both set the
 denied tools are removed from the allowlist.

@@ -371,9 +371,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         ``allowed_tools`` / ``disallowed_tools``, or ``None`` when neither is set.
 
         Names are mapped through ``_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP``; names with no
-        Antigravity builtin (``Skill``, ``TodoWrite``, MCP tools) are skipped. The
-        SDK takes an allowlist OR a denylist, so with both set the denied tools are
-        removed from the allowlist.
+        Antigravity builtin (``Skill``, ``TodoWrite``, MCP tools) are skipped. An
+        allowlist only narrows the harness's default toolset, so ``Glob`` / ``Grep`` /
+        ``LS`` never turn on the tools the harness ships off (``find_file``,
+        ``search_directory``, ``list_directory``). The SDK takes an allowlist OR a
+        denylist, so with both set the denied tools are removed from the allowlist.
 
         Rationale: .claude/notes/agents.md § Antigravity tool allowlist
         """
@@ -381,6 +383,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         if not allowed and not disallowed:
             return None
         builtin = {t.value for t in types.BuiltinTools}
+        harness_default = {t.value for t in types.BuiltinTools.default()}
 
         def to_builtin(names: list[str] | None) -> set[str]:
             mapped = {_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.get(n, n) for n in names or []}
@@ -390,7 +393,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # whether `start_subagent` survives the filter.
         subagent = types.BuiltinTools.START_SUBAGENT.value
         if allowed:
-            enabled = (to_builtin(allowed) | _ALWAYS_ENABLED_TOOLS) - to_builtin(disallowed)
+            enabled = ((to_builtin(allowed) & harness_default) | _ALWAYS_ENABLED_TOOLS) - to_builtin(disallowed)
             self._log.debug("Enabled builtin tools: %s", ", ".join(sorted(enabled)))
             return types.CapabilitiesConfig(
                 enabled_tools=[types.BuiltinTools(t) for t in sorted(enabled)],

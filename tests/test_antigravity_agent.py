@@ -508,6 +508,11 @@ class _FakeBuiltinTools(enum.StrEnum):
     SCHEDULE = "schedule"
     FINISH = "finish"
 
+    @classmethod
+    def default(cls) -> list["_FakeBuiltinTools"]:
+        off = {cls.ASK_QUESTION, cls.LIST_DIR, cls.SEARCH_DIR, cls.FIND_FILE}
+        return [t for t in cls if t not in off]
+
 
 def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     """Stub ``google.antigravity`` in sys.modules so ``start()`` runs without the extra.
@@ -1536,24 +1541,29 @@ def test_tool_capabilities_none_without_tool_lists():
 
 
 def test_allowed_tools_map_to_enabled_builtins():
-    """The default experiment allowlist enables exactly the matching builtins, plus `finish` and `schedule`.
+    """The default experiment allowlist enables exactly the matching default builtins, plus `finish` and `schedule`.
 
-    `Skill` has no builtin (skills load through skills_paths) and is skipped; subagents,
-    web search and the rest stay off, as they do for Claude Code under the same list.
+    `Skill` has no builtin (skills load through skills_paths) and is skipped; `Glob` / `Grep`
+    map to tools the harness ships off, so they stay off; subagents, web search and the rest
+    stay off, as they do for Claude Code under the same list.
     """
     caps = _capabilities(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])
 
     assert [t.value for t in caps.enabled_tools] == [
         "create_file",
         "edit_file",
-        "find_file",
         "finish",
         "run_command",
         "schedule",
-        "search_directory",
         "view_file",
     ]
     assert caps.enable_subagents is False
+
+
+def test_allowlist_never_enables_tools_the_harness_ships_off():
+    caps = _capabilities(allowed_tools=["Bash", "Glob", "Grep", "LS", "AskUserQuestion"])
+
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "finish", "schedule"}
 
 
 def test_allowed_task_keeps_subagents():
@@ -1613,6 +1623,7 @@ def test_installed_sdk_accepts_the_tool_capabilities():
     caps = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])._tool_capabilities(types)
     assert isinstance(caps, types.CapabilitiesConfig)
     assert types.BuiltinTools.START_SUBAGENT not in caps.enabled_tools
+    assert types.BuiltinTools.FIND_FILE not in caps.enabled_tools
 
 
 # --- max_turns cap -------------------------------------------------------------------
