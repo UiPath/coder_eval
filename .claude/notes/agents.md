@@ -434,10 +434,13 @@ agent had produced; bounding it only by a fixed cycle count disconnected from `t
 path unreachable — the watchdog always wins, and the same spurious-orphan turn burns the
 full turn timeout before crashing with zero criteria evaluated.
 
-The cycle cap applies alongside that deadline, whichever comes first, and is the SOLE
-bound when a task sets no timeout at all. Under a long `turn_timeout` (1800 s gives a
-1440 s deadline) the deadline alone let a never-ending command (a dev server, an
-unanswered prompt) idle the turn for 24 minutes. It is deliberately not
+The cycle cap (120 × 5 s) bounds the wait only when a task sets no timeout at all. With
+one, the deadline alone bounds it, so a never-ending command (a dev server, an unanswered
+prompt) can idle up to 80% of the turn, but a slow job gets the time the task author
+budgeted for it. Applying the cap under a timeout as well force-closed real solvers and
+simulations at 10 minutes: on the SkillsBench Gemini 4-arm campaign it ended 22 of 348
+rows, 4 of which had passed with the deadline alone (an exam-scheduling MIP solve that
+passed at 1211 s among them). It is deliberately not
 "break after N consecutive empty polls": `receive_steps()` returns identically empty
 whether a backgrounded job is still running or will never resolve, and there is no signal
 that tells the two apart except waiting. A count small enough to matter would abort real
@@ -464,10 +467,32 @@ after the model had already finished. `finalize` force-closes them as unresolved
 way it confines Claude Code. Without it Antigravity ran with every builtin, including
 `start_subagent` and `search_web`, under a list that gave Claude Code neither. `Skill` and
 `TodoWrite` have no builtin (skills load through `skills_paths`) and are skipped. `finish`
-stays on under any allowlist: it returns structured output, not a capability.
-`enable_subagents` is a separate switch from the toolset and follows whether
-`start_subagent` survives. The SDK takes an allowlist OR a denylist, so with both set the
-denied tools are removed from the allowlist.
+and `schedule` stay on under any allowlist: `finish` returns structured output, and
+`schedule` is the timer the model sleeps on while a backgrounded `run_command` finishes.
+Without `schedule`, Gemini re-checks the background task every few seconds and each check
+is a model call against `max_turns`: on the SkillsBench Gemini 4-arm campaign mean turns
+rose 36.8 → 50.2 and max-turn rows 4 → 16 on the same 110 rows, and the skill arms were hit
+2-3x harder than baseline. With `schedule` on they came back to 35.4 and 1.
+
+An allowlist only narrows the harness's default toolset (`BuiltinTools.default()`). `Glob`,
+`Grep` and `LS` map to `find_file`, `search_directory` and `list_directory`, which the
+harness ships off, so an allowlist naming them leaves them off. Turned on, Gemini used them
+in place of shell scripts (1,429 calls in 333 of 348 SkillsBench rows, none before), often
+one search per turn.
+
+`start_subagent` also stays on under any allowlist, because the harness builds its system
+prompt from the toolset: with `start_subagent` off it drops the whole subagents section
+(4,801 → 2,783 characters), and with it the prompt's only "you do NOT need to poll ... you
+will be notified" guidance. With it on, the system prompt is byte-identical to 0.12.9's.
+The section alone does not stop Gemini polling a long job with status checks: in a 48-row
+SkillsBench A/B it made 13.4 checks per row with the section and 13.7 without (8.5 on
+0.12.9). The tool descriptions are identical either way, and
+`enable_subagents` alone does not restore the section. Subagents the tool lists withhold
+(no `Task`) are denied by policy at `invoke_subagent` instead, which covers both the
+built-in `research` subagent and one the model defines with `define_subagent`; both get
+`search_web` regardless of the parent's toolset, and a parent policy on `search_web` does
+not reach a model-defined one. The SDK takes an allowlist OR a denylist, so with both set
+the denied tools are removed from the allowlist, except the always-enabled ones.
 
 ## Antigravity non-interactive commands
 
@@ -478,7 +503,7 @@ behind keeps the turn waiting on a prompt no one answers. `_NONINTERACTIVE_ENV`
 (`CI`, `npm_config_yes`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND`, `PIP_NO_INPUT`,
 `PAGER`/`GIT_PAGER=cat`) rides the per-agent `env` seam, each variable only where the
 environment does not already set it, so those commands answer themselves or fail fast. It
-cannot close the terminal: a bare `read` or a server still runs until the poll cap.
+cannot close the terminal: a bare `read` or a server still runs until the poll deadline.
 
 ## The receive_steps re-entrancy window
 
