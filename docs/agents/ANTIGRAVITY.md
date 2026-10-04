@@ -145,7 +145,9 @@ sandbox working directory plus any skill roots).
 onto the harness's builtin tools (`Bash` → `run_command`, `Read` → `view_file`, `Write` →
 `create_file`, `Edit` → `edit_file`, `Glob` → `find_file`, `Grep` → `search_directory`,
 `Task` → `start_subagent`, `WebSearch` → `search_web`, `WebFetch` → `read_url_content`).
-`Skill` has no builtin and is skipped; `finish` always stays on.
+`Skill` has no builtin and is skipped. `finish`, `schedule` and `start_subagent` always
+stay on, the last so the harness keeps its default system prompt; when the lists do not
+allow `Task`, running a subagent (`invoke_subagent`) is denied by policy instead.
 
 `run_command` also gets non-interactive environment variables (`CI=1`,
 `npm_config_yes=true`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`,
@@ -205,8 +207,8 @@ as every other agent.
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
    of finalizing on an idle step stream, so slow work does complete — but only an
-   orphaned `run_command` is waited on, the wait is bounded by 10 minutes or 80% of
-   `turn_timeout` (whichever is shorter), and a job that outlives it (typically a server
+   orphaned `run_command` is waited on, the wait is bounded by 80% of `turn_timeout`
+   (10 minutes when the task sets none), and a job that outlives it (typically a server
    the model left running) is force-closed as `result_status: unknown` and graded
    normally rather than as a timeout.
    Measured in [Run-Limit Parity](HARNESS_PARITY.md).
