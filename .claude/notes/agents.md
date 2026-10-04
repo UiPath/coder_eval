@@ -483,9 +483,10 @@ one search per turn.
 `start_subagent` also stays on under any allowlist, because the harness builds its system
 prompt from the toolset: with `start_subagent` off it drops the whole subagents section
 (4,801 → 2,783 characters), and with it the prompt's only "you do NOT need to poll ... you
-will be notified" guidance. Without that, Gemini polls a backgrounded command with status
-checks and short "liveness" timers: rows doing so rose from 1% (0.12.9) to 8-10%, and
-max-turn rows from 2 to 12 of 148. The tool descriptions are identical either way, and
+will be notified" guidance. With it on, the system prompt is byte-identical to 0.12.9's.
+The section alone does not stop Gemini polling a long job with status checks: in a 48-row
+SkillsBench A/B it made 13.4 checks per row with the section and 13.7 without (8.5 on
+0.12.9). The tool descriptions are identical either way, and
 `enable_subagents` alone does not restore the section. Subagents the tool lists withhold
 (no `Task`) are denied by policy at `invoke_subagent` instead, which covers both the
 built-in `research` subagent and one the model defines with `define_subagent`; both get
