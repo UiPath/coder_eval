@@ -73,6 +73,9 @@ EXPECTED_ROW = {
     "task_id": "char-task",
     "task_path": None,
     "teardown_ms": None,
+    "agent_wall_ms": 2500.0,
+    "setup_ms": None,
+    "grading_ms": None,
     "tool_ms": None,
     "total_cost_usd": 0.5,
     "total_tokens": 1000,
@@ -271,3 +274,30 @@ class TestExpectedTurnsKey:
         )
         d = eval_result_to_task_dict(result)
         assert d["expected_turns"] is None
+
+
+class TestAgentWallIsSplitFromEndToEnd:
+    """`duration` is end-to-end; the row also carries the agent's and the checker's share (#212)."""
+
+    def test_row_carries_setup_grading_and_agent_wall(self):
+        result = _result()
+        result.setup_ms = 14000.0
+        result.grading_ms = 28000.0
+        row = eval_result_to_task_dict(result)
+        assert row["duration"] == 3.0
+        assert row["agent_wall_ms"] == 2500.0
+        assert row["setup_ms"] == 14000.0
+        assert row["grading_ms"] == 28000.0
+
+    def test_agent_wall_is_none_when_no_turn_was_timed(self):
+        result = _result()
+        result.iterations = []
+        assert eval_result_to_task_dict(result)["agent_wall_ms"] is None
+
+    def test_agent_wall_sums_turns_and_skips_the_unmeasured_default(self):
+        result = _result()
+        timed = result.iterations[0]
+        untimed = timed.model_copy(update={"iteration": 2, "duration_seconds": 0.0})
+        third = timed.model_copy(update={"iteration": 3, "duration_seconds": 1.5})
+        result.iterations = [timed, untimed, third]
+        assert eval_result_to_task_dict(result)["agent_wall_ms"] == 4000.0

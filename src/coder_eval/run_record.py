@@ -17,7 +17,7 @@ from typing import Any
 
 from coder_eval.errors import truncate_crash_message
 from coder_eval.models import EvaluationResult, FinalStatus, judge_cost_usd, simulator_cost_usd, sum_costs
-from coder_eval.result_metrics import expected_turns_overage, turn_time_buckets, visible_turn_count
+from coder_eval.result_metrics import agent_wall_ms, expected_turns_overage, turn_time_buckets, visible_turn_count
 from coder_eval.result_metrics import has_final_reply as _has_final_reply
 
 
@@ -135,6 +135,12 @@ def eval_result_to_task_dict(
         "generation_ms": _buckets.generation_ms,
         "tool_ms": _buckets.tool_ms,
         "teardown_ms": _buckets.teardown_ms,
+        # `duration` is END-TO-END: setup + the agent's turns + grading. These three
+        # split it so a slow checker is not read as a slow agent (#212). Each is
+        # `float | None`; None means not measured, never 0 (CE049).
+        "agent_wall_ms": agent_wall_ms(result),
+        "setup_ms": result.setup_ms,
+        "grading_ms": result.grading_ms,
         "model_used": result.model_used,
         "reference_similarity": ref_similarity,
         # The UNCACHED slice, not TokenUsage.input_tokens; evalboard/lib/runs.ts

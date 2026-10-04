@@ -93,6 +93,30 @@ def turn_time_buckets(result: EvaluationResult) -> TurnTimeBuckets:
     return TurnTimeBuckets(startup, generation, tool, teardown, unaccounted)
 
 
+def agent_wall_ms(result: EvaluationResult) -> float | None:
+    """Wall milliseconds the agent's own turns took: the sum of ``iterations[].duration_seconds``.
+
+    ``duration_seconds`` is the task's END-TO-END wall clock. It also holds
+    ``setup_ms`` (sandbox, pre_run) and ``grading_ms`` (every success check). A
+    checker that runs a live command, such as a tenant ``flow debug``, can spend
+    30-120 s there, so ``duration_seconds`` is not a measure of the agent.
+
+    It is the SUM, not ``duration - setup - grading``. A detached grade does not
+    carry ``grading_ms`` and ``coder-eval execute`` never sets it, so the
+    subtraction has no value on those rows. The sum does. It is also the rule
+    the evalboard's ``agentSecondsFromRaw`` applies, so the two agree: only a
+    POSITIVE turn duration counts, because ``0.0`` is the unmeasured default.
+
+    ``None`` when no turn recorded a duration, never ``0.0`` (CE058).
+    """
+    seconds = [
+        t.duration_seconds
+        for t in result.iterations or []
+        if isinstance(t.duration_seconds, (int, float)) and math.isfinite(t.duration_seconds) and t.duration_seconds > 0
+    ]
+    return sum(seconds) * 1000.0 if seconds else None
+
+
 def _sum_measured(values: Iterable[float | None]) -> float | None:
     """Sum what was measured, or ``None`` when nothing was.
 

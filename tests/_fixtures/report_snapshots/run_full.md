@@ -13,17 +13,18 @@
 - **Errors**: 0
 - **Pass Rate**: 50.0% (1/2)
 - **Avg Reliability Score**: 0.625
-- **Avg Generation Latency**: 10.2s
+- **Avg End-to-end Latency**: 10.2s
+- **Avg Agent Wall**: 3.1s
 - **Total Assistant Turns**: 4
 - **Crashed Partials**: 1 (0 recovered, 1 terminal)
 - **Avg Ground Truth Similarity**: 0.715
 
 ## Task Details
 
-| Task ID | Status | Reliability Score | Latency | Model | Tags | Similarity | Cmd Efficiency |
-|---------|--------|-------------------|---------|-------|------|------------|----------------|
-| alpha | success | 0.950 | 12.5s | claude-haiku-4-5 | smoke, fast | 0.880 | 75.0% (4/6) |
-| beta | failure | 0.300 | 8.0s | claude-sonnet-4-6 | regression | 0.550 | 100.0% (3/3) |
+| Task ID | Status | Reliability Score | Latency (end-to-end) | Agent Wall | Grading | Model | Tags | Similarity | Cmd Efficiency |
+|---------|--------|-------------------|----------------------|------------|---------|-------|------|------------|----------------|
+| alpha | success | 0.950 | 12.5s | 4.2s | N/A | claude-haiku-4-5 | smoke, fast | 0.880 | 75.0% (4/6) |
+| beta | failure | 0.300 | 8.0s | 2.0s | N/A | claude-sonnet-4-6 | regression | 0.550 | 100.0% (3/3) |
 
 ## Run-time Notes
 
@@ -33,10 +34,10 @@
 
 ## Generation Metrics
 
-| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency | Startup | Generation | Tool exec | Teardown |
-|---------|---------------|-------|------------|------------------|---------|------------|-----------|----------|
-| alpha | 12.5s | 1 | 3 | 4.2s | — | — | — | — |
-| beta | 8.0s | 1 | 1 | 2.0s | — | — | — | — |
+| Task ID | Total Latency (end-to-end) | Agent Wall | Turns | Asst Turns | Avg Turn Latency | Startup | Generation | Tool exec | Teardown |
+|---------|----------------------------|------------|-------|------------|------------------|---------|------------|-----------|----------|
+| alpha | 12.5s | 4.2s | 1 | 3 | 4.2s | — | — | — | — |
+| beta | 8.0s | 2.0s | 1 | 1 | 2.0s | — | — | — | — |
 
 
 ## Token Usage

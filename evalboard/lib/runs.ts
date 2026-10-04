@@ -105,6 +105,9 @@ export interface TaskResultSummary {
     // The agent's turns alone, without setup and grading. Optional so test
     // factories that predate it stay valid.
     agentSeconds?: number | null;
+    // Time spent checking success criteria (run.json `grading_ms`). Null when
+    // not measured or on a run.json that predates the key — never 0.
+    gradingSeconds?: number | null;
     totalCostUsd: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
@@ -505,8 +508,14 @@ export interface RawTaskResult {
     replicate_index?: number | null;
     status?: string;
     weighted_score?: number;
+    // END-TO-END seconds: setup + the agent's turns + grading.
     duration?: number;
     iterations?: { duration_seconds?: number | null }[] | null;
+    // The split of `duration` (#212). Absent on run.json written before it;
+    // null = not measured (grading_ms is null on an ungraded or detached grade).
+    agent_wall_ms?: number | null;
+    setup_ms?: number | null;
+    grading_ms?: number | null;
     total_cost_usd?: number;
     input_tokens?: number | null;
     output_tokens?: number | null;
@@ -896,6 +905,8 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         weightedScore: t.weighted_score ?? null,
         durationSeconds: t.duration ?? null,
         agentSeconds: agentSecondsFromRaw(t),
+        gradingSeconds:
+            typeof t.grading_ms === "number" ? t.grading_ms / 1000 : null,
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
@@ -1265,7 +1276,14 @@ function mostCommonAgentType(rows: RawTaskResult[]): string | null {
     return best;
 }
 
+// Prefers the row's stored `agent_wall_ms` (written by the runner's
+// result_metrics.agent_wall_ms with this same rule), so the board and run.md
+// agree by construction. The iterations sum is the legacy path for a run.json
+// written before the key existed. A stored null stays null.
 export function agentSecondsFromRaw(t: RawTaskResult): number | null {
+    if (t.agent_wall_ms !== undefined) {
+        return typeof t.agent_wall_ms === "number" ? t.agent_wall_ms / 1000 : null;
+    }
     const seconds = (t.iterations ?? [])
         .map((i) => i.duration_seconds)
         .filter((d): d is number => typeof d === "number" && d > 0);
