@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v0.12.11 (2026-10-05)
+
+### Bug Fixes
+
+- **antigravity**: Bound the background poll by the deadline alone when a timeout is set
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+- **antigravity**: Keep a tool allowlist within the harness default toolset
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+- **antigravity**: Keep schedule enabled under a tool allowlist
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+- **antigravity**: Keep start_subagent on and deny withheld subagents by policy
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+- **antigravity**: Restore Gemini's background-job waiting under a tool allowlist
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+### Documentation
+
+- **antigravity**: State what keeping start_subagent on does and does not fix
+  ([#216](https://github.com/UiPath/coder_eval/pull/216),
+  [`de361f9`](https://github.com/UiPath/coder_eval/commit/de361f979657c68452286da6982d1d67a2fa98c7))
+
+### Features
+
+- **evalboard**: Treat .dmn as a deliverable kind
+  ([#217](https://github.com/UiPath/coder_eval/pull/217),
+  [`7161fc8`](https://github.com/UiPath/coder_eval/commit/7161fc8a11624662fbf6e3f24d6b468fed99c453))
+
+
 ## v0.12.10 (2026-10-03)
 
 ### Bug Fixes
