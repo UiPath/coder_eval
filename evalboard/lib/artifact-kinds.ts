@@ -10,6 +10,7 @@
 export const DELIVERABLE_KINDS = new Set([
     "flow",
     "bpmn",
+    "dmn",
     "uipx",
     "uiproj",
     "xaml",
