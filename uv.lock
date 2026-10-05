@@ -513,7 +513,7 @@ wheels = [
 
 [[package]]
 name = "coder-eval"
-version = "0.12.10"
+version = "0.12.11"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

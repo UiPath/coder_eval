@@ -508,6 +508,11 @@ class _FakeBuiltinTools(enum.StrEnum):
     SCHEDULE = "schedule"
     FINISH = "finish"
 
+    @classmethod
+    def default(cls) -> list["_FakeBuiltinTools"]:
+        off = {cls.ASK_QUESTION, cls.LIST_DIR, cls.SEARCH_DIR, cls.FIND_FILE}
+        return [t for t in cls if t not in off]
+
 
 def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     """Stub ``google.antigravity`` in sys.modules so ``start()`` runs without the extra.
@@ -883,10 +888,10 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
 
 
-async def test_communicate_poll_cap_also_bounds_a_turn_with_a_large_timeout(monkeypatch):
-    """The cycle cap applies alongside the timeout-derived deadline, not only when
-    no timeout is set: under a large turn_timeout (1800s gives a 1440s deadline) a
-    never-closing job stops at _MAX_BACKGROUND_POLLS instead of the deadline."""
+async def test_communicate_poll_cap_does_not_cut_short_a_job_inside_the_deadline(monkeypatch):
+    """With a turn_timeout the deadline alone bounds the wait: a solver still running
+    past _MAX_BACKGROUND_POLLS cycles is waited on until it finishes. Seen live: a MIP
+    solve that passed at 1211s was force-closed at the 10-minute cap."""
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
@@ -897,22 +902,34 @@ async def test_communicate_poll_cap_also_bounds_a_turn_with_a_large_timeout(monk
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
 
-    never_closing = [
+    started = [
         _step(
             "TOOL_CALL",
             "ACTIVE",
             target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "stuck", {"command_line": "node server.js"})],
+            tool_calls=[_tc("run_command", "solve", {"command_line": "python solve.py"})],
         ),
-        _step("TEXT_RESPONSE", "DONE", content="server started", complete=True, usage=_usage(10, 0, 1, 0)),
+        _step("TEXT_RESPONSE", "DONE", content="solver running", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
-    agent = _agent_with_steps([never_closing])
-    tr = await agent.communicate("start it", timeout=1800.0)
+    finished = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command", "solve", {"command_line": "python solve.py", "exit_code": 0, "combined_output": "ok"}
+                )
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="solved", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([started, [], [], [], [], finished])
+    tr = await agent.communicate("solve it", timeout=1800.0)
 
-    assert len(sleep_calls) == 3  # the cap, long before the 1440s deadline
+    assert len(sleep_calls) == 5
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
-    assert bash.result_status == "unknown"
-    assert tr.agent_output == "server started"
+    assert bash.result_status == "success"
 
 
 async def test_communicate_does_not_poll_a_non_command_tool_left_active(monkeypatch):
@@ -1536,45 +1553,76 @@ def test_tool_capabilities_none_without_tool_lists():
 
 
 def test_allowed_tools_map_to_enabled_builtins():
-    """The default experiment allowlist enables exactly the matching builtins, plus `finish`.
+    """The default experiment allowlist enables exactly the matching default builtins, plus
+    `finish`, `schedule` and `start_subagent`.
 
-    `Skill` has no builtin (skills load through skills_paths) and is skipped; subagents,
-    web search and the rest stay off, as they do for Claude Code under the same list.
+    `Skill` has no builtin (skills load through skills_paths) and is skipped; `Glob` / `Grep`
+    map to tools the harness ships off, so they stay off; web search and the rest stay off, as
+    they do for Claude Code under the same list.
     """
     caps = _capabilities(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])
 
     assert [t.value for t in caps.enabled_tools] == [
         "create_file",
         "edit_file",
-        "find_file",
         "finish",
         "run_command",
-        "search_directory",
+        "schedule",
+        "start_subagent",
         "view_file",
     ]
-    assert caps.enable_subagents is False
 
 
-def test_allowed_task_keeps_subagents():
-    caps = _capabilities(allowed_tools=["Bash", "Task"])
+def test_allowlist_never_enables_tools_the_harness_ships_off():
+    caps = _capabilities(allowed_tools=["Bash", "Glob", "Grep", "LS", "AskUserQuestion"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "start_subagent", "finish"}
-    assert caps.enable_subagents is True
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "finish", "schedule", "start_subagent"}
 
 
 def test_disallowed_tools_map_to_disabled_builtins():
     caps = _capabilities(disallowed_tools=["Task", "WebSearch", "TodoWrite"])
 
-    assert [t.value for t in caps.disabled_tools] == ["search_web", "start_subagent"]
-    assert caps.enable_subagents is False
+    assert [t.value for t in caps.disabled_tools] == ["search_web"]
 
 
 def test_disallowed_tools_are_removed_from_the_allowlist():
     """The SDK takes an allowlist OR a denylist, so with both the denied tools leave the allowlist."""
-    caps = _capabilities(allowed_tools=["Bash", "Read", "Task"], disallowed_tools=["Task"])
+    caps = _capabilities(allowed_tools=["Bash", "Read", "WebSearch"], disallowed_tools=["WebSearch"])
 
-    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish"}
-    assert caps.enable_subagents is False
+    assert {t.value for t in caps.enabled_tools} == {"run_command", "view_file", "finish", "schedule", "start_subagent"}
+
+
+@pytest.mark.parametrize(
+    ("cfg", "denied"),
+    [
+        ({}, []),
+        ({"allowed_tools": ["Bash", "Task"]}, []),
+        ({"allowed_tools": ["Bash", "Read"]}, ["invoke_subagent"]),
+        ({"disallowed_tools": ["Task"]}, ["invoke_subagent"]),
+        ({"allowed_tools": ["Bash", "Task"], "disallowed_tools": ["Task"]}, ["invoke_subagent"]),
+    ],
+)
+async def test_subagent_calls_are_denied_unless_task_is_allowed(monkeypatch, tmp_path, cfg, denied):
+    """`start_subagent` stays on so the harness keeps its default system prompt, whose only
+    "you will be notified, do not poll" guidance sits in its subagents section. A subagent the
+    tool lists withhold is denied at the call that runs it instead."""
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(**cfg).start(str(tmp_path))
+
+    assert [p.tool for p in configs[0].policies if p.kind == "deny"] == denied
 
 
 async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_path):
@@ -1594,7 +1642,13 @@ async def test_start_passes_tool_capabilities_to_sdk_config(monkeypatch, tmp_pat
 
     await _agent(allowed_tools=["Bash", "Read"]).start(str(tmp_path))
 
-    assert {t.value for t in configs[0].capabilities.enabled_tools} == {"run_command", "view_file", "finish"}
+    assert {t.value for t in configs[0].capabilities.enabled_tools} == {
+        "run_command",
+        "view_file",
+        "finish",
+        "schedule",
+        "start_subagent",
+    }
 
 
 def test_installed_sdk_accepts_the_tool_capabilities():
@@ -1602,10 +1656,12 @@ def test_installed_sdk_accepts_the_tool_capabilities():
     every mapped name is a real builtin, so a renamed tool fails here, not live."""
     types = pytest.importorskip("google.antigravity").types
 
-    assert set(agent_module._CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.values()) <= {t.value for t in types.BuiltinTools}
+    mapped = set(agent_module._CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.values()) | agent_module._ALWAYS_ENABLED_TOOLS
+    assert mapped <= {t.value for t in types.BuiltinTools}
     caps = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"])._tool_capabilities(types)
     assert isinstance(caps, types.CapabilitiesConfig)
-    assert types.BuiltinTools.START_SUBAGENT not in caps.enabled_tools
+    assert types.BuiltinTools.START_SUBAGENT in caps.enabled_tools
+    assert types.BuiltinTools.FIND_FILE not in caps.enabled_tools
 
 
 # --- max_turns cap -------------------------------------------------------------------
