@@ -379,6 +379,19 @@ describe("sortArtifacts", () => {
         ]);
     });
 
+    test("a .dmn rule ranks with the deliverables", () => {
+        const input = [
+            ref("d/artifacts/RiskRules/bindings_v2.json", "json"),
+            ref("d/artifacts/RiskRules/Business rule.dmn", "dmn"),
+            ref("d/artifacts/RiskRules/project.uiproj", "uiproj"),
+        ];
+        expect(sortArtifacts(input).map((a) => a.relPath)).toEqual([
+            "d/artifacts/RiskRules/Business rule.dmn",
+            "d/artifacts/RiskRules/project.uiproj",
+            "d/artifacts/RiskRules/bindings_v2.json",
+        ]);
+    });
+
     test("does not mutate the input array", () => {
         const input = [ref("b.txt", "txt"), ref("a.flow", "flow")];
         sortArtifacts(input);
