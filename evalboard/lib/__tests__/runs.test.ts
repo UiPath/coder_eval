@@ -530,6 +530,40 @@ describe("agentSecondsFromRaw", () => {
             agentSecondsFromRaw({ iterations: [{ duration_seconds: null }] }),
         ).toBeNull();
     });
+
+    test("prefers the stored agent_wall_ms over the iterations sum (#212)", () => {
+        expect(
+            agentSecondsFromRaw({
+                duration: 101.25,
+                agent_wall_ms: 55657,
+                iterations: [{ duration_seconds: 1 }],
+            }),
+        ).toBeCloseTo(55.657, 6);
+    });
+
+    test("a stored null stays null rather than falling back", () => {
+        expect(
+            agentSecondsFromRaw({
+                agent_wall_ms: null,
+                iterations: [{ duration_seconds: 5 }],
+            }),
+        ).toBeNull();
+    });
+});
+
+describe("toTaskRow grading split (#212)", () => {
+    test("carries grading_ms as seconds", () => {
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: 27657 }).gradingSeconds,
+        ).toBeCloseTo(27.657, 6);
+    });
+
+    test("null on a run.json that predates the key, never 0", () => {
+        expect(toTaskRow({ task_id: "x" }).gradingSeconds).toBeNull();
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: null }).gradingSeconds,
+        ).toBeNull();
+    });
 });
 
 describe("extractComponentShas", () => {
