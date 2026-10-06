@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ..analysis import calculate_command_statistics
 from ..durations import format_ms
 from ..models import JUDGE_CRITERION_TYPES, FinalStatus, eval_result_total_cost, sum_costs
-from ..result_metrics import expected_turns_overage, turn_time_buckets
+from ..result_metrics import agent_wall_ms, expected_turns_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
     collect_variant_series,
@@ -979,11 +979,24 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
         + "scripts/timing/decompose_run.py reports, and the two are not comparable. Negative means "
         + "generation and tool execution overlapped."
     )
+    # `Total Latency` is END-TO-END. Agent Wall / Setup / Grading split it, so a
+    # checker that runs a live command is not read as agent time (#212). Each
+    # unmeasured one renders as a dash (CE058).
+    agent_wall = format_ms(agent_wall_ms(result))
+    setup = format_ms(result.setup_ms)
+    grading = format_ms(result.grading_ms)
     return f"""
 <h2>Generation Metrics</h2>
 <div class="card">
   <div class="grid">
-    <div class="stat"><div class="label">Total Latency</div><div class="value">{total_latency}</div></div>
+    <div class="stat" title="setup + the agent's turns + grading">
+      <div class="label">Total Latency (end-to-end)</div><div class="value">{total_latency}</div>
+    </div>
+    <div class="stat" title="the agent's turns, summed">
+      <div class="label">Agent Wall</div><div class="value">{agent_wall}</div>
+    </div>
+    <div class="stat"><div class="label">Setup</div><div class="value">{setup}</div></div>
+    <div class="stat"><div class="label">Grading</div><div class="value">{grading}</div></div>
     <div class="stat"><div class="label">Turns</div><div class="value">{num_turns}</div></div>
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{asst_turns}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_latency}</div></div>
@@ -1223,12 +1236,20 @@ def _render_variant_generation_metrics(eval_results: list[EvaluationResult]) -> 
     avg_turn = (sum(per_turn_latencies) / len(per_turn_latencies)) if per_turn_latencies else 0.0
     total_latency_fmt = _esc(_format_duration(total_duration))
     avg_turn_fmt = _esc(_format_duration(avg_turn))
+    walls = [ms for r in eval_results if (ms := agent_wall_ms(r)) is not None]
+    gradings = [r.grading_ms for r in eval_results if r.grading_ms is not None]
+    total_agent_fmt = _esc(format_ms(sum(walls) if walls else None))
+    total_grading_fmt = _esc(format_ms(sum(gradings) if gradings else None))
     return f"""
 <h2>Generation Metrics</h2>
 <div class="card">
   <div class="grid">
     <div class="stat"><div class="label">Tasks</div><div class="value">{total_tasks}</div></div>
-    <div class="stat"><div class="label">Total Latency</div><div class="value">{total_latency_fmt}</div></div>
+    <div class="stat" title="setup + the agent's turns + grading, summed over tasks">
+      <div class="label">Total Latency (end-to-end)</div><div class="value">{total_latency_fmt}</div>
+    </div>
+    <div class="stat"><div class="label">Total Agent Wall</div><div class="value">{total_agent_fmt}</div></div>
+    <div class="stat"><div class="label">Total Grading</div><div class="value">{total_grading_fmt}</div></div>
     <div class="stat"><div class="label">Turns</div><div class="value">{total_turns}</div></div>
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{total_asst}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_turn_fmt}</div></div>

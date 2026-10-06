@@ -75,7 +75,10 @@ publishing different numbers for the same run.
 
 Each entry is an **untyped dict** (a denormalization, not a Pydantic model) with keys
 including: `task_id`, `replicate_index`, `variant_id`, `status`
-([`FinalStatus`](#finalstatus)), `weighted_score`, `duration`, `iteration_count`,
+([`FinalStatus`](#finalstatus)), `weighted_score`, `duration` (END-TO-END seconds:
+setup + the agent's turns + grading), the timing split (`agent_wall_ms`, `setup_ms`,
+`grading_ms` — see [Agent wall vs end-to-end](#agent-wall-vs-end-to-end)), the four
+turn buckets (`startup_ms`, `generation_ms`, `tool_ms`, `teardown_ms`), `iteration_count`,
 `tags`, `task_path`, `model_used`, `reference_similarity`, the token buckets
 (`input_tokens` = uncached input, `output_tokens`, `cache_creation_input_tokens`,
 `cache_read_input_tokens`, `total_tokens`), the cost fields
@@ -88,6 +91,25 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+### Agent wall vs end-to-end
+
+`duration` is the task's whole wall clock. It includes `setup_ms` (sandbox, agent
+start, `pre_run`) and `grading_ms` (every success check). A checker that runs a live
+command can spend tens of seconds there, so `duration` is not the agent's time.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `agent_wall_ms` | `float \| None` | Sum of the positive `iterations[].duration_seconds`, in ms. The agent's own turns. `None` when no turn was timed. |
+| `setup_ms` | `float \| None` | Copied from `task.json`. |
+| `grading_ms` | `float \| None` | Copied from `task.json`. `None` on an ungraded row (`coder-eval execute`) and on a detached grade. |
+
+Example (calculator, one run): `duration` 101.3 s = `agent_wall_ms` 55,657 +
+`setup_ms` 13,678 + `grading_ms` 27,657 + about 4 s not in a named phase.
+
+A `run.json` written before these keys existed has none of them. Readers derive
+agent wall from the row's `iterations[].duration_seconds` with the same rule, and show
+grading as unknown, never `0`.
 
 ### Missing cost is never fatal
 
