@@ -1412,7 +1412,7 @@ jobs:
         run: |
           mkdir -p tmp
           .venv/bin/pytest tests/test_delegate_agent_live.py \
-            -m live -n0 -v --tb=short --strict-markers -ra \
+            -m live -n0 -v --tb=short --strict-markers -ra --log-level=DEBUG \
             --junit-xml=tmp/junit-delegate-live.xml
 
       - name: Assert Delegate live tests actually ran (not silently skipped)

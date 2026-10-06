@@ -85,7 +85,10 @@ async def test_delegate_live_runs_shell_command_captured_as_telemetry(tmp_path):
 
     assert record.crashed is False
     assert record.commands, "expected at least one command in telemetry"
-    assert any("coder-eval-live" in (c.result_summary or "") for c in record.commands)
+    host_results = "\n---\n".join(f"{c.tool_name} {c.parameters}\n{c.result_summary}" for c in record.commands)
+    assert any("coder-eval-live" in (c.result_summary or "") for c in record.commands), (
+        f"no command result contains coder-eval-live; what the host returned:\n{host_results}"
+    )
 
 
 @_live
