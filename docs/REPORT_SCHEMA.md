@@ -161,8 +161,10 @@ The authoritative per-replicate record.
 **Errors** (populated on failure): `error_message`, `error_details`,
 `error_log_tail` (carries the Docker build-log tail for `BUILD_FAILED`).
 
-**Config/environment:** `environment_info`, `agent_config`, `sdk_options` (raw
-`ClaudeAgentOptions` dump), `sandbox_path`, `task_config`
+**Config/environment:** `environment_info`, `agent_config`, `sdk_options` (the
+options the agent sent to its SDK; the shape depends on the agent: a raw
+`ClaudeAgentOptions` dump on Claude Code, the host's `init` options with
+credentials redacted on Delegate, `null` on the other agents), `sandbox_path`, `task_config`
 (`{resolved, source_yaml, source_file, lineage}` — `lineage` maps each field to
 `{value, source, source_detail}` so you can trace which config layer set it).
 `environment_info.system_prompt_semantics` (`"append"` / `"replace"` /

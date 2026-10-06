@@ -1175,8 +1175,8 @@ jobs:
           retention-days: 7
 
   delegate-live-tests:
-    # Live Delegate e2e: spawns the real Node host (agents/delegate/delegate_host.mjs)
-    # wrapping the public @uipath/delegate-sdk against a real UiPath backend. Runs on
+    # Live Delegate e2e: spawns the real Node host from the public
+    # @uipath/delegate-stdio package against a real UiPath backend. Runs on
     # every PR/push like the other live-test jobs (codex-live-tests, byoa-live-tests)
     # now that the DELEGATE_ROPC_* secrets are provisioned; the presence-check gate
     # below skips cleanly ONLY on a fork PR (no secrets available there) and fails
@@ -1187,10 +1187,10 @@ jobs:
     # and implemented in coder_eval_uipath/eval_runner/scripts/ci/refresh-auth.sh —
     # rather than a long-lived AUTH_TOKEN secret, since a minted token's ~1h TTL
     # would make a static secret stale between runs. A dedicated bot user's
-    # username/password is the durable credential; the Delegate SDK reads the
-    # minted token straight from AUTH_TOKEN/TENANT_ID/ORG_ID (see
-    # docs/agents/DELEGATE.md), so no sdk-auth.json or client-secret refresh chain
-    # is needed here.
+    # username/password is the durable credential; the agent sends the minted
+    # token (DELEGATE_AUTH_TOKEN, with DELEGATE_TENANT_ID / DELEGATE_ORG_ID) to the
+    # host as its `auth` init option (see docs/agents/DELEGATE.md), so no
+    # sdk-auth.json or client-secret refresh chain is needed here.
     name: Delegate Live E2E (ROPC)
     runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
@@ -1260,7 +1260,7 @@ jobs:
         if: steps.gate.outputs.present == 'true'
         run: uv sync --frozen --extra dev
 
-      - name: Install @uipath/delegate-sdk (public npm, no token needed)
+      - name: Install @uipath/delegate-stdio (public npm, no token needed)
         if: steps.gate.outputs.present == 'true'
         working-directory: src/coder_eval/agents/delegate
         # --safe-chain-skip-minimum-package-age (not a growing exclusion-list entry
@@ -1372,17 +1372,15 @@ jobs:
       - name: Run fizzbuzz delegate task (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
-          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
-          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
-          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          # Forwarded into `auth.organizationName` / `auth.tenantName` by
-          # DelegateAgent._build_init_options (see .claude/notes/agents.md §
-          # Delegate agent) — needed alongside the GUIDs above whenever
-          # `environment` (rather than `backendUrl`) resolves the backend.
-          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          # Needed alongside the GUIDs above whenever DELEGATE_ENV (rather than
+          # DELEGATE_BACKEND_URL) resolves the backend; the agent sends all five to
+          # the host as its `auth` init option (see .claude/notes/agents.md § Delegate agent).
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: .venv/bin/coder-eval run tasks/delegate/fizzbuzz_delegate.yaml --run-dir runs/delegate-live
 
       - name: Verify Delegate live run PASSED
@@ -1405,17 +1403,16 @@ jobs:
       - name: Run Delegate live unit tests (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
-          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
           DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
-          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
-          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
-          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
-          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
-          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+          DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
         run: |
           mkdir -p tmp
           .venv/bin/pytest tests/test_delegate_agent_live.py \
-            -m live -n0 -v --tb=short --strict-markers -ra \
+            -m live -n0 -v --tb=short --strict-markers -ra --log-level=DEBUG \
             --junit-xml=tmp/junit-delegate-live.xml
 
       - name: Assert Delegate live tests actually ran (not silently skipped)

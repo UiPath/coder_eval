@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from coder_eval.errors import AgentCrashError
 from coder_eval.errors.categories import RETRY_CONFIG, ErrorCategory
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
@@ -163,6 +164,21 @@ def test_categorize_error_timeout_component_specific():
         # String matching - rate limit
         (Exception("Rate limit exceeded"), {}, None, ErrorCategory.AGENT_RATE_LIMIT),
         (Exception("429 Too Many Requests"), {}, None, ErrorCategory.AGENT_RATE_LIMIT),
+        # String matching - a status code matches only as a whole word
+        (Exception("HTTP 401: token expired"), {}, None, ErrorCategory.AGENT_AUTH_ERROR),
+        (
+            AgentCrashError("init failed: connect ECONNREFUSED 127.0.0.1:54013"),
+            {"component": "agent"},
+            None,
+            ErrorCategory.AGENT_CRASH,
+        ),
+        (
+            AgentCrashError("tenant c7a3f401-0000-4000-8000-000000000402 is not reachable"),
+            {"component": "agent"},
+            None,
+            ErrorCategory.AGENT_CRASH,
+        ),
+        (AgentCrashError("upstream port 54290 closed"), {"component": "agent"}, None, ErrorCategory.AGENT_CRASH),
         # String matching - disk
         (Exception("No space left on device"), {}, None, ErrorCategory.DISK_FULL),
         # Component-specific matching

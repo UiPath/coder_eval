@@ -170,18 +170,23 @@ agent:
     - "Write"
     - "Bash"
   model: "claude-sonnet-5"            # Optional: specific model
-  sdk_options:                        # Optional: Claude Code SDK pass-through
-    effort: high                      # any non-framework-managed ClaudeAgentOptions field
+  sdk_options:                        # Optional: agent SDK pass-through (keys depend on `type`)
+    effort: high                      # claude-code: any non-framework-managed ClaudeAgentOptions field
 ```
 
-**`sdk_options`** is a typed pass-through dict for Claude Code SDK
-`ClaudeAgentOptions` fields that Coder Eval doesn't own directly. Keys are
-validated against the SDK's dataclass at YAML load; framework-managed keys
-(`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
-are rejected. Deep-merged across the 5-layer config chain. Override via
-CLI with the repeatable `-D agent.sdk_options.KEY=VALUE`.
-**Requires `type: "claude-code"`** to function; on other agent types it raises
-an error.
+**`sdk_options`** is a pass-through dict for the agent SDK options that Coder
+Eval doesn't own directly. Only an agent type whose config declares the field
+accepts it; on another agent type it raises an error. Each agent type
+validates its own keys at YAML load:
+
+- `claude-code` — `ClaudeAgentOptions` fields, validated against the SDK's
+  dataclass; framework-managed keys (`model`, `allowed_tools`,
+  `permission_mode`, `hooks`, `mcp_servers`, …) are rejected. See the
+  [Claude Code guide](agents/CLAUDE_CODE.md).
+- `delegate` — only `effort`. See the [Delegate guide](agents/DELEGATE.md).
+
+Deep-merged across the 5-layer config chain. Override via CLI with the
+repeatable `-D agent.sdk_options.KEY=VALUE`.
 
 **Permission Modes:**
 - `default` — Default permission handling

@@ -498,27 +498,6 @@ needed to drive it.
 
 ### Known divergences
 
-- **This page's `delegate` column is a DIFFERENT agent** from the one described
-  in the bullet immediately below. `delegate` (this repo, `AgentKind.DELEGATE`)
-  drives the now-public `@uipath/delegate-sdk` through a first-party Node host;
-  `delegate-sdk` (the bullet below) is an older, UiPath-internal-only agent in
-  the separate `coder_eval_uipath` plugin, driving the non-public
-  `@uipath/delegate-stdio` package. They are not the same code and this page
-  does not claim their timing behavior matches.
-- **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
-  execution bounds, so its tool calls cannot be placed on a timeline. Its
-  coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
-  (audit P3-1). **The consequence is now the same on both surfaces:** such a
-  call contributes to NO bucket. Python has always dropped it
-  (`timing.main_thread_tool_spans` filters on `is not None`), and
-  `evalboard/lib/timing.ts::toolExecutionMs` no longer folds the bare duration
-  into its union — a duration with no bounds cannot be placed on the timeline,
-  so unioning it double-books whatever it overlapped and can drive the
-  four-bucket residual negative. Its time reads as **Unaccounted**, which is
-  what that cell means: measured, but not placeable. Codex was in the same
-  state until `_item_timing` landed on 2026-09-10 (0% bounded before, 100%
-  after), so on historical codex runs ~8 h in aggregate moves out of Tool exec
-  and into Unaccounted; that population is closed and no new record joins it.
 - **Antigravity books orphan-poll waiting as agent duration.** A task can spend
   `0.8 × turn_timeout` waiting on a tool call that never reaches DONE — 14 tasks
   and 9.6h of one 83h run. Only CLOSED tool intervals are subtracted, so that
@@ -536,8 +515,21 @@ needed to drive it.
   cost of normalizing it is that the event drives the live renderers, so moving
   it changes the turn boundaries users watch during a run.
 
-All three are deliberately deferred; see `c/time-bugs-audit.md` for the
+Both are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
+
+**Older records can have a tool `duration_ms` with no execution bounds.** Codex
+records from before `_item_timing` landed on 2026-09-10 have this shape, and so do
+records from `delegate-sdk`, the out-of-tree agent in `coder_eval_uipath` that the
+built-in `delegate` replaced. Such a tool call cannot be placed on a timeline, so it
+contributes to NO bucket on either surface. Python drops it
+(`timing.main_thread_tool_spans` filters on `is not None`), and
+`evalboard/lib/timing.ts::toolExecutionMs` does not fold the bare duration into its
+union: a duration with no bounds would double-book whatever it overlapped and could
+make the four-bucket residual negative. Its time reads as **Unaccounted**, which is
+what that cell means: measured, but not placeable. On historical codex runs, this
+moves ~8 h in aggregate out of Tool exec and into Unaccounted. No built-in agent
+writes this shape now.
 
 ## `max_turns` counts model API calls on every harness
 
@@ -563,12 +555,16 @@ Each harness finds the call boundary in its own stream (the table above):
   step, so a rise in that total closes the call, and the next call opens with a MODEL
   step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
-- **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
-  its tool call, with no text before it. So the next call opens when every tool the
+- **Delegate**'s event stream marks a round-trip only on a text reply
+  (`isStepStart`), and a tool-only reply streams only its tool call, with no text
+  before it. The host's own `maxSteps` option does not stop the turn, so the
+  adapter does not send it and enforces the cap itself. So the next call opens when every tool the
   previous call announced has returned, since those results go back to the model,
   and the cap fires before call N+1 can run anything. A reply that announces
   several tools before their results counts once. If a tool never returns, the
   next call opens at the model's next text or new tool call instead.
+  The host sends each call's `usage` frame before that call's tool results, so
+  the calls under the cap keep their tokens and cost.
 
 Every harness enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops
