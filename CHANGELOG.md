@@ -2,6 +2,149 @@
 
 <!-- version list -->
 
+## v0.12.12 (2026-10-06)
+
+### Bug Fixes
+
+- **delegate**: Categorize WAF blocks, SSE connect timeouts and session conflicts
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Keep a non-retryable init error terminal on a respawn
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Keep the conversation on a session conflict after a finished turn
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Keep the LLMGW_* secret out of agent shells when a token file is set
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Keep the usage of the calls under a max_turns cut
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Keep tool rows whose result has no open call
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Let the init keys coder_eval owns win over sdk_options
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Make crash retry independent of the stderr tail
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Match an init 401/403 as a whole word
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Record an interrupted tool as an error, not a success
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Record no host for a DELEGATE_BACKEND_URL that does not parse
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Record the SDK's LoadSkill call as the canonical Skill call
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Reject an sdk_options.effort that is not a string
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **deps**: Bump multidict 6.7.1 -> 6.9.1 for CVE-2026-104874
+  ([#218](https://github.com/UiPath/coder_eval/pull/218),
+  [`2fc1ae0`](https://github.com/UiPath/coder_eval/commit/2fc1ae0bc5013da6f9d4f4215d756b27f69c0d80))
+
+- **errors**: Match an HTTP status code in an error message as a whole word
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+### Chores
+
+- **delegate**: Require @uipath/delegate-stdio 1.203.0
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+### Continuous Integration
+
+- **delegate**: Add temporary shell probes to the Delegate live job
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Remove the temporary shell probes
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Replace the shell probes with an auth/host A/B/C probe
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+### Documentation
+
+- Say that the sdk_options keys and record depend on the agent type
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Describe the host env scrub as defense in depth
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **notes**: Shorten the Delegate agent section
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+### Features
+
+- **delegate**: Drive the public @uipath/delegate-stdio host
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Drive the public @uipath/delegate-stdio host [PILOT-7854]
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Find a global delegate-stdio install; rename DELEGATE_SDK_PATH to
+  DELEGATE_STDIO_PATH ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Read the delegate-stdio host's own env var names; route effort through sdk_options
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **delegate**: Send auth to the host as an init option; read the DELEGATE_* names again
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **reports**: Report agent wall and grading separately from end-to-end latency
+  ([#213](https://github.com/UiPath/coder_eval/pull/213),
+  [`b806791`](https://github.com/UiPath/coder_eval/commit/b806791cd4ebd5e3e026d20ee5acac925b750106))
+
+### Testing
+
+- **delegate**: Show the host's results when the live shell check fails
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **golden**: Add Delegate golden-master scenarios
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **golden**: Give the Delegate golden-coverage exemption a true reason
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+- **overrides**: Pin the sdk_options guard on the registry, not its contents
+  ([#207](https://github.com/UiPath/coder_eval/pull/207),
+  [`abc24e8`](https://github.com/UiPath/coder_eval/commit/abc24e8d518cacd09dac36b43f63fb0bb3d3fc21))
+
+
 ## v0.12.11 (2026-10-05)
 
 ### Bug Fixes
