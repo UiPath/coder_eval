@@ -1400,6 +1400,60 @@ jobs:
               print(f"Live Delegate run PASSED ({path}):", data.get("final_status"))
           PY
 
+      - name: "EXPERIMENT (temporary, remove): Delegate shell probes"
+        if: steps.gate.outputs.present == 'true'
+        continue-on-error: true
+        env:
+          DELEGATE_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          DELEGATE_AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+        run: |
+          set +e
+          state() {
+            ps -eo pid,ppid,pgid,sid,stat,etime,args | grep -E 'ComputerUse|delegate_stdio|node ' | grep -v grep
+            ls -la ~/.delegate-sdk 2>&1; cat ~/.delegate-sdk/*.pid 2>&1
+            ls -la /tmp | grep -iE 'CoreFx|dotnet|clr-debug'
+          }
+          echo "::group::E0 state before probes"
+          state
+          id; echo "SHELL=$SHELL"; ulimit -n
+          bash -l -c 'env -0' </dev/null | wc -c; echo "login shell exit=${PIPESTATUS[0]}"
+          echo "::endgroup::"
+          echo "::group::E1 shell test alone, new pytest process"
+          .venv/bin/pytest tests/test_delegate_agent_live.py -m live -n0 -q -p no:cacheprovider -k shell --tb=line 2>&1 | tail -20
+          echo "::endgroup::"
+          echo "::group::E2 shell test alone, pytest capture off (-s)"
+          .venv/bin/pytest tests/test_delegate_agent_live.py -m live -n0 -q -p no:cacheprovider -k shell -s --tb=line 2>&1 | grep -aE "passed|failed|Exit Code|closed pipe|coder-eval-live" | tail -20
+          echo "::endgroup::"
+          echo "::group::E3 same agent call from plain Python (asyncio.run, no pytest)"
+          mkdir -p tmp
+          cat > tmp/exp_probe.py <<'PY'
+          import asyncio, os, tempfile
+          from coder_eval.agents.delegate_agent import DelegateAgent
+          from coder_eval.models import AgentKind, parse_agent_config
+
+          async def main():
+              config = parse_agent_config(type=AgentKind.DELEGATE, model=os.getenv("DELEGATE_MODEL", "virtuoso-1-5"), enable_computer_use=False)
+              agent = DelegateAgent(config, task_id="delegate-exp")
+              await agent.start(tempfile.mkdtemp(prefix="exp_probe_"))
+              try:
+                  record = await agent.communicate("Run the shell command `echo coder-eval-live` and report its output.", timeout=120)
+              finally:
+                  await agent.stop()
+              for c in record.commands:
+                  print("E3 RESULT:", c.tool_name, repr((c.result_summary or "")[:300]))
+
+          asyncio.run(main())
+          PY
+          .venv/bin/python tmp/exp_probe.py 2>&1 | tail -20
+          echo "::endgroup::"
+          echo "::group::E4 state after probes"
+          state
+          echo "::endgroup::"
+
       - name: Run Delegate live unit tests (assert PASS)
         if: steps.gate.outputs.present == 'true'
         env:
