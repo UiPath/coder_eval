@@ -13,6 +13,7 @@ rule docstrings in `tests/lint/rules/`, then the guides under `docs/`.
 ## Contents
 
 - [agents.md](agents.md) — agent adapters, the turn lifecycle, token reconciliation, harness parity
+- [context-window.md](context-window.md) — the `agent.context_window` cap, per harness
 - [contracts.md](contracts.md) — criteria, datasets, aggregation, judging
 - [isolation.md](isolation.md) — the docker driver, the sandbox, detached grading
 - [lint-rules.md](lint-rules.md) — why each CE lint rule exists

@@ -180,6 +180,8 @@ def _is_sdk_result_message(message: Any) -> bool:
 
 _JSON_START_SEARCH_LIMIT = 200
 
+AUTO_COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
 
 class _ClaudeTurnState:
     """Per-turn mutable scratch state for one ``ClaudeCodeAgent.communicate`` call.
@@ -1184,6 +1186,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             cost_log_tags=cost_log_tags,
         )
         effective_model = self._resolve_effective_model(self.config.model, env, route_model)
+        if self.config.context_window is not None:
+            # The env var outranks --autocompact and every settings scope, and is
+            # read by every CLI the pinned SDKs bundle.
+            env[AUTO_COMPACT_WINDOW_ENV] = str(self.config.context_window)
+        elif os.environ.get(AUTO_COMPACT_WINDOW_ENV):
+            # The SDK spawns the CLI with {**os.environ, **options.env}, so a host-set
+            # window would cap a variant recorded as uncapped. Empty is falsy there.
+            env[AUTO_COMPACT_WINDOW_ENV] = ""
 
         disallowed_tools = list(self.config.disallowed_tools or [])
         # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.

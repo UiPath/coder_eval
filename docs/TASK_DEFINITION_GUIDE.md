@@ -170,6 +170,7 @@ agent:
     - "Write"
     - "Bash"
   model: "claude-sonnet-5"            # Optional: specific model
+  context_window: 200000              # Optional: cap the context window, in tokens (claude-code, codex)
   sdk_options:                        # Optional: agent SDK pass-through (keys depend on `type`)
     effort: high                      # claude-code: any non-framework-managed ClaudeAgentOptions field
 ```
@@ -187,6 +188,13 @@ validates its own keys at YAML load:
 
 Deep-merged across the 5-layer config chain. Override via CLI with the
 repeatable `-D agent.sdk_options.KEY=VALUE`.
+
+**`context_window`** caps the context window the agent works within, in tokens: the
+harness compacts the conversation before it outgrows the cap. Unset, the harness uses
+the model's full window. `claude-code` accepts 100000-1000000 and `codex` any positive
+value; every other agent type rejects the field at load. The cap never raises the
+model's own window. Override via CLI with `-D agent.context_window=400000`. What each
+harness does with it: [Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness).
 
 **Permission Modes:**
 - `default` — Default permission handling

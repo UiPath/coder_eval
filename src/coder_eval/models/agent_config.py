@@ -122,6 +122,9 @@ class BaseAgentConfig(BaseModel):
     # Cross-field merge exclusion: setting either prompt field at any layer clears
     # the sibling. ClassVar -> not a model field.
     _merge_exclusive_groups: ClassVar[tuple[tuple[str, ...], ...]] = (("system_prompt", "system_prompt_file"),)
+    # Inclusive (min, max) tokens the harness can cap its context window to; None
+    # means the harness has no such knob and ``context_window`` is rejected.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = None
 
     type: str | None = Field(
         default=None,
@@ -160,6 +163,16 @@ class BaseAgentConfig(BaseModel):
             "Path to a file containing the system prompt (relative to task YAML). "
             "The file contents are loaded at task resolution time and set as system_prompt. "
             "Mutually exclusive with system_prompt."
+        ),
+    )
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Cap, in tokens, on the context window the agent works within: the harness compacts "
+            "the conversation before it outgrows this size. None leaves the harness default (the "
+            "model's full window). Supported by claude-code (100000-1000000) and codex; any other "
+            "agent type rejects it at load. Never raises the model's own maximum."
         ),
     )
 
@@ -203,11 +216,42 @@ class BaseAgentConfig(BaseModel):
             raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
         return self
 
+    @model_validator(mode="after")
+    def check_context_window_supported(self) -> Self:
+        """Reject a ``context_window`` the resolved agent type cannot apply.
+
+        A type-less config defers the check to the concrete config it resolves to.
+        An unsupported or out-of-range value fails here, at load, because a harness
+        that drops it would run the variant uncapped and still label it capped.
+
+        Rationale: .claude/notes/context-window.md § Recommended design
+        """
+        if self.context_window is None or self.type is None:
+            return self
+        bounds = type(self)._context_window_range
+        if bounds is None:
+            raise ValueError(
+                f"context_window is not supported by agent type {self.type!s}; "
+                + f"supported agent types: {', '.join(_kinds_supporting_context_window())}"
+            )
+        low, high = bounds
+        if self.context_window < low or (high is not None and self.context_window > high):
+            allowed = f"{low}-{high}" if high is not None else f">= {low}"
+            raise ValueError(
+                f"context_window {self.context_window} is out of range for agent type {self.type!s} "
+                + f"(allowed: {allowed} tokens)"
+            )
+        return self
+
 
 class ClaudeCodeAgentConfig(BaseAgentConfig):
     """Claude Code agent configuration."""
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
+
+    # The CLI's own accepted auto-compact window range; it silently drops a
+    # settings value outside it, so the bound is enforced here instead.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (100_000, 1_000_000)
 
     system_prompt_mode: SystemPromptMode = Field(
         default="append",
@@ -285,11 +329,32 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def check_single_auto_compact_source(self) -> Self:
+        """Reject ``context_window`` alongside ``claude_settings.autoCompactWindow``.
+
+        ``context_window`` reaches the CLI as ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which
+        outranks the settings key, so the settings value would be silently ignored.
+        """
+        if (
+            self.context_window is not None
+            and isinstance(self.claude_settings, dict)
+            and "autoCompactWindow" in self.claude_settings
+        ):
+            raise ValueError(
+                "context_window and claude_settings.autoCompactWindow both set the auto-compact window; "
+                + "set only context_window"
+            )
+        return self
+
 
 class CodexAgentConfig(BaseAgentConfig):
     """Codex agent configuration."""
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
+
+    # Codex clamps the value to the model's catalog maximum itself.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (1, None)
 
 
 # Mirrors google.antigravity.types.ThinkingLevel as a plain Literal so this module
@@ -544,6 +609,17 @@ def parse_agent_config(**kwargs: Any) -> BaseAgentConfig:
     if registration is None:
         raise AgentRegistry.unregistered_kind_error(agent_type)
     return registration.config_class.model_validate(kwargs)
+
+
+def _kinds_supporting_context_window() -> list[str]:
+    """Registered agent kinds whose config class can apply ``context_window``."""
+    from coder_eval.agents.registry import AgentRegistry
+
+    return [
+        kind
+        for kind in sorted(AgentRegistry.list_kinds())
+        if (reg := AgentRegistry.get(kind)) is not None and reg.config_class._context_window_range is not None
+    ]
 
 
 def _coerce_agent_config(value: Any) -> Any:

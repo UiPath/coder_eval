@@ -104,6 +104,7 @@ agent:
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. Works with either `system_prompt_mode`. |
 | `setting_sources` | `list["user"\|"project"\|"local"] \| null` | Which host setting sources the SDK reads. Default resolves to `["project"]`. See [Sandbox isolation](#sandbox-isolation). |
 | `claude_settings` | `str \| dict \| null` | Passed to the SDK `--settings`. A dict is JSON-serialized; a str is a settings file path. Use `permissions.deny` to block tools/paths. |
+| `context_window` | `int \| null` (100000-1000000) | Auto-compact window, in tokens, sent as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. It outranks `--autocompact` and every settings scope, and is capped to the model's window. Setting `claude_settings.autoCompactWindow` too is a load error. See [Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness). |
 | `sdk_options` | `dict` (default `{}`) | Pass-through for `ClaudeAgentOptions` fields Coder Eval doesn't own (e.g. `effort`). Validated at load — an unknown or framework-owned key is a hard error. |
 | `ignore_patterns` | `list[str] \| null` | Gitignore-style overrides for the workspace copy used by judge sub-agents (supports `!` negation). |
 
