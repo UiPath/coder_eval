@@ -212,9 +212,11 @@ resolution for any agent that does not declare `supports_cooperative_stop`. See 
 
 Claude Code produces the richest telemetry of the agents:
 
-- **Authoritative billing** comes from the SDK's cumulative `model_usage` on the
+- **Authoritative billing** comes from the SDK's `model_usage` on the
   terminal result message and reconciles to `total_cost_usd` — this already includes
-  sub-agent consumption that the per-message stream under-reports.
+  sub-agent consumption that the per-message stream under-reports. Both count the
+  whole session, so a resumed turn books only what changed since the session's
+  previous result message.
 - **Sub-agent accounting** is derived by grouping `parent_tool_use_id`-tagged
   assistant messages; there is no separate per-sub-agent field. The terminal
   sub-agent generation (delivered as the Agent tool result, never streamed) is
