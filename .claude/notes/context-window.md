@@ -18,7 +18,8 @@ Before this change no harness-neutral way existed:
   merge one key into it.
 - **codex**: `CodexAgentConfig` has no pass-through. `CodexAgent._build_thread_options`
   builds the thread `config` dict itself, so no value reached Codex.
-- **antigravity, opencode, pi, delegate**: no knob is wired.
+- **pi**: a window can be set per model in `models.json`, but coder_eval wrote none.
+- **antigravity, opencode, delegate**: no knob is wired.
 
 ## How each harness controls its window
 
@@ -70,10 +71,41 @@ Verified in the `openai-codex-cli-bin` 0.156.1 binary (the pin) and its source a
 The thread `config` dict `thread_start` takes is the same override surface that
 coder_eval already uses for `enabled_tools` and `model_providers`.
 
-### antigravity, opencode, pi, delegate
+### pi
 
-None of them has a context-window knob wired in coder_eval. They are out of scope, and
-they reject the field.
+Pi 0.87.1 reads `models.json` from its agent dir (`PI_CODING_AGENT_DIR`, default
+`~/.pi/agent`). `providers.<provider>.modelOverrides.<model>.contextWindow` replaces a
+built-in model's window as the topmost config layer (`dist/core/provider-composer.js`,
+`applyModelOverride`), and Pi compacts by summarising once the context passes
+`contextWindow - compaction.reserveTokens` (16384 by default;
+`dist/core/compaction/compaction.js`). That is the same effect as Codex's
+`model_context_window`.
+
+Pi has no separate path for `models.json`, so a capped agent runs from a per-agent
+temp dir that links every entry of the host's agent dir (auth, settings, extensions,
+prompts) and holds the host's `models.json` plus the override. Links rather than
+copies keep credentials in one place and keep the capped variant's setup identical to
+the uncapped one's; where the OS refuses a link the entry is copied. The temp dir is
+removed in `stop()`.
+
+Pi silently ignores an override for a model id it does not know, so `start()` runs
+`pi --list-models <model>` against the mirror and fails unless that exact
+provider/model row shows the capped window. A host `models.json` with comments (Pi
+strips them) cannot be merged as JSON and fails `start()` the same way.
+
+### antigravity, opencode, delegate
+
+None of them has a context-window knob wired in coder_eval, and they reject the field.
+
+- **opencode**: `provider.<id>.models.<model>.limit.context` (and `limit.input`, which
+  models that declare it use instead) would work, but the schema also requires
+  `limit.output`, which coder_eval does not know per model, and the OpenCode CLI is not
+  version-pinned.
+- **antigravity**: `CompactionConfig(token_threshold=N)` in `LocalAgentConfig`
+  (google-antigravity 0.1.20) moves the compaction trigger without lowering the
+  window; what the closed binary does at the threshold has not been observed.
+- **delegate**: the conversation lives and is summarised in the UiPath backend, and
+  no client option controls it.
 
 ## Options considered
 
@@ -129,6 +161,8 @@ Per-harness mapping:
 - claude-code: 100000-1000000, the CLI's documented range. Outside that range the CLI
   drops a settings value silently, so coder_eval enforces the range itself.
 - codex: any positive integer. Codex clamps the value to the model's catalog maximum.
+- pi: at least 32768, twice Pi's default compaction reserve, and `model` must be in
+  `provider/model` form, since the override is per model.
 - every other type: rejected at load, naming the supported types. A variant that
   switches `type` to an unsupported harness fails when the experiment resolves.
 
@@ -155,5 +189,5 @@ variant, so a cap per variant groups without new report code. On claude-code the
   recorded in this note but not changed.
 - **The recorded CLI version is wrong.** See the version table above:
   `environment_info.claude_code_cli` should record the bundled CLI version.
-- **Other harnesses.** OpenCode (`limit.context` in provider config) and Pi may have
-  equivalents. Each one needs its own verification before it opts in.
+- **Other harnesses.** OpenCode can opt in once its CLI is pinned and coder_eval can
+  supply `limit.output`; Antigravity once one run shows what `token_threshold` does.

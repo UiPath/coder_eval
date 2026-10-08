@@ -112,6 +112,20 @@ Pi's reasoning effort, forwarded as `--thinking`. Accepts the seven-value set
 `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` (a strict
 superset of the Antigravity `thinking_level`), defaulting to `medium`.
 
+### `context_window`
+
+`agent.context_window` caps the model's context window, in tokens (at least 32768).
+It needs `model` in `provider/model` form, because Pi applies it as
+`providers.<provider>.modelOverrides.<model>.contextWindow` in `models.json`. Pi then
+compacts once the context passes the window minus `compaction.reserveTokens`.
+
+Pi reads `models.json` only from its agent dir, so a capped agent runs from a temp dir
+that links the host's agent dir (auth, settings, extensions) and holds the host's
+`models.json` plus the override. `start()` fails unless `pi --list-models` shows the
+capped window for that exact model, since Pi silently ignores an override for a model
+id it does not know. See
+[Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness).
+
 ### Enforced config fields
 
 Pi forwards these config knobs to real CLI flags:

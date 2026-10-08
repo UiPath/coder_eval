@@ -170,7 +170,7 @@ agent:
     - "Write"
     - "Bash"
   model: "claude-sonnet-5"            # Optional: specific model
-  context_window: 200000              # Optional: cap the context window, in tokens (claude-code, codex)
+  context_window: 200000              # Optional: cap the context window, in tokens (claude-code, codex, pi)
   sdk_options:                        # Optional: agent SDK pass-through (keys depend on `type`)
     effort: high                      # claude-code: any non-framework-managed ClaudeAgentOptions field
 ```

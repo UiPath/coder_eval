@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from coder_eval.agents.claude_code_agent import AUTO_COMPACT_WINDOW_ENV, ClaudeCodeAgent
+from coder_eval.agents.pi_agent import _PI_MODELS_FILE as _PI_MODELS
+from coder_eval.agents.pi_agent import PI_AGENT_DIR_ENV, PiAgent, _pi_token_count
 from coder_eval.models import AgentKind, BaseAgentConfig, TaskDefinition, parse_agent_config
 from coder_eval.orchestration.config_merge import Layer, resolve_root, validate_paths
 from coder_eval.orchestration.overrides import OverrideError, apply_overrides
@@ -68,12 +71,92 @@ class TestCodex:
         assert "model_context_window" not in options.get("config", {})
 
 
-class TestUnsupportedHarnesses:
-    @pytest.mark.parametrize(
-        "kind", [AgentKind.ANTIGRAVITY, AgentKind.OPENCODE, AgentKind.PI, AgentKind.DELEGATE, AgentKind.NONE]
+PI_MODEL = "anthropic/claude-sonnet-4-5"
+
+
+def _pi_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    host = tmp_path / "host-agent"
+    (host / "extensions").mkdir(parents=True)
+    (host / "auth.json").write_text('{"anthropic": {"type": "api_key"}}', encoding="utf-8")
+    (host / "settings.json").write_text('{"compaction": {"reserveTokens": 16384}}', encoding="utf-8")
+    (host / _PI_MODELS).write_text(
+        json.dumps({"providers": {"anthropic": {"modelOverrides": {"claude-opus-4-5": {"maxTokens": 8000}}}}}),
+        encoding="utf-8",
     )
+    monkeypatch.setenv(PI_AGENT_DIR_ENV, str(host))
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/pi")
+    return host
+
+
+async def _started_pi(tmp_path: Path, listed: str | None, **config_kwargs) -> PiAgent:
+    agent = PiAgent(parse_agent_config(type=AgentKind.PI, **config_kwargs))
+
+    async def list_models(_provider: str, _model_id: str) -> str | None:
+        return listed
+
+    agent._listed_context = list_models  # type: ignore[method-assign]
+    await agent.start(str(tmp_path))
+    return agent
+
+
+class TestPi:
+    async def test_a_capped_variant_runs_pi_from_a_mirror_whose_models_json_caps_the_model(self, tmp_path, monkeypatch):
+        host = _pi_host(tmp_path, monkeypatch)
+        agent = await _started_pi(tmp_path, "200K", model=PI_MODEL, context_window=200_000)
+
+        mirror = Path(agent._build_env()[PI_AGENT_DIR_ENV])
+        assert mirror != host
+        models = json.loads((mirror / _PI_MODELS).read_text(encoding="utf-8"))["providers"]["anthropic"]
+        assert models["modelOverrides"]["claude-sonnet-4-5"] == {"contextWindow": 200_000}
+        assert models["modelOverrides"]["claude-opus-4-5"] == {"maxTokens": 8000}
+        assert (mirror / "auth.json").read_text(encoding="utf-8") == (host / "auth.json").read_text(encoding="utf-8")
+        assert (mirror / "settings.json").exists() and (mirror / "extensions").is_dir()
+        assert agent.get_environment_info()["pi_context_window"] == 200_000
+
+        await agent.stop()
+        assert not mirror.exists()
+        assert json.loads((host / _PI_MODELS).read_text(encoding="utf-8"))["providers"]["anthropic"][
+            "modelOverrides"
+        ] == {"claude-opus-4-5": {"maxTokens": 8000}}
+        assert (host / "auth.json").exists() and (host / "extensions").is_dir()
+
+    async def test_a_cap_pi_does_not_apply_fails_the_start(self, tmp_path, monkeypatch):
+        _pi_host(tmp_path, monkeypatch)
+        agent = PiAgent(parse_agent_config(type=AgentKind.PI, model=PI_MODEL, context_window=200_000))
+
+        async def unknown_model(_provider: str, _model_id: str) -> str | None:
+            return None
+
+        agent._listed_context = unknown_model  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="did not apply to anthropic/claude-sonnet-4-5"):
+            await agent.start(str(tmp_path))
+        assert agent._agent_dir is None
+
+    async def test_an_uncapped_variant_keeps_the_host_agent_dir(self, tmp_path, monkeypatch):
+        host = _pi_host(tmp_path, monkeypatch)
+        agent = await _started_pi(tmp_path, None, model=PI_MODEL)
+        assert agent._build_env()[PI_AGENT_DIR_ENV] == str(host)
+        assert "pi_context_window" not in agent.get_environment_info()
+
+    def test_a_window_needs_the_provider_and_model_it_caps(self):
+        with pytest.raises(ValidationError, match="provider/model form"):
+            parse_agent_config(type=AgentKind.PI, context_window=200_000)
+        with pytest.raises(ValidationError, match="provider/model form"):
+            parse_agent_config(type=AgentKind.PI, model="claude-sonnet-4-5", context_window=200_000)
+
+    def test_a_window_under_the_compaction_reserve_fails_at_load(self):
+        with pytest.raises(ValidationError, match="out of range for agent type pi"):
+            parse_agent_config(type=AgentKind.PI, model=PI_MODEL, context_window=16_000)
+
+    @pytest.mark.parametrize(("tokens", "printed"), [(200_000, "200K"), (1_000_000, "1M"), (32_768, "32.8K")])
+    def test_the_check_reads_counts_as_pi_prints_them(self, tokens, printed):
+        assert _pi_token_count(tokens) == printed
+
+
+class TestUnsupportedHarnesses:
+    @pytest.mark.parametrize("kind", [AgentKind.ANTIGRAVITY, AgentKind.OPENCODE, AgentKind.DELEGATE, AgentKind.NONE])
     def test_a_harness_without_the_knob_fails_at_load(self, kind):
-        with pytest.raises(ValidationError, match="supported agent types: claude-code, codex"):
+        with pytest.raises(ValidationError, match="supported agent types: claude-code, codex, pi"):
             parse_agent_config(type=kind, context_window=200_000)
 
     def test_a_non_positive_window_fails_even_before_the_type_is_known(self):

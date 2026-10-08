@@ -171,7 +171,8 @@ class BaseAgentConfig(BaseModel):
         description=(
             "Cap, in tokens, on the context window the agent works within: the harness compacts "
             "the conversation before it outgrows this size. None leaves the harness default (the "
-            "model's full window). Supported by claude-code (100000-1000000) and codex; any other "
+            "model's full window). Supported by claude-code (100000-1000000), codex and pi "
+            "(>= 32768, with model as provider/model); any other "
             "agent type rejects it at load. Never raises the model's own maximum."
         ),
     )
@@ -452,10 +453,28 @@ class PiAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.PI]  # type: ignore[assignment]
 
+    # Pi compacts once the context passes contextWindow minus its 16384-token
+    # compaction.reserveTokens, so the window has to leave room above that reserve.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (32_768, None)
+
     thinking_level: PiThinkingLevel = Field(
         default="medium",
         description="Pi reasoning effort passed as --thinking (off/minimal/low/medium/high/xhigh/max).",
     )
+
+    @model_validator(mode="after")
+    def check_context_window_names_a_model(self) -> Self:
+        """Require ``provider/model`` when ``context_window`` is set.
+
+        Pi caps a window through a per-model ``modelOverrides`` entry in ``models.json``,
+        so the cap needs the provider and the model id it applies to.
+        """
+        if self.context_window is not None and (self.model is None or "/" not in self.model.strip("/")):
+            raise ValueError(
+                "context_window on pi needs model in Pi's provider/model form "
+                + "(e.g. anthropic/claude-sonnet-4-5): Pi caps a window per model"
+            )
+        return self
 
 
 _DELEGATE_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})

@@ -647,10 +647,10 @@ uncapped under a "capped" label is a wrong measurement.
 
 | | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| mechanism | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the CLI environment | thread config `model_context_window` | rejected | rejected | rejected | rejected |
-| accepted range | 100000-1000000 | any positive integer | | | | |
-| when compaction starts | when the context approaches the window | at 90% of the window (Codex's default auto-compact limit) | | | | |
-| above the model's own window | capped to the model's window by the CLI | capped to the model's catalog maximum by Codex | | | | |
+| mechanism | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the CLI environment | thread config `model_context_window` | rejected | rejected | `modelOverrides.<model>.contextWindow` in a per-agent `models.json` | rejected |
+| accepted range | 100000-1000000 | any positive integer | | | >= 32768, `model` as `provider/model` | |
+| when compaction starts | when the context approaches the window | at 90% of the window (Codex's default auto-compact limit) | | | past the window minus `compaction.reserveTokens` (16384 by default) | |
+| above the model's own window | capped to the model's window by the CLI | capped to the model's catalog maximum by Codex | | | replaces the model's window | |
 
 - **claude-code**: the environment variable outranks `--autocompact` and every settings
   scope, so a host or project `autoCompactWindow` cannot change the cap. Setting
@@ -658,7 +658,11 @@ uncapped under a "capped" label is a wrong measurement.
 - **codex**: the value replaces the model's context window, so the hard-cap
   compaction at the usable window (a per-model share of it, 95% for Codex's fallback
   model metadata) also moves.
-- Neither harness reports when the model's own window has lowered the cap. A cap
+- **pi**: Pi reads `models.json` from its agent dir only, so a capped agent runs from a
+  temp dir that links the host's agent dir (auth, settings, extensions) and adds the
+  override. `start()` fails unless `pi --list-models` shows the capped window for that
+  exact model, because Pi silently ignores an override for an unknown model id.
+- Neither claude-code nor codex reports when the model's own window has lowered the cap. A cap
   above the model's window runs at the model's window.
 
 ## `agent.plugins[].path` accepts different depths per harness
