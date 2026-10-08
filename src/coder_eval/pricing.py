@@ -5,7 +5,7 @@ Anthropic/OpenAI/Google built-in rates; plugins contribute additional rates via
 Sources: https://platform.claude.com/docs/en/about-claude/pricing,
 https://developers.openai.com/api/docs/pricing,
 https://ai.google.dev/gemini-api/docs/pricing, and OpenRouter's live
-``/api/v1/models`` (every row re-verified 2026-09-03, except the Bedrock
+``/api/v1/models`` (every row re-verified 2026-10-07, except the Bedrock
 open-weight block: AWS publishes no eu-north-1 figures for those three).
 
 SSOT for rates on both halves of the repo: ``evalboard/lib/pricing.generated.ts`` is
@@ -77,12 +77,15 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-opus-4-1": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    # $2/$10, NOT the $3/$15 that Sonnet 4.6 and earlier pay. Do not copy the 4.x row onto it.
+    # $2/$10, NOT Sonnet 4.6's $3/$15. 5.5's cache hits fell to 0.05x input on 2026-10-07.
+    "claude-sonnet-5-5": ModelPricing(2.0, 10.0, 2.50, 0.10),
     "claude-sonnet-5": ModelPricing(2.0, 10.0, 2.50, 0.20),
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5-20250929": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
+    # CAVEAT: the <=100K-prompt tier; a prompt over 100K bills every bucket at 5x, so long contexts read low.
+    "claude-haiku-5-5": ModelPricing(0.10, 0.50, 0.125, 0.01),
     # $1/$5. Not $0.80/$4 — those are Haiku 3.5's rates.
     "claude-haiku-4-5": ModelPricing(1.0, 5.0, 1.25, 0.10),
     "claude-haiku-4-5-20251001": ModelPricing(1.0, 5.0, 1.25, 0.10),
@@ -120,6 +123,7 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
     # CAVEAT: flat rate; GPT-6's >272K-input tier (2x input / 1.5x output) is not modelled and reads low.
     "gpt-6-astra": ModelPricing(10.0, 50.0, 12.50, 1.00),
+    "gpt-6.1-sol": ModelPricing(2.0, 10.0, 2.50, 0.10),
     "gpt-6-sol": ModelPricing(2.0, 10.0, 2.50, 0.20),
     "gpt-6-luna": ModelPricing(0.10, 0.50, 0.125, 0.01),
     # Keyed on the literal ids ListModels returns. No cache-write fee, so
