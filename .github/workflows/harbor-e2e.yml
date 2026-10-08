@@ -30,7 +30,7 @@ env:
   API_BACKEND: "bedrock"
   CLAUDE_CODE_USE_BEDROCK: "1"
   # Same expression as pr-checks.yml (see the comment there).
-  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk
+  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }},claude-agent-sdk,@anthropic-ai/claude-code
 
 jobs:
   harbor-e2e:
@@ -59,7 +59,7 @@ jobs:
           node-version: "20"
 
       - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@latest
 
       - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
