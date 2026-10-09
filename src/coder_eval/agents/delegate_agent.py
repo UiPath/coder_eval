@@ -437,13 +437,12 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
-        # Backend round-trips begun. A tool-only reply streams no text, so each call
-        # after the first opens once the previous call's tools have all returned.
+        # Backend round-trips begun: a call opens on its first streamed text, or on its
+        # `usage` frame when it streamed none. Tool events never open one, because the
+        # host runs a batched reply's tools one at a time. Rationale: .claude/notes/agents.md.
         self.api_calls = 0
-        # A result arrived while other tools were still open, so the next call is not
-        # counted yet. If the model speaks or calls a new tool first, the next call has
-        # begun; the open tools stay open, because the SDK can still deliver their results.
-        self.results_incomplete = False
+        # The open call has streamed text, so its `usage` frame closes it without counting.
+        self.call_streaming = False
 
         self.model_used: str | None = model
         # The sum of the per-call `usage` frames, until the `result` replaces it with the turn total.
@@ -814,13 +813,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
                 if mtype == "usage":
                     self._add_call_usage(msg, state)
-                    continue
-                event = msg.get("event")
-                if mtype != "event" or not isinstance(event, dict):
-                    logger.debug("delegate: ignoring host message %r", mtype)
-                    continue
-
-                self._handle_event(event, state, emit)
+                else:
+                    event = msg.get("event")
+                    if mtype != "event" or not isinstance(event, dict):
+                        logger.debug("delegate: ignoring host message %r", mtype)
+                        continue
+                    self._handle_event(event, state, emit)
 
                 if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
@@ -871,13 +869,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if isinstance(session_id, str) and session_id:
             self._session_id = session_id
 
-        if state.api_calls == 0 and (event_type in _TEXT_EVENT_TYPES or event_type == "tool_call"):
-            state.api_calls = 1
-        elif state.results_incomplete and (
-            event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(event) not in state.open_tools)
-        ):
-            state.api_calls += 1
-            state.results_incomplete = False
+        if event_type in _TEXT_EVENT_TYPES:
+            if not state.call_streaming:
+                state.api_calls += 1
+                state.call_streaming = True
+        elif event_type in ("tool_call", "tool_result"):
+            state.call_streaming = False
 
         if event_type == "message":
             text = event.get("content")
@@ -894,9 +891,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             self._handle_tool_call(event, state, emit)
         elif event_type == "tool_result":
             self._handle_tool_result(event, state, emit)
-            state.results_incomplete = bool(state.open_tools)
-            if not state.open_tools:
-                state.api_calls += 1
         elif event_type == "error":
             state.error_message = str(event.get("error") or "unknown error")
             logger.warning("delegate: SDK reported an error event: %s", state.error_message)
@@ -982,12 +976,17 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
     @staticmethod
     def _add_call_usage(msg: dict[str, Any], state: _TurnState) -> None:
-        """Add one model call's ``usage`` frame to the turn's running total.
+        """Add one model call's ``usage`` frame to the turn's running total, and count the call.
 
-        The host writes a call's frame before any tool result that call caused,
+        The host writes a call's frame before any tool event that call caused,
         so a turn cut at ``max_turns`` or by an early stop keeps the usage of
-        every call that finished.
+        every call that finished. A call that streamed text was counted then;
+        a call that streamed none is counted here, before its tools run.
         """
+        if state.call_streaming:
+            state.call_streaming = False
+        else:
+            state.api_calls += 1
         usage = _parse_usage(msg.get("usage"))
         if usage is not None:
             state.usage = usage if state.usage is None else state.usage + usage

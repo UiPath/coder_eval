@@ -827,10 +827,10 @@ class TestCommunicate:
         assert record.num_turns == 2
 
     async def test_max_turns_stops_a_tool_only_reply_before_its_tool_runs(self, patch_exec, tmp_path):
-        """A tool-only reply streams no text event, only its tool call."""
+        """A tool-only reply streams no text event; its usage frame still precedes its tool call."""
         events = [
             _ev(type="message", content="on it", isStepStart=True),
-            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
+            *[frame for n in range(3) for frame in (_usage(10, 1), _tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
@@ -853,13 +853,32 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
-    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
-        """Tool b never returns, so the next call opens on its first new tool call."""
+    async def test_max_turns_counts_a_batched_reply_once_when_the_host_runs_its_tools_in_sequence(
+        self, patch_exec, tmp_path
+    ):
+        """The host runs a batched reply's tools one at a time, so each result closes every open call."""
         events = [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            *[frame for name in "abc" for frame in (_tool_call(name), _tool_result(name))],
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(20, 2),
+            _result(response="done"),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "b", "c"]
+        assert record.num_turns == 2
+
+    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
+        """Tool b never returns, so only the usage frames show the next calls."""
+        events = [
+            _usage(10, 1),
             _tool_call("a"),
             _tool_call("b"),
             _tool_result("a"),
-            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
+            *[frame for n in range(3) for frame in (_usage(10, 1), _tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)

@@ -855,12 +855,20 @@ shared `agents/_skills.py` resolver: the SDK wants ONE parent directory, not a l
 ran 7 steps). The adapter counts calls from the event stream and abandons the host when call N+1
 opens; `len(turnUsages)` from the `result` then replaces the estimate as `num_turns`.
 
+**A call opens on its first text, or on its `usage` frame when it streams none — never on a tool
+event.** The host streams a call's text, flushes the call's `usage` frame, then runs the call's
+tools, and it runs a batched reply's tools one at a time: `tool_call`, `tool_result`, `tool_call`,
+`tool_result`. The adapter once opened call N+1 when every open tool had returned. With that order
+the open set empties after each tool, so every tool counted as a call: a downstream suite saw a turn
+with 16 round-trips and 96 tool calls cut at `max_turns: 80`. Now a `thinking` or `message` event
+opens a call unless the open call has already streamed text, and a `usage` frame opens one only for
+a call that streamed none. The frame arrives before the call's first tool event, so the cap still
+fires before call N+1 runs a tool. A host without `usage` frames counts only the calls that stream text.
+
 **A cut turn keeps the usage of its finished calls.** A turn cut by `max_turns` or a stop gets no
 `result`, so the adapter sums the per-round-trip `usage` frames; the `result`'s total replaces the sum
-when it arrives. Ordering (from SDK/backend source, not a live transcript): call N's `usage` frame
-always precedes the `tool_result` that opens call N+1. The frame is NOT a call boundary — it arrives
-before its call's tools run — so the cap stays on "the previous call's tools have all returned". The
-adapter warns when a cut turn had finished calls but no usage.
+when it arrives. Ordering (from SDK/backend source): call N's `usage` frame precedes every tool event
+of call N. The adapter warns when a cut turn had finished calls but no usage.
 
 **One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
