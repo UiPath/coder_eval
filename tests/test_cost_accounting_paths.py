@@ -16,6 +16,7 @@ import pytest
 
 from coder_eval.models import (
     ClaudeCodeAgentConfig,
+    DelegateAgentConfig,
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
@@ -88,6 +89,13 @@ class TestPricingPreflight:
     def test_unpinned_model_is_not_flagged(self, tmp_path):
         """A task deferring its model to the route can't be pre-flighted from here."""
         assert check_pricing_coverage([_resolved(None, tmp_path)]) == []
+
+    def test_delegate_backend_id_is_priced_under_its_rate_card_key(self, tmp_path, caplog):
+        resolved = _resolved(None, tmp_path)
+        resolved.task.agent = DelegateAgentConfig(type="delegate", model="gpt_5_6_luna")
+        with caplog.at_level(logging.WARNING):
+            assert check_pricing_coverage([resolved]) == []
+        assert "No pricing rate" not in caplog.text
 
     def test_judge_criterion_model_is_pre_flighted(self, tmp_path):
         """A judge call is ALWAYS priced from the rate card, so its model matters most.

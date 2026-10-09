@@ -35,7 +35,7 @@ from ..path_utils import (
     format_task_log_id,
     write_text_atomic,
 )
-from ..pricing import unpriced_models
+from ..pricing import delegate_rate_key, unpriced_models
 from ..run_record import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
@@ -53,7 +53,11 @@ def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
     back to the card on a turn the backend never priced.
     """
     for rt in resolved_tasks:
-        yield rt.task.agent.model if rt.task.agent else None
+        agent = rt.task.agent
+        if agent is not None and agent.model and agent.type == AgentKind.DELEGATE:
+            yield delegate_rate_key(agent.model)
+        else:
+            yield agent.model if agent else None
         for criterion in rt.task.success_criteria:
             yield getattr(criterion, "model", None)
 

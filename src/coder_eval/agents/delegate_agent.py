@@ -60,7 +60,7 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import calculate_cost, delegate_rate_key
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -1066,7 +1066,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         usage = state.usage or TokenUsage()
         if not usage.is_empty():
             cost = calculate_cost(
-                state.model_used or self.config.model or "",
+                delegate_rate_key(state.model_used or self.config.model or ""),
                 uncached_input_tokens=usage.uncached_input_tokens,
                 output_tokens=usage.output_tokens,
                 cache_creation_tokens=usage.cache_creation_input_tokens,
