@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -178,6 +178,79 @@ def _is_sdk_result_message(message: Any) -> bool:
     return hasattr(message, "session_id") and hasattr(message, "usage") and not _is_task_notification(message)
 
 
+_CUMULATIVE_MODEL_USAGE_KEYS = (
+    "inputTokens",
+    "outputTokens",
+    "cacheReadInputTokens",
+    "cacheCreationInputTokens",
+    "thinkingTokens",
+    "webSearchRequests",
+    "costUSD",
+)
+
+
+class _SessionUsage(NamedTuple):
+    """The session-cumulative totals a CLI session last reported on its ResultMessage."""
+
+    session_id: str
+    model_usage: dict[str, Any]
+    cost: float | None
+
+
+def _model_usage_since(cumulative: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any] | None:
+    """Per-model ``model_usage`` minus an earlier snapshot of the same session.
+
+    ``None`` when a model or counter moved backwards: the snapshot does not continue
+    ``baseline``.
+    """
+    if any(model not in cumulative for model in baseline):
+        return None
+    sliced: dict[str, Any] = {}
+    for model, entry in cumulative.items():
+        prev = baseline.get(model)
+        if not isinstance(entry, dict) or not isinstance(prev, dict):
+            sliced[model] = entry
+            continue
+        turn = dict(entry)
+        for key in _CUMULATIVE_MODEL_USAGE_KEYS:
+            now, before = entry.get(key), prev.get(key)
+            if not isinstance(now, int | float) or not isinstance(before, int | float):
+                continue
+            if now < before - 1e-9:
+                return None
+            turn[key] = max(now - before, 0)
+        sliced[model] = turn
+    return sliced
+
+
+def _turn_usage_slice(
+    model_usage: Any, cost: Any, baseline: _SessionUsage | None, resumed_from: str | None
+) -> tuple[Any, Any]:
+    """This turn's own ``model_usage`` and ``total_cost_usd`` from a ResultMessage.
+
+    A resumed CLI restores its session's running totals, so a resumed turn's
+    ResultMessage also counts every earlier turn. Subtract what that session last
+    reported. A total that moved backwards means the CLI did not restore them, so the
+    snapshot is already this turn's and is returned whole.
+
+    Rationale: .claude/notes/agents.md § Token accounting, per harness
+    """
+    if baseline is None or resumed_from is None or baseline.session_id != resumed_from:
+        return model_usage, cost
+    if not isinstance(model_usage, dict) or not model_usage:
+        return model_usage, cost
+    sliced = _model_usage_since(model_usage, baseline.model_usage)
+    if sliced is None:
+        logger.debug("model_usage of resumed session %s moved backwards; booking it whole", resumed_from)
+        return model_usage, cost
+    turn_cost = (
+        max(cost - baseline.cost, 0.0)
+        if isinstance(cost, int | float) and isinstance(baseline.cost, int | float)
+        else None
+    )
+    return sliced, turn_cost
+
+
 _JSON_START_SEARCH_LIMIT = 200
 
 
@@ -253,6 +326,8 @@ class _ClaudeTurnState:
         self.first_output_seen: bool = False
 
         # SDK ResultMessage capture.
+        self.resumed_from = agent._session_id
+        self.session_usage_baseline = agent._session_usage
         self.sdk_result_usage: dict[str, Any] | None = None
         self.sdk_result_model_usage: dict[str, Any] | None = None
         self.sdk_result_cost: float | None = None
@@ -471,12 +546,20 @@ class _ClaudeTurnState:
     def on_result_message(self, message: Message) -> None:
         """Capture the SDK ResultMessage usage/cost/session + the id-less backfill."""
         self.sdk_result_usage = getattr(message, "usage", None)
-        self.sdk_result_model_usage = getattr(message, "model_usage", None)
-        self.sdk_result_cost = getattr(message, "total_cost_usd", None)
+        model_usage = getattr(message, "model_usage", None)
+        cost = getattr(message, "total_cost_usd", None)
+        self.sdk_result_model_usage, self.sdk_result_cost = _turn_usage_slice(
+            model_usage, cost, self.session_usage_baseline, self.resumed_from
+        )
         self.num_turns = getattr(message, "num_turns", None)
         self.sdk_result_summary = self._agent._summarize_result(message)
-        # Only advance session_id on clean turns.
         new_session_id = getattr(message, "session_id", None)
+        # Every ResultMessage, error or not: the CLI saves its running totals on exit.
+        if isinstance(model_usage, dict) and model_usage and isinstance(new_session_id, str):
+            self._agent._session_usage = _SessionUsage(
+                new_session_id, model_usage, cost if isinstance(cost, int | float) else None
+            )
+        # Only advance session_id on clean turns.
         if self.sdk_result_summary is not None and self.sdk_result_summary.is_error:
             self.log.debug(
                 "is_error ResultMessage; not advancing session_id (kept %s)",
@@ -743,6 +826,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # Turn-lifecycle bookkeeping lives on the Agent base class.
         self._sdk_options_dump: dict[str, Any] | None = None
         self._session_id: str | None = None
+        self._session_usage: _SessionUsage | None = None
         # Held only while a communicate() call is in flight, so kill() can reach
         # the CLI subprocess when the SDK swallows asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
@@ -1373,10 +1457,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
     @staticmethod
     def _aggregate_model_usage(model_usage: dict[str, Any] | None) -> TokenUsage | None:
-        """Sum the SDK ResultMessage ``model_usage`` into a cumulative TokenUsage.
+        """Sum the turn's ``model_usage`` (see ``_turn_usage_slice``) into a TokenUsage.
 
-        Maps each model id to its cumulative session billing (camelCase, unlike
-        ``usage``). The SDK's authoritative cost breakdown: summed and priced it
+        Maps each model id to its billing (camelCase, unlike ``usage``). The SDK's
+        authoritative cost breakdown: summed and priced it
         reconciles to ``total_cost_usd`` exactly, and it INCLUDES sub-agent
         consumption the stream under-reports. None when absent, so the caller can
         fall back.
@@ -1413,12 +1497,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         sdk_result_model_usage: dict[str, Any] | None = None,
         model: str | None = None,
     ) -> TokenUsage | None:
-        """Build the run's cumulative TokenUsage, or None if unavailable.
+        """Build the turn's TokenUsage, or None if unavailable.
 
         Source-of-truth order:
 
-        1. ``ResultMessage.model_usage`` — the SDK's cumulative per-model billing,
-           authoritative and inclusive of sub-agent consumption. Prefer it.
+        1. ``ResultMessage.model_usage`` — the SDK's per-model billing, sliced to
+           this turn, authoritative and inclusive of sub-agent consumption. Prefer it.
         2. Per-call telemetry stream (sum) — used when ``model_usage`` is absent.
            Exact only when EVERY token-bearing emission carries a ``message_id``,
            since that is what the dedup keys on.
