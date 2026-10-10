@@ -35,6 +35,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar, Literal, NoReturn
 from uuid import uuid4
 
@@ -78,6 +79,78 @@ from .registry import AgentRegistry
 
 
 logger = logging.getLogger(__name__)
+
+# Pi reads models.json, auth.json and settings.json from one agent directory and has no
+# separate models path, so a context_window runs Pi from a per-agent mirror of that
+# directory whose models.json adds the cap as a modelOverrides entry.
+PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
+_PI_MODELS_FILE = "models.json"
+_PI_LIST_MODELS_TIMEOUT_SECONDS = 60
+
+
+def _host_pi_agent_dir() -> Path:
+    configured = os.environ.get(PI_AGENT_DIR_ENV)
+    return Path(configured).expanduser() if configured else Path.home() / ".pi" / "agent"
+
+
+def _pi_token_count(count: int) -> str:
+    """The token count as ``pi --list-models`` prints it (200000 -> "200K", 1000000 -> "1M")."""
+    if count >= 1_000_000:
+        millions = count / 1_000_000
+        return f"{int(millions)}M" if millions % 1 == 0 else f"{millions:.1f}M"
+    if count >= 1_000:
+        thousands = count / 1_000
+        return f"{int(thousands)}K" if thousands % 1 == 0 else f"{thousands:.1f}K"
+    return str(count)
+
+
+def _mirror_agent_dir(host: Path, target: Path) -> None:
+    """Link every entry of the host's agent dir into ``target``, except models.json.
+
+    Links, not copies, so credentials are not duplicated and the capped variant runs
+    with exactly the uncapped one's settings, extensions and prompts. Where the OS
+    refuses a link (Windows without the privilege), the entry is copied.
+    """
+    if not host.is_dir():
+        return
+    for entry in host.iterdir():
+        if entry.name == _PI_MODELS_FILE:
+            continue
+        link = target / entry.name
+        try:
+            link.symlink_to(entry, target_is_directory=entry.is_dir())
+        except OSError:
+            if entry.is_dir():
+                shutil.copytree(entry, link, symlinks=True)
+            else:
+                shutil.copy2(entry, link)
+
+
+def _capped_models_config(host: Path, provider: str, model_id: str, window: int) -> dict[str, Any]:
+    """The host's models.json with ``providers.<provider>.modelOverrides.<model_id>.contextWindow`` set."""
+    path = host / _PI_MODELS_FILE
+    try:
+        config: Any = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"pi: cannot add context_window to {path}: it is not plain JSON ({exc}); "
+            + "coder_eval does not merge into a models.json with comments"
+        ) from exc
+    providers = config.setdefault("providers", {}) if isinstance(config, dict) else None
+    provider_config = providers.setdefault(provider, {}) if isinstance(providers, dict) else None
+    overrides = provider_config.setdefault("modelOverrides", {}) if isinstance(provider_config, dict) else None
+    model_override = overrides.setdefault(model_id, {}) if isinstance(overrides, dict) else None
+    if not isinstance(model_override, dict):
+        raise RuntimeError(f"pi: cannot add context_window to {path}: unexpected shape under providers.{provider}")
+    model_override["contextWindow"] = window
+    return config
+
+
+def _write_capped_agent_dir(host: Path, target: Path, provider: str, model_id: str, window: int) -> None:
+    _mirror_agent_dir(host, target)
+    config = _capped_models_config(host, provider, model_id, window)
+    (target / _PI_MODELS_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
 
 # Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
 # Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is set.
@@ -715,6 +788,8 @@ class PiAgent(Agent[PiAgentConfig]):
         # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
         self._session_id: str | None = None
         self._session_dir: str | None = None
+        # The per-agent mirror of Pi's agent dir, set only when context_window is.
+        self._agent_dir: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         # Process-group ids of every invocation this agent spawned, swept on
         # kill()/kill_sync()/stop().
@@ -768,17 +843,77 @@ class PiAgent(Agent[PiAgentConfig]):
         safe_task_id = re.sub(r"[^A-Za-z0-9._-]", "_", self.task_id)
         self._session_id = f"coder-eval-{safe_task_id}-{uuid4().hex[:8]}"
         self._session_dir = tempfile.mkdtemp(prefix="pi-session-")
+        self._cleanup_agent_dir()
+        if self.config.context_window is not None:
+            await self._prepare_capped_agent_dir(self.config.context_window)
         self._state = AgentState.WORKING
+
+    async def _prepare_capped_agent_dir(self, window: int) -> None:
+        """Run Pi from a mirror of its agent dir whose models.json caps the model's window.
+
+        Pi silently ignores an override for a model id it does not know, so the cap is
+        confirmed with ``pi --list-models`` before the run, and a mismatch fails start().
+        """
+        assert self.config.model is not None  # PiAgentConfig rejects a window without one
+        provider, model_id = self.config.model.strip("/").split("/", 1)
+        host = _host_pi_agent_dir()
+        self._agent_dir = tempfile.mkdtemp(prefix="pi-agent-")
+        try:
+            await asyncio.to_thread(_write_capped_agent_dir, host, Path(self._agent_dir), provider, model_id, window)
+            listed = await self._listed_context(provider, model_id)
+        except BaseException:
+            self._cleanup_agent_dir()
+            raise
+        expected = _pi_token_count(window)
+        if listed != expected:
+            self._cleanup_agent_dir()
+            seen = f"lists it with context {listed}" if listed is not None else "does not list it"
+            raise RuntimeError(
+                f"pi: context_window {window} did not apply to {provider}/{model_id}: `pi --list-models` {seen}, "
+                + f"expected {expected}; check the model id and that its provider has credentials"
+            )
+        logger.info("pi: %s/%s capped to a %s context window", provider, model_id, expected)
+
+    async def _listed_context(self, provider: str, model_id: str) -> str | None:
+        """The context column ``pi --list-models`` prints for exactly this model, or None."""
+        proc = await asyncio.create_subprocess_exec(
+            "pi",
+            "--list-models",
+            model_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=STDOUT_LINE_LIMIT_BYTES,
+            cwd=self.working_directory,
+            env=self._build_env(),
+        )
+        try:
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_PI_LIST_MODELS_TIMEOUT_SECONDS)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            return None
+        for line in stdout.decode("utf-8", errors="replace").splitlines()[1:]:
+            columns = line.split()
+            if len(columns) >= 3 and columns[0] == provider and columns[1] == model_id:
+                return columns[2]
+        return None
 
     async def stop(self) -> None:
         await self.kill()
         self._cleanup_session_dir()
+        self._cleanup_agent_dir()
         self._mark_stopped()
 
     def _cleanup_session_dir(self) -> None:
         if self._session_dir is not None:
             shutil.rmtree(self._session_dir, ignore_errors=True)
             self._session_dir = None
+
+    def _cleanup_agent_dir(self) -> None:
+        # rmtree removes the links, never what they point at in the host's agent dir.
+        if self._agent_dir is not None:
+            shutil.rmtree(self._agent_dir, ignore_errors=True)
+            self._agent_dir = None
 
     async def kill(self) -> None:
         proc = self._process
@@ -823,6 +958,8 @@ class PiAgent(Agent[PiAgentConfig]):
         }
         if self._session_id:
             info["pi_session_id"] = self._session_id
+        if self._agent_dir is not None and self.config.context_window is not None:
+            info["pi_context_window"] = self.config.context_window
         if self._skill_dirs:
             # Recorded per task so a run's report can confirm the skills under test
             # actually reached the agent.
@@ -879,6 +1016,8 @@ class PiAgent(Agent[PiAgentConfig]):
             env["PATH"] = os.pathsep.join([*self._env_path_prepend, env.get("PATH", "")])
         if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
+        if self._agent_dir is not None:
+            env[PI_AGENT_DIR_ENV] = self._agent_dir
         return env
 
     # --- the turn ----------------------------------------------------------

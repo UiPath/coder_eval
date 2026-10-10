@@ -23,6 +23,7 @@ to the orchestrator are involved.
 - [What a Variant Can Override](#what-a-variant-can-override)
 - [Recipe: A/B a Skill](#recipe-ab-a-skill)
 - [Recipe: A/B a Model](#recipe-ab-a-model)
+- [Recipe: A/B a Context Window](#recipe-ab-a-context-window)
 - [Recipe: A/B a Prompt](#recipe-ab-a-prompt)
 - [Recipe: Smoke vs. e2e Flavors (Early Stop)](#recipe-smoke-vs-e2e-flavors-early-stop)
 - [Replicates (Statistical Power)](#replicates-statistical-power)
@@ -221,6 +222,29 @@ variants:
   - variant_id: opus
     agent: { model: claude-opus-5 }
 ```
+
+## Recipe: A/B a Context Window
+
+`agent.context_window` caps the context the agent works within, in tokens: the
+harness compacts the conversation before it outgrows the cap. Use it to measure
+pass rate and cost against the cap on a model with a large window. Each task row
+records the cap in `agent_config.context_window`.
+
+```yaml
+experiment_id: context-window
+description: "The same model with a 200k and a 400k context cap"
+
+variants:
+  - variant_id: cap-200k
+    agent: { context_window: 200000 }
+  - variant_id: cap-400k
+    agent: { context_window: 400000 }
+```
+
+Only `claude-code` and `codex` can apply the cap. On every other agent type the
+experiment fails at load. See
+[Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness) for what
+the cap does on each harness.
 
 ## Recipe: A/B a Prompt
 
