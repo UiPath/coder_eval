@@ -1500,6 +1500,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 + f"api_version={'set' if api_version else 'unset'})"
             )
 
+        if self.config.context_window is not None:
+            # Codex then auto-compacts at 90% of this window.
+            tool_config["model_context_window"] = self.config.context_window
+
         if tool_config:
             options["config"] = tool_config
 
