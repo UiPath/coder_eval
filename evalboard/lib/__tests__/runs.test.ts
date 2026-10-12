@@ -730,6 +730,15 @@ describe("tallyModels", () => {
         });
     });
 
+    test("the Delegate backend's underscored id is the same model as its hyphenated form", () => {
+        const out = tallyModels([
+            row("gpt_5_6_luna"),
+            row("gpt_5_6_luna"),
+            row("gpt-5-6-luna"),
+        ]);
+        expect(out).toEqual({ dominant: "gpt_5_6_luna", distinct: 1 });
+    });
+
     test("genuinely different models still count separately", () => {
         // The normalization must not collapse an A/B run's real spread.
         const out = tallyModels([

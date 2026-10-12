@@ -943,7 +943,9 @@ prices each turn under it, and the `check_pricing_coverage` pre-flight looks a D
 up under it. The out-of-tree `delegate-sdk` adapter did this `replace("_", "-")` inline, and the port to
 the built-in agent lost it. Every config written in the backend's own ids (`model: gpt_5_6_luna`) then
 priced the agent's tokens at `None`, so a downstream suite's run totals held only the judges' cost, and
-the pre-flight warned that the model had no rate.
+the pre-flight warned that the model had no rate. The evalboard mirrors the rule as `rateKey` in
+`evalboard/lib/pricing.ts`. A board row does not record its harness, so `resolvePricing` tries that key
+only after the exact id, and an id that already has a rate keeps it.
 
 Two things in `_DELEGATE_PRICING` look like copy errors on a skim and are not — a code review flagged
 both before this line existed to point at.
