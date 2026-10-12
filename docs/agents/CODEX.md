@@ -192,6 +192,13 @@ The agent maps `permission_mode` to the Codex SDK's `Sandbox`. The approval mode
 
 `allowed_tools` / `disallowed_tools` are normalized (`Bash` → `shell`, `Write`/`Edit` → `apply_patch`, etc.) and passed as `enabled_tools` / `disabled_tools` in the thread `config`. **Note:** the Codex SDK does not currently enforce `disabled_tools`; do not rely on it as a security boundary (the agent logs a warning when it is set).
 
+### Context Window
+
+`agent.context_window` is passed as `model_context_window` in the thread `config`. Codex
+uses it as the model's context window, capped to the model's catalog maximum, and
+auto-compacts at 90% of it. See
+[Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness).
+
 ### Skills Discovery
 
 The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:

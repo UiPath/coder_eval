@@ -1045,7 +1045,10 @@ def _render_agent_settings(result: EvaluationResult) -> str:
         return ""
 
     rows = collect_agent_settings_rows(
-        settings, is_sdk, system_prompt_semantics=(result.environment_info or {}).get("system_prompt_semantics")
+        settings,
+        is_sdk,
+        system_prompt_semantics=(result.environment_info or {}).get("system_prompt_semantics"),
+        context_window=result.agent_config.context_window if result.agent_config is not None else None,
     )
     body = "".join(f"<tr><td class='mono dim'>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in rows)
     return f"""
