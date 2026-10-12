@@ -270,7 +270,7 @@ def _build_catalogue() -> list[DelegateScenario]:
     )
 
     # (e) a max_turns cut where the crossing call is tool-only. It streams no text, so
-    # it is cut at its own usage frame, before its tool runs: the record books its usage.
+    # it is cut at its own usage frame, before the stream shows its tool: the record books its usage.
     scenarios.append(
         DelegateScenario(
             name="e_tool_only_call_crosses_cap",

@@ -826,7 +826,7 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
-    async def test_max_turns_stops_a_tool_only_reply_before_its_tool_runs(self, patch_exec, tmp_path):
+    async def test_max_turns_cuts_a_tool_only_reply_at_its_usage_frame(self, patch_exec, tmp_path):
         """A tool-only reply streams no text event; its usage frame still precedes its tool call."""
         events = [
             _ev(type="message", content="on it", isStepStart=True),
@@ -915,7 +915,7 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
-    async def test_early_stop_can_fire_on_a_usage_frame_before_its_tools_run(self, patch_exec, tmp_path):
+    async def test_early_stop_can_fire_on_a_usage_frame_before_its_tool_events(self, patch_exec, tmp_path):
         events = [
             _ev(type="message", content="", isStepStart=True),
             _usage(10, 1),

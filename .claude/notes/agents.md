@@ -862,9 +862,11 @@ tools, and it runs a batched reply's tools one at a time: `tool_call`, `tool_res
 the open set empties after each tool, so every tool counted as a call: a downstream suite saw a turn
 with 16 round-trips and 96 tool calls cut at `max_turns: 80`. Now a `thinking` or `message` event
 opens a call unless the open call has already streamed text, and a `usage` frame opens one only for
-a call that streamed none. The frame arrives before the call's first tool event, so the cap still
-fires before call N+1 runs a tool. A host without `usage` frames counts only the calls that stream text;
-such a host is below the 1.203.0 floor, which is also the first release that takes the `auth` init option.
+a call that streamed none. A crossing call that streams text is cut at that text, before any of its
+tools. A tool-only crossing call is cut at its own frame, and its first tool can start before the kill:
+the host starts a call's tools right after the frame, and the stream gives no earlier boundary. A host
+without `usage` frames counts only the calls that stream text; such a host is below the 1.203.0 floor,
+which is also the first release that takes the `auth` init option.
 Only `_TurnState.on_text` / `on_tool_event` / `on_usage_frame` / `on_result` write the count, so the rule
 lives in one place. `on_result` compares the live count with `len(turnUsages)` and warns when they
 differ: the order is read from the 1.203.1 host and SDK source, not from a live transcript, so a host

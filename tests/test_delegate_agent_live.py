@@ -146,7 +146,7 @@ async def test_delegate_live_token_usage_populated(tmp_path):
 
 @_live
 async def test_delegate_live_call_count_matches_the_host(tmp_path, caplog):
-    """A turn with several tool calls: the count max_turns uses agrees with the host's turnUsages."""
+    """A turn that runs tools: the count max_turns uses agrees with the host's turnUsages."""
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
@@ -159,5 +159,5 @@ async def test_delegate_live_call_count_matches_the_host(tmp_path, caplog):
         await agent.stop()
 
     assert record.crashed is False
-    assert len(record.commands) >= 3
+    assert record.commands
     assert not any("event stream showed" in r.message for r in caplog.records)

@@ -469,10 +469,11 @@ class _TurnState:
         self.call_streaming = False
 
     def on_usage_frame(self) -> None:
-        """A call's ``usage`` frame, which the host writes before the call's first tool event.
+        """A call's ``usage`` frame, which the host writes right before it starts the call's tools.
 
-        It opens the call only when the call streamed no text, so the cap still
-        fires before a tool-only call N+1 runs a tool.
+        It opens the call only when the call streamed no text. A tool-only call N+1
+        is cut here, and its first tool can start before the kill, because the
+        stream gives no earlier boundary.
         """
         if self.call_streaming:
             self.call_streaming = False

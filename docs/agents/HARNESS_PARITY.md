@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens on its first streamed text, or on its `usage` frame when it streams none |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens on its first streamed text, or on its `usage` frame when it streams none; a tool-only call N+1's first tool can start before the kill |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -560,9 +560,11 @@ Each harness finds the call boundary in its own stream (the table above):
   streams `tool_call`, `tool_result`, `tool_call`, `tool_result`, and a tool event
   cannot mark a call boundary. A call therefore opens on its first `thinking` or
   `message` event. A tool-only reply streams no text, so it opens on its `usage`
-  frame, which arrives before its first tool runs. Either way the cap fires before
-  call N+1 can run anything. The host's own `maxSteps` option does not stop the
-  turn, so the adapter does not send it and enforces the cap itself. A host that
+  frame. A call N+1 that streams text is cut at that text, before any of its tools.
+  A tool-only call N+1 is cut at its `usage` frame, and its first tool can start
+  before the kill: the host starts a call's tools right after the frame, and the
+  stream gives no earlier boundary. The host's own `maxSteps` option does not stop
+  the turn, so the adapter does not send it and enforces the cap itself. A host that
   sends no `usage` frames counts only the calls that stream text. The calls under
   the cap keep their tokens and cost.
 
