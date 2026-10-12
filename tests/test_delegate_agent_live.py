@@ -12,6 +12,7 @@ moved: compare a real ``delegate-stdio`` transcript against ``tests/test_delegat
 ``_ev`` / ``_result`` / ``_tool_call`` / ``_tool_result`` builders.
 """
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -141,3 +142,22 @@ async def test_delegate_live_token_usage_populated(tmp_path):
     assert record.token_usage is not None
     assert record.token_usage.output_tokens > 0
     assert record.num_turns is not None and record.num_turns >= 1
+
+
+@_live
+async def test_delegate_live_call_count_matches_the_host(tmp_path, caplog):
+    """A turn with several tool calls: the count max_turns uses agrees with the host's turnUsages."""
+    agent = _make_agent()
+    await agent.start(str(tmp_path))
+    try:
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate(
+                "Run the shell commands `echo one`, `echo two` and `echo three`, then reply DONE.",
+                timeout=180,
+            )
+    finally:
+        await agent.stop()
+
+    assert record.crashed is False
+    assert len(record.commands) >= 3
+    assert not any("event stream showed" in r.message for r in caplog.records)

@@ -863,12 +863,19 @@ the open set empties after each tool, so every tool counted as a call: a downstr
 with 16 round-trips and 96 tool calls cut at `max_turns: 80`. Now a `thinking` or `message` event
 opens a call unless the open call has already streamed text, and a `usage` frame opens one only for
 a call that streamed none. The frame arrives before the call's first tool event, so the cap still
-fires before call N+1 runs a tool. A host without `usage` frames counts only the calls that stream text.
+fires before call N+1 runs a tool. A host without `usage` frames counts only the calls that stream text;
+such a host is below the 1.203.0 floor, which is also the first release that takes the `auth` init option.
+Only `_TurnState.on_text` / `on_tool_event` / `on_usage_frame` / `on_result` write the count, so the rule
+lives in one place. `on_result` compares the live count with `len(turnUsages)` and warns when they
+differ: the order is read from the 1.203.1 host and SDK source, not from a live transcript, so a host
+release that reorders the frames shows up in the logs instead of silently moving the cap.
 
 **A cut turn keeps the usage of its finished calls.** A turn cut by `max_turns` or a stop gets no
 `result`, so the adapter sums the per-round-trip `usage` frames; the `result`'s total replaces the sum
-when it arrives. Ordering (from SDK/backend source): call N's `usage` frame precedes every tool event
-of call N. The adapter warns when a cut turn had finished calls but no usage.
+when it arrives. Ordering (from the host and SDK source, not a live transcript): call N's `usage` frame
+precedes every tool event of call N. A crossing call that streams text is cut at that text, so its usage
+is dropped; a tool-only crossing call is cut at its own frame, so its usage is booked. The adapter warns
+when a cut turn had finished calls but no usage.
 
 **One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one

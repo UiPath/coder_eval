@@ -437,11 +437,9 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
-        # Backend round-trips begun: a call opens on its first streamed text, or on its
-        # `usage` frame when it streamed none. Tool events never open one, because the
-        # host runs a batched reply's tools one at a time. Rationale: .claude/notes/agents.md.
+        # Backend round-trips begun. Only the on_* methods below write these two fields.
+        # Rationale: .claude/notes/agents.md § Delegate agent
         self.api_calls = 0
-        # The open call has streamed text, so its `usage` frame closes it without counting.
         self.call_streaming = False
 
         self.model_used: str | None = model
@@ -455,6 +453,42 @@ class _TurnState:
     @property
     def agent_output(self) -> str:
         return self.final_response if self.final_response is not None else "".join(self.text_parts)
+
+    def on_text(self) -> None:
+        """A ``thinking`` or ``message`` event. The first one of a call opens the call."""
+        if not self.call_streaming:
+            self.api_calls += 1
+            self.call_streaming = True
+
+    def on_tool_event(self) -> None:
+        """A ``tool_call`` or ``tool_result``. It ends the call's text and never opens a call.
+
+        The host runs a batched reply's tools one at a time, so one call streams
+        ``tool_call``, ``tool_result``, ``tool_call``, ``tool_result``.
+        """
+        self.call_streaming = False
+
+    def on_usage_frame(self) -> None:
+        """A call's ``usage`` frame, which the host writes before the call's first tool event.
+
+        It opens the call only when the call streamed no text, so the cap still
+        fires before a tool-only call N+1 runs a tool.
+        """
+        if self.call_streaming:
+            self.call_streaming = False
+        else:
+            self.api_calls += 1
+
+    def on_result(self, reported_calls: int) -> None:
+        """Replace the live count with the host's ``turnUsages`` count, and warn when they differ."""
+        if self.api_calls != reported_calls:
+            logger.warning(
+                "delegate: the event stream showed %d model call(s), but the host reported %d; "
+                + "max_turns counts from the stream, so the host's frame order has changed",
+                self.api_calls,
+                reported_calls,
+            )
+        self.api_calls = reported_calls
 
 
 @AgentRegistry.register(AgentKind.DELEGATE, DelegateAgentConfig)
@@ -812,6 +846,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 if mtype == "error":
                     await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
                 if mtype == "usage":
+                    state.on_usage_frame()
                     self._add_call_usage(msg, state)
                 else:
                     event = msg.get("event")
@@ -870,11 +905,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             self._session_id = session_id
 
         if event_type in _TEXT_EVENT_TYPES:
-            if not state.call_streaming:
-                state.api_calls += 1
-                state.call_streaming = True
+            state.on_text()
         elif event_type in ("tool_call", "tool_result"):
-            state.call_streaming = False
+            state.on_tool_event()
 
         if event_type == "message":
             text = event.get("content")
@@ -976,17 +1009,12 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
     @staticmethod
     def _add_call_usage(msg: dict[str, Any], state: _TurnState) -> None:
-        """Add one model call's ``usage`` frame to the turn's running total, and count the call.
+        """Add one model call's ``usage`` frame to the turn's running total.
 
         The host writes a call's frame before any tool event that call caused,
         so a turn cut at ``max_turns`` or by an early stop keeps the usage of
-        every call that finished. A call that streamed text was counted then;
-        a call that streamed none is counted here, before its tools run.
+        every call that finished.
         """
-        if state.call_streaming:
-            state.call_streaming = False
-        else:
-            state.api_calls += 1
         usage = _parse_usage(msg.get("usage"))
         if usage is not None:
             state.usage = usage if state.usage is None else state.usage + usage
@@ -995,7 +1023,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     def _warn_if_usage_missing(state: _TurnState, status: AgentEndStatus) -> None:
         """Warn when model calls finished but no usage arrived, so the turn books no tokens or cost.
 
-        A cut turn's in-flight call is not finished, so it is not counted.
+        A cut turn's in-flight call is not finished, so it is not counted. A host
+        with no ``usage`` frames shows only the calls that streamed text, so the
+        cut-turn figure is a floor.
         """
         if state.usage is not None:
             return
@@ -1008,8 +1038,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 )
         elif state.api_calls > 1:
             logger.warning(
-                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for its %d "
-                + "finished model call(s) are unknown",
+                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for at least "
+                + "%d finished model call(s) are unknown",
                 status.value,
                 state.api_calls - 1,
             )
@@ -1020,7 +1050,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         Its ``usage`` is the turn total, so it replaces the running sum of the
         ``usage`` frames. ``turnUsages`` has one entry per backend round-trip, so
         its length is the authoritative call count and replaces the running
-        estimate.
+        estimate, with a warning when the two differ.
         """
         response = msg.get("response")
         if isinstance(response, str):
@@ -1036,7 +1066,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             state.usage = usage
         turn_usages = msg.get("turnUsages")
         if isinstance(turn_usages, list) and turn_usages:
-            state.api_calls = len(turn_usages)
+            state.on_result(len(turn_usages))
 
     def _close_open_tools(self, state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         for tool_id, telemetry in list(state.open_tools.items()):

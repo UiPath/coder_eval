@@ -732,7 +732,7 @@ class TestCommunicate:
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=1)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0"]
+        assert [c.tool_id for c in record.commands] == ["t0"]
         assert record.num_turns == 2
 
     @staticmethod
@@ -835,10 +835,14 @@ class TestCommunicate:
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0", "t1"]
+        assert [c.tool_id for c in record.commands] == ["t0", "t1"]
         assert record.num_turns == 3
+        # The crossing call is cut at its own usage frame, so the cut turn books its usage too.
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (30, 3)
 
-    async def test_max_turns_counts_a_batched_reply_once(self, patch_exec, tmp_path):
+    async def test_max_turns_counts_text_calls_on_a_host_without_usage_frames(self, patch_exec, tmp_path):
+        """A host below the 1.203.0 floor sends no usage frames; each call that streams text still counts once."""
         events = [
             _ev(type="message", content="", isStepStart=True),
             _tool_call("a"),
@@ -854,22 +858,84 @@ class TestCommunicate:
         assert record.num_turns == 2
 
     async def test_max_turns_counts_a_batched_reply_once_when_the_host_runs_its_tools_in_sequence(
-        self, patch_exec, tmp_path
+        self, patch_exec, tmp_path, caplog
     ):
-        """The host runs a batched reply's tools one at a time, so each result closes every open call."""
+        """The host runs a batched reply's tools one at a time; tool events never open a call, so it counts once."""
         events = [
             _ev(type="message", content="", isStepStart=True),
             _usage(10, 1),
             *[frame for name in "abc" for frame in (_tool_call(name), _tool_result(name))],
             _ev(type="message", content="done", isStepStart=True),
             _usage(20, 2),
-            _result(response="done"),
+            _host_result("done", [_totals(10, 1), _totals(20, 2)]),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert [c.tool_id for c in record.commands] == ["a", "b", "c"]
+        assert record.num_turns == 2
+        assert not any("event stream showed" in r.message for r in caplog.records)
+
+    async def test_stream_count_that_differs_from_turn_usages_warns(self, patch_exec, tmp_path, caplog):
+        """A usage frame after the call's first tool event counts a call twice; the result's turnUsages shows it."""
+        events = [
+            *[
+                frame
+                for n in range(2)
+                for frame in (
+                    _ev(type="message", content=f"step {n}", isStepStart=True),
+                    _tool_call(f"t{n}"),
+                    _usage(10, 1),
+                    _tool_result(f"t{n}"),
+                )
+            ],
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi")
+        assert record.num_turns == 2
+        assert any("event stream showed 4 model call(s), but the host reported 2" in r.message for r in caplog.records)
+
+    async def test_tool_events_a_sub_agent_streams_do_not_open_calls(self, patch_exec, tmp_path):
+        """A sub-agent's calls write no usage frame to the main session; only its tool events reach the stream."""
+        events = [
+            _ev(type="message", content="delegating", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("agent"),
+            *[frame for n in range(4) for frame in (_tool_call(f"sub{n}"), _tool_result(f"sub{n}"))],
+            _tool_result("agent"),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(10, 1),
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
         assert record.max_turns_exhausted is False
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "b", "c"]
         assert record.num_turns == 2
+
+    async def test_early_stop_can_fire_on_a_usage_frame_before_its_tools_run(self, patch_exec, tmp_path):
+        events = [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("t0"),
+            _tool_result("t0"),
+            _usage(10, 1),
+            _tool_call("t1"),
+            _tool_result("t1"),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        polls = {"n": 0}
+
+        def should_stop() -> bool:
+            polls["n"] += 1
+            return polls["n"] == 5
+
+        record = await agent.communicate("hi", should_stop=should_stop)
+        assert [c.tool_id for c in record.commands] == ["t0"]
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (20, 2)
 
     async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
         """Tool b never returns, so only the usage frames show the next calls."""
@@ -883,7 +949,7 @@ class TestCommunicate:
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "t0"]
+        assert [c.tool_id for c in record.commands] == ["a", "b", "t0"]
         assert record.num_turns == 3
 
     async def test_communicate_before_start_raises(self):
