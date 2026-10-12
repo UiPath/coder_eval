@@ -126,8 +126,8 @@ Two consequences worth stating, because both are behaviour changes:
   (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
   subtracts the overlap once, and re-apportions so the parts still sum.
 
-**Two clock bases remain, and the row above says which.** Antigravity, Pi and
-claude-code derive every recorded wall stamp from one `TurnClock` per turn, so
+**Two clock bases remain, and the row above says which.** Antigravity, Pi,
+claude-code and Delegate derive every recorded wall stamp from one `TurnClock` per turn, so
 a turn's bounds and the tool spans subtracted from them cannot disagree, and
 neither can be moved by a DST transition or an NTP step inside the turn.
 Antigravity needed it first: its span was monotonic while its tool intervals

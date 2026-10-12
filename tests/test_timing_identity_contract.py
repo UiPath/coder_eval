@@ -7,7 +7,7 @@ the harness's own REDUCER with a hand-moved clock and reduces its output through
 a real ``EventCollector``, so every asserted number is computed by the harness.
 
 HAZARD: a case must script every clock its reducer reads — an injected
-``TurnClock`` (pi, antigravity, claude-code), a ``datetime`` subclass on the
+``TurnClock`` (pi, antigravity, claude-code, delegate), a ``datetime`` subclass on the
 module (opencode), ``time.monotonic`` on top of the injected clock
 (claude-code), or SDK epoch-ms stamps (codex). A real clock left in makes the
 case pass by accident.
