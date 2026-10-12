@@ -39,7 +39,6 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, NoReturn
 from urllib.parse import urlparse
@@ -76,7 +75,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import close_window
+from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import process_plugins
 
 from .registry import AgentRegistry
@@ -424,12 +423,14 @@ class _TurnState:
     richer transcript would need.
     """
 
-    def __init__(self, *, iteration: int, user_input: str, model: str | None) -> None:
+    def __init__(self, *, iteration: int, user_input: str, model: str | None, clock: TurnClock) -> None:
         self.iteration = iteration
         self.user_input = user_input
         self.turn_id = f"delegate-{iteration}"
-        self.started_at = time.monotonic()
-        self.started_dt = datetime.now()
+        # Every recorded stamp and duration_seconds derive from this one clock, so the
+        # time buckets tile the turn. Rationale: .claude/notes/timing.md § TurnClock
+        self.clock = clock
+        self.started_dt = clock.now()
 
         self.content_blocks: list[ContentBlock] = []
         self.text_parts: list[str] = []
@@ -802,12 +803,23 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             iteration=self._iteration,
             user_input=user_input,
             model=self.config.model,
+            clock=TurnClock(),
         )
 
         emit(
-            AgentStartEvent(task_id=self.task_id, prompt=user_input, iteration=self._iteration, model=self.config.model)
+            AgentStartEvent(
+                task_id=self.task_id,
+                prompt=user_input,
+                iteration=self._iteration,
+                model=self.config.model,
+                timestamp=state.started_dt,
+            )
         )
-        emit(TurnStartEvent(task_id=self.task_id, turn_id=state.turn_id, model=self.config.model))
+        emit(
+            TurnStartEvent(
+                task_id=self.task_id, turn_id=state.turn_id, model=self.config.model, timestamp=state.started_dt
+            )
+        )
 
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
@@ -951,12 +963,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             str(event.get("toolName") or "unknown"), raw_args if isinstance(raw_args, dict) else {}
         )
         state.sequence += 1
+        started = state.clock.now()
         telemetry = CommandTelemetry(
             tool_name=tool_name,
             tool_id=tool_id,
             assistant_turn_index=state.message_events,
-            timestamp=datetime.now(),
-            execution_started_at=datetime.now(),
+            timestamp=started,
+            execution_started_at=started,
             parameters=parameters,
             sequence_number=state.sequence,
         )
@@ -981,13 +994,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 tool_name=_orphan_tool_name(event, tool_id),
                 tool_id=tool_id or str(uuid.uuid4()),
                 assistant_turn_index=state.message_events,
-                timestamp=datetime.now(),
+                timestamp=state.clock.now(),
                 parameters=_orphan_tool_args(output),
                 sequence_number=state.sequence,
             )
         if isinstance(output, dict) and isinstance(output.get("content"), str):
             output = output["content"]
-        completed = datetime.now()
+        completed = state.clock.now()
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
@@ -1107,7 +1120,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
         messages = []
         if state.content_blocks:
-            completed = datetime.now()
+            completed = state.clock.now()
             # Single generation window for the whole turn (see .claude/notes/agents.md
             # § Delegate agent): tiles from the turn's own start, since there is no
             # prior emission to tile from.
@@ -1128,16 +1141,19 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 )
             )
 
+        ended = state.clock.now()
         emit(
             TurnEndEvent(
                 task_id=self.task_id,
                 turn_id=state.turn_id,
                 status=TurnEndStatus(status.value),
                 tokens=usage if not usage.is_empty() else None,
+                timestamp=ended,
             )
         )
         emit(
             AgentEndEvent(
+                timestamp=ended,
                 task_id=self.task_id,
                 status=status,
                 usage=usage,
@@ -1157,7 +1173,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 ),
                 crashed=crashed,
                 crash_reason=crash_reason,
-                duration_seconds=time.monotonic() - state.started_at,
+                duration_seconds=(ended - state.started_dt).total_seconds(),
             )
         )
 

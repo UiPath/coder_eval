@@ -1,8 +1,8 @@
 """A ``TurnClock`` stand-in anchored far from real time, for the CE064 tests.
 
 CE064 checks only that ``timestamp=`` is PRESENT on an ``AgentStartEvent`` /
-``AgentEndEvent``; this guards the SOURCE of that stamp on the three harnesses
-that own a clock. The stand-in sits a year from ``datetime.now()``, so a
+``AgentEndEvent``; this guards the SOURCE of that stamp on every harness
+that owns a clock. The stand-in sits a year from ``datetime.now()``, so a
 bracket that fell back to ``StreamEvent``'s default fails by a year, not by a
 microsecond. It advances on the real monotonic clock, so the head and tail
 come out as small positive measurements.

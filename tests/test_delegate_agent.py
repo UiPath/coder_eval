@@ -30,6 +30,7 @@ from coder_eval.errors.retry import should_retry
 from coder_eval.models import AgentKind, DelegateAgentConfig
 from coder_eval.reports.markdown import collect_agent_settings_rows
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
+from tests._bracket_clock import ANCHOR, AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams.delegate_fixtures import (
     _ev,
     _FakeProcess,
@@ -1121,6 +1122,50 @@ class TestCommunicate:
             await agent.communicate("hi", timeout=0.05, stream_callback=_Recorder())
         assert sum(isinstance(e, AgentStartEvent) for e in seen) == 1
         assert sum(isinstance(e, AgentEndEvent) for e in seen) == 1
+
+
+class TestTurnClock:
+    """Every recorded stamp comes from the turn's ``TurnClock``, the basis of ``duration_seconds``.
+
+    A raw ``datetime.now()`` drifts from ``time.monotonic()`` on Windows, which put
+    the teardown bucket past the whole turn in ``test_delegate_golden[a_tool_call]``.
+    """
+
+    @staticmethod
+    def _events() -> list[bytes]:
+        return [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("t0"),
+            _tool_result("t0"),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(10, 1),
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
+        ]
+
+    async def test_the_turn_bracket_is_on_the_clock(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        agent, _proc = await _started_agent(patch_exec, self._events(), tmp_path)
+        seen: list[Any] = []
+
+        class _Recorder:
+            def on_event(self, event: Any) -> None:
+                seen.append(event)
+
+        await agent.communicate("hi", stream_callback=_Recorder())
+        assert_bracket_on_the_clock(seen)
+
+    async def test_windows_and_tool_spans_are_on_the_clock(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        agent, _proc = await _started_agent(patch_exec, self._events(), tmp_path)
+        record = await agent.communicate("hi")
+        assert_overhead_is_measured(record)
+        assert record.commands
+        for command in record.commands:
+            assert command.execution_started_at is not None and command.execution_started_at >= ANCHOR
+            assert command.execution_completed_at is not None and command.execution_completed_at >= ANCHOR
+        assert record.messages
+        assert all(m.started_at is not None and m.started_at >= ANCHOR for m in record.messages)
 
 
 class TestStop:

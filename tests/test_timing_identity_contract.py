@@ -239,16 +239,15 @@ class _SteppedDatetime(datetime):
         return at(_SteppedDatetime.at_ms)
 
 
-def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+def _delegate_turn() -> Turn:
     """One tiled window covering the whole turn (the delegate agent builds no
     per-round-trip segments — see ``.claude/notes/agents.md`` § Delegate agent),
     with a real head (dispatch before ``_TurnState`` is constructed) and tail
-    (published after the last flush)."""
-    from coder_eval.agents import delegate_agent as delegate_module
+    (published after the last flush). The clock is injected, as for pi and
+    antigravity: the agent stamps everything off its ``TurnClock``."""
     from coder_eval.agents.delegate_agent import DelegateAgent, _TurnState
     from coder_eval.models import DelegateAgentConfig
 
-    monkeypatch.setattr(delegate_module, "datetime", _SteppedDatetime)
     agent = DelegateAgent(DelegateAgentConfig(type=AgentKind.DELEGATE), task_id="t")
     commands: list[CommandTelemetry] = []
     messages: list[TranscriptMessage] = []
@@ -259,19 +258,19 @@ def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
         elif isinstance(e, AgentEndEvent):
             messages.extend(e.messages)
 
-    _SteppedDatetime.at_ms = 500  # dispatch before the turn state exists: head
-    state = _TurnState(iteration=1, user_input="go", model="m")
+    clock = _InjectedClock(at_ms=500)  # dispatch before the turn state exists: head
+    state = _TurnState(iteration=1, user_input="go", model="m", clock=clock)
 
-    _SteppedDatetime.at_ms = 700
+    clock.at_ms = 700
     agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "toolArgs": {}}, state, emit)
-    _SteppedDatetime.at_ms = 1200
+    clock.at_ms = 1200
     agent._handle_tool_result(
         {"type": "tool_result", "toolId": "c1", "toolResult": {"content": "ok"}, "toolStatus": "completed"}, state, emit
     )
-    _SteppedDatetime.at_ms = 1800
+    clock.at_ms = 1800
     agent._handle_event({"type": "message", "content": "done", "isStepStart": True}, state, emit)
 
-    _SteppedDatetime.at_ms = 2000  # last flush: the single window closes here
+    clock.at_ms = 2000  # last flush: the single window closes here
     agent._finalize_turn(state, AgentEndStatus.COMPLETED, emit)
 
     return Turn(started_ms=0.0, ended_ms=2200.0, messages=messages, commands=commands)
@@ -614,8 +613,8 @@ def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
     assert_identity_closes(_opencode_turn(monkeypatch))
 
 
-def test_delegate_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    assert_identity_closes(_delegate_turn(monkeypatch))
+def test_delegate_buckets_tile_the_turn():
+    assert_identity_closes(_delegate_turn())
 
 
 def test_antigravity_buckets_tile_the_turn():
