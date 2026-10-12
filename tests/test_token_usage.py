@@ -11,6 +11,9 @@ from coder_eval.agents.claude_code_agent import (
     ClaudeCodeAgent,
     _is_sdk_result_message,
     _is_task_notification,
+    _model_usage_since,
+    _SessionUsage,
+    _turn_usage_slice,
 )
 from coder_eval.errors import AgentCrashError
 from coder_eval.models import (
@@ -734,6 +737,138 @@ class TestAgentTokenCapture:
         assert sub[0].cache_read_tokens == 14536
         assert sub[0].cache_creation_tokens == 112
         assert sub[0].content_blocks[0].text == "5050"
+
+
+# --- Resumed-session usage slicing ---
+
+
+def _haiku_usage(inp: int, out: int, cache_read: int, cache_write: int, cost: float) -> dict:
+    """One ``model_usage`` entry shaped as CLI 2.1.281 reports it."""
+    return {
+        "eu.anthropic.claude-haiku-5-5": {
+            "inputTokens": inp,
+            "outputTokens": out,
+            "cacheReadInputTokens": cache_read,
+            "cacheCreationInputTokens": cache_write,
+            "webSearchRequests": 0,
+            "costUSD": cost,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+        }
+    }
+
+
+# Three resumed turns of one session, as captured live on Bedrock (CLI 2.1.281).
+_LIVE_SESSION = [
+    (_haiku_usage(6, 468, 24103, 25347, 0.1409396), 0.1409396),
+    (_haiku_usage(12, 829, 75727, 26920, 0.1663734), 0.1663734),
+    (_haiku_usage(16, 877, 102647, 28016, 0.1782134), 0.1782134),
+]
+
+
+def _result_message(session_id: str, model_usage: dict, cost: float, *, is_error: bool = False) -> MagicMock:
+    result = MagicMock(spec=["session_id", "usage", "num_turns", "total_cost_usd", "model_usage", "is_error"])
+    result.session_id = session_id
+    result.usage = {}
+    result.num_turns = 1
+    result.total_cost_usd = cost
+    result.model_usage = model_usage
+    result.is_error = is_error
+    return result
+
+
+class TestResumedSessionUsage:
+    """A resumed CLI reports session totals; each turn books only its own slice."""
+
+    def test_slice_subtracts_previous_totals(self):
+        (first, first_cost), (second, second_cost) = _LIVE_SESSION[:2]
+        sliced, cost = _turn_usage_slice(second, second_cost, _SessionUsage("s1", first, first_cost), "s1")
+        entry = sliced["eu.anthropic.claude-haiku-5-5"]
+        assert (entry["inputTokens"], entry["outputTokens"]) == (6, 361)
+        assert (entry["cacheReadInputTokens"], entry["cacheCreationInputTokens"]) == (51624, 1573)
+        assert entry["costUSD"] == pytest.approx(0.0254338)
+        assert entry["contextWindow"] == 200000
+        assert cost == pytest.approx(0.0254338)
+
+    @pytest.mark.parametrize(
+        ("baseline_session", "resumed_from"),
+        [("s1", None), ("s0", "s1")],
+        ids=["fresh-session", "other-session"],
+    )
+    def test_no_slice_without_a_resume_of_the_same_session(self, baseline_session, resumed_from):
+        (first, first_cost), (second, second_cost) = _LIVE_SESSION[:2]
+        baseline = _SessionUsage(baseline_session, first, first_cost)
+        assert _turn_usage_slice(second, second_cost, baseline, resumed_from) == (second, second_cost)
+
+    def test_counter_moving_backwards_books_the_snapshot_whole(self):
+        (first, first_cost), (second, second_cost) = _LIVE_SESSION[:2]
+        baseline = _SessionUsage("s1", second, second_cost)
+        assert _turn_usage_slice(first, first_cost, baseline, "s1") == (first, first_cost)
+
+    def test_model_dropped_from_the_snapshot_is_not_a_continuation(self):
+        first, _ = _LIVE_SESSION[0]
+        assert _model_usage_since({}, first) is None
+
+    def test_model_new_this_turn_is_booked_whole(self):
+        (first, _), (second, _) = _LIVE_SESSION[:2]
+        helper = {"claude-sonnet-x": {"inputTokens": 7, "outputTokens": 3, "costUSD": 0.01}}
+        sliced = _model_usage_since({**second, **helper}, first)
+        assert sliced is not None
+        assert sliced["claude-sonnet-x"] == helper["claude-sonnet-x"]
+        assert sliced["eu.anthropic.claude-haiku-5-5"]["outputTokens"] == 361
+
+    @pytest.mark.asyncio
+    async def test_dialog_books_each_turn_once(self):
+        """Three ``communicate()`` calls on one session sum to the session total, not to the sum of totals."""
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", allowed_tools=["Read"])
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = MagicMock()
+        agent.working_directory.rglob.return_value = []
+        resumes: list[str | None] = []
+
+        records = []
+        for model_usage, cost in _LIVE_SESSION:
+
+            async def mock_query(*args, _usage=model_usage, _cost=cost, **kwargs):
+                resumes.append(kwargs["options"].resume)
+                yield _result_message("s1", _usage, _cost)
+
+            with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
+                records.append(await agent.communicate("next"))
+
+        assert resumes == [None, "s1", "s1"]
+        turns = [r.token_usage for r in records]
+        assert all(t is not None for t in turns)
+        assert [t.output_tokens for t in turns] == [468, 361, 48]
+        assert [t.cache_read_input_tokens for t in turns] == [24103, 51624, 26920]
+        assert sum(t.cache_creation_input_tokens for t in turns) == 28016
+        assert sum(t.total_cost_usd for t in turns) == pytest.approx(0.1782134)
+
+    @pytest.mark.asyncio
+    async def test_error_turn_still_moves_the_baseline(self):
+        """The CLI saves totals on every exit, so an is_error turn's totals are the next turn's baseline."""
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", allowed_tools=["Read"])
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = MagicMock()
+        agent.working_directory.rglob.return_value = []
+
+        results = [
+            _result_message("s1", *_LIVE_SESSION[0]),
+            _result_message("s1", *_LIVE_SESSION[1], is_error=True),
+            _result_message("s1", *_LIVE_SESSION[2]),
+        ]
+        records = []
+        for result in results:
+
+            async def mock_query(*args, _result=result, **kwargs):
+                yield _result
+
+            with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
+                records.append(await agent.communicate("next"))
+
+        assert records[2].token_usage is not None
+        assert records[2].token_usage.output_tokens == 48
+        assert records[2].token_usage.cache_read_input_tokens == 26920
 
 
 # --- Orchestrator aggregation tests ---

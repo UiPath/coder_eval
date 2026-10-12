@@ -306,6 +306,15 @@ cost bills it at the input rate and the cache buckets separately.
   id), and the `usage` snapshot the last resort. Cost is backfilled from the rate card
   when a turn was timed out or killed, so there is no terminal `ResultMessage` — the
   tokens are already captured, so this is pure pricing.
+  `model_usage` and `total_cost_usd` count the whole SESSION: a CLI resumed with
+  `resume=` restores the running totals it saved on exit, so a dialog's turn N reports
+  turns 1..N (`usage` and `num_turns` stay per-turn). `_turn_usage_slice` subtracts what
+  the same session last reported, from any ResultMessage, error or not, since the CLI
+  saves on every exit. Summing unsliced snapshots shows as a reconciliation row equal to
+  the previous turn's total (200/200 multi-turn tasks of a 2026-10-07 Haiku 5.5 run),
+  and inflates the simulator's tokens the same way. A counter that moved
+  backwards means no restore, and the snapshot is booked whole. A killed turn reports
+  nothing, so if its CLI saved totals, the next turn absorbs its usage.
 - **Codex/OpenAI** report `input_tokens` INCLUSIVE of the cached prefix, and bill no
   separate cache-write fee. So the fresh slice is `input - cached`, `cache_creation` is 0,
   and `cache_read` is `cached`.
