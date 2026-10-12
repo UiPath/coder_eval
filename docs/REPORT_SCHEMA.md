@@ -125,10 +125,10 @@ spent and the only way back is to run it again. So the framework warns loudly an
 keeps going.
 
 The warning fires up front. `check_pricing_coverage` walks every model the run pins
-(subject agents, judge criteria and the simulated user) before the first task dispatches, and logs the
-ones the card cannot price — early enough to fix the card and restart while it is
-still cheap. After that the run is on its own: totals become floors, and
-`tasks_cost_incomplete` says how many rows are behind that floor.
+(subject agents, judge criteria and the simulated user) before the first task
+dispatches, and logs the ones the card cannot price — early enough to fix the card
+and restart while it is still cheap. After that the run is on its own: totals become
+floors, and `tasks_cost_incomplete` says how many rows are behind that floor.
 
 Consumers should treat any cost field as a lower bound whenever `cost_complete` is
 false, and must not read `None` as `0.0` — "nothing could be priced" and "it was
