@@ -974,8 +974,9 @@ introduced or should silently "fix" by picking one number over the other.
 
 ### Delegate agent golden-master coverage
 
-`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for four
-scenarios: a tool call, a `max_turns` cut, an `error`-frame crash and an orphaned tool. The `event`,
+`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for six
+scenarios: a tool call, a `max_turns` cut, an `error`-frame crash, an orphaned tool, a tool-only call
+that crosses the cap, and a batched reply whose tools run one at a time. The `event`,
 `result` and `error` frames mirror the live `1.202.1` transcript. The `usage` frame and the `result`
 fields new in `1.203.0` follow the host source of UiPath/Autopilot#6656 (`src/usage.ts` and
 `handleSend`): every usage object carries all four buckets with `input_tokens` exclusive of cache,
