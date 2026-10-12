@@ -170,9 +170,10 @@ class BaseAgentConfig(BaseModel):
         gt=0,
         description=(
             "Cap, in tokens, on the context window the agent works within: the harness compacts "
-            "the conversation before it outgrows this size. None leaves the harness default (the "
-            "model's full window). Supported by claude-code (100000-1000000) and codex; any other "
-            "agent type rejects it at load. Never raises the model's own maximum."
+            "the conversation before it outgrows this size, and never runs past the model's own "
+            "window. None leaves the harness's default. Each agent type declares whether it applies "
+            "the cap and in what range; one that cannot rejects it at load. See "
+            "docs/agents/HARNESS_PARITY.md#the-context-window-cap-per-harness."
         ),
     )
 
@@ -334,7 +335,10 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
         """Reject ``context_window`` alongside ``claude_settings.autoCompactWindow``.
 
         ``context_window`` reaches the CLI as ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which
-        outranks the settings key, so the settings value would be silently ignored.
+        outranks the settings key, so the settings value would be silently ignored. Only an
+        inline dict can be checked here; when ``claude_settings`` is a file path, the file's
+        ``autoCompactWindow`` is overridden the same way, and the run is still capped at
+        ``context_window``, which is what the task row records.
         """
         if (
             self.context_window is not None
@@ -353,8 +357,10 @@ class CodexAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
 
-    # Codex clamps the value to the model's catalog maximum itself.
-    _context_window_range: ClassVar[tuple[int, int | None] | None] = (1, None)
+    # Codex clamps the value to the model's catalog maximum itself and compacts at 90% of it.
+    # The floor rejects a window too small to work in, such as a dropped "000" or a YAML
+    # `yes` that loads as 1.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (32_768, None)
 
 
 # Mirrors google.antigravity.types.ThinkingLevel as a plain Literal so this module

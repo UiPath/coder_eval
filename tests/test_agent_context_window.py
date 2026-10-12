@@ -43,6 +43,10 @@ class TestClaudeCode:
         with pytest.raises(ValidationError, match="out of range for agent type claude-code"):
             parse_agent_config(type=AgentKind.CLAUDE_CODE, context_window=window)
 
+    @pytest.mark.parametrize("window", [100_000, 1_000_000])
+    def test_the_ends_of_the_cli_range_are_accepted(self, window):
+        assert parse_agent_config(type=AgentKind.CLAUDE_CODE, context_window=window).context_window == window
+
     def test_a_second_auto_compact_source_fails_at_load(self):
         with pytest.raises(ValidationError, match=r"claude_settings.autoCompactWindow"):
             parse_agent_config(
@@ -67,6 +71,14 @@ class TestCodex:
         options = CodexAgent(parse_agent_config(type=AgentKind.CODEX))._build_thread_options()
         assert "model_context_window" not in options.get("config", {})
 
+    @pytest.mark.parametrize("window", [32_767, 1_000, True])
+    def test_a_window_too_small_to_work_in_fails_at_load(self, window):
+        with pytest.raises(ValidationError, match="out of range for agent type codex"):
+            parse_agent_config(type=AgentKind.CODEX, context_window=window)
+
+    def test_the_floor_itself_is_accepted(self):
+        assert parse_agent_config(type=AgentKind.CODEX, context_window=32_768).context_window == 32_768
+
 
 class TestUnsupportedHarnesses:
     @pytest.mark.parametrize(
@@ -79,6 +91,25 @@ class TestUnsupportedHarnesses:
     def test_a_non_positive_window_fails_even_before_the_type_is_known(self):
         with pytest.raises(ValidationError):
             parse_agent_config(context_window=0)
+
+
+class TestReports:
+    def test_the_agent_settings_name_the_window_a_capped_run_used(self):
+        from coder_eval.reports.markdown import collect_agent_settings_rows, resolve_context_window
+
+        tasks = [{"agent_config": {"type": "codex"}}, {"agent_config": {"type": "codex", "context_window": 200_000}}]
+        window = resolve_context_window(tasks)
+        assert window == 200_000
+        sdk_rows = dict(collect_agent_settings_rows({"permission_mode": "acceptEdits"}, True, context_window=window))
+        assert sdk_rows["Context Window"] == "200,000 tokens"
+        config_rows = dict(collect_agent_settings_rows({"context_window": 400_000}, False))
+        assert config_rows["Context Window"] == "400,000 tokens"
+
+    def test_an_uncapped_run_shows_no_window(self):
+        from coder_eval.reports.markdown import collect_agent_settings_rows, resolve_context_window
+
+        assert resolve_context_window([{"agent_config": {"type": "claude-code"}}, {}]) is None
+        assert "Context Window" not in dict(collect_agent_settings_rows({"permission_mode": "acceptEdits"}, True))
 
 
 class TestConfigLayers:

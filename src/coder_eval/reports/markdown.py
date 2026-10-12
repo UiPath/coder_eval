@@ -63,6 +63,19 @@ def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, 
     return None, False
 
 
+def resolve_context_window(task_dicts: list[dict[str, Any]]) -> int | None:
+    """The ``agent.context_window`` the tasks ran with, or None when they ran uncapped.
+
+    Read from ``agent_config`` because the value never reaches ``sdk_options``: Claude Code
+    receives it in the CLI environment and Codex in the thread config.
+    """
+    for task in task_dicts:
+        config = task.get("agent_config")
+        if isinstance(config, dict) and config.get("context_window") is not None:
+            return int(config["context_window"])
+    return None
+
+
 def _unwrap_system_prompt(value: Any) -> tuple[str | None, Literal["replace"] | None]:
     """Reduce a persisted ``sdk_options.system_prompt`` value to (text, regime).
 
@@ -90,6 +103,7 @@ def collect_agent_settings_rows(
     is_sdk: bool,
     *,
     system_prompt_semantics: str | None = None,
+    context_window: int | None = None,
 ) -> list[tuple[str, str]]:
     """Extract ordered label/value pairs from an agent settings dict.
 
@@ -110,6 +124,9 @@ def collect_agent_settings_rows(
     model = settings_source.get("model")
     if model:
         rows.append(("Model", str(model)))
+    window = context_window if context_window is not None else settings_source.get("context_window")
+    if window is not None:
+        rows.append(("Context Window", f"{int(window):,} tokens"))
 
     if is_sdk:
         for key, label in (
@@ -651,7 +668,10 @@ class ReportGenerator:
             semantics = (summary.environment_info or {}).get("system_prompt_semantics")
             lines.extend(
                 ReportGenerator._generate_agent_settings_section(
-                    settings_source, is_sdk, system_prompt_semantics=semantics
+                    settings_source,
+                    is_sdk,
+                    system_prompt_semantics=semantics,
+                    context_window=resolve_context_window(summary.task_results),
                 )
             )
 
@@ -672,11 +692,12 @@ class ReportGenerator:
         is_sdk: bool,
         *,
         system_prompt_semantics: str | None = None,
+        context_window: int | None = None,
     ) -> list[str]:
         """Generate Agent Settings markdown lines from a settings dict."""
         lines = ["## Agent Settings", ""]
         for label, value in collect_agent_settings_rows(
-            settings_source, is_sdk, system_prompt_semantics=system_prompt_semantics
+            settings_source, is_sdk, system_prompt_semantics=system_prompt_semantics, context_window=context_window
         ):
             lines.append(f"- **{label}**: {value}")
         return lines

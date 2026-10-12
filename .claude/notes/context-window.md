@@ -104,7 +104,7 @@ limit, which neither harness enforces.
 - Each config class declares `_context_window_range: ClassVar[tuple[int, int | None] |
   None]`. `None` (the base default) means that the harness cannot apply the field.
   `ClaudeCodeAgentConfig` declares `(100_000, 1_000_000)` and `CodexAgentConfig` declares
-  `(1, None)`.
+  `(32_768, None)`.
 - `check_context_window_supported` (model validator) rejects an unsupported type or an
   out-of-range value as soon as the type is known. A plugin agent inherits `None`, so it
   also rejects the field until it opts in.
@@ -128,7 +128,8 @@ Per-harness mapping:
 - `gt=0` on every config, so a type-less config rejects nonsense as well.
 - claude-code: 100000-1000000, the CLI's documented range. Outside that range the CLI
   drops a settings value silently, so coder_eval enforces the range itself.
-- codex: any positive integer. Codex clamps the value to the model's catalog maximum.
+- codex: 32768 and up. Codex clamps the value to the model's catalog maximum, and the
+  floor rejects a window too small to work in, such as a YAML `yes` coerced to 1.
 - every other type: rejected at load, naming the supported types. A variant that
   switches `type` to an unsupported harness fails when the experiment resolves.
 
@@ -149,11 +150,21 @@ variant, so a cap per variant groups without new report code. On claude-code the
   when the context approaches the window, minus an internal buffer. Equal caps therefore
   do not compact at exactly the same token count. A separate harness-neutral trigger
   field is possible, but it is not added until a benchmark needs it.
-- **A host `CLAUDE_CODE_AUTO_COMPACT_WINDOW` leaks into uncapped runs.** The SDK starts
-  the CLI with `os.environ` underneath `options.env`. When the field is unset, a host
-  value still applies. Clearing it would change behaviour for current users. It is
-  recorded in this note but not changed.
+- **A host `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and uncapped runs.** Decided: the SDK starts
+  the CLI with `os.environ` underneath `options.env`, so when the field is unset the
+  claude-code agent blanks a host value. A run recorded as uncapped is never capped by
+  the host. This changes every claude-code run on a host that sets the variable,
+  including runs that never set `context_window`. Codex has no equivalent: an unset
+  field leaves a host `model_context_window` in `$CODEX_HOME/config.toml` in effect.
 - **The recorded CLI version is wrong.** See the version table above:
   `environment_info.claude_code_cli` should record the bundled CLI version.
-- **Other harnesses.** OpenCode (`limit.context` in provider config) and Pi may have
-  equivalents. Each one needs its own verification before it opts in.
+- **Other harnesses.** Pi can lower a model's window with
+  `providers.<provider>.modelOverrides.<model>.contextWindow` in `models.json`. A mapping
+  was written and then reverted (d1757a60), because no live run backed it and no task
+  uses `type: pi`; it comes back with a live test. OpenCode (`limit.context` and
+  `limit.input` in provider config) needs a `limit.output` coder_eval does not know, and
+  an unpinned CLI. Antigravity's `CompactionConfig(token_threshold=N)` only moves the
+  trigger. Delegate keeps its history in the backend. Each needs its own verification
+  before it opts in.
+- **How often a run compacted is not recorded.** A cap A/B cannot yet tell "cap never
+  reached" from "compacted N times" from the task row alone.

@@ -648,16 +648,24 @@ uncapped under a "capped" label is a wrong measurement.
 | | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
 | mechanism | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the CLI environment | thread config `model_context_window` | rejected | rejected | rejected | rejected |
-| accepted range | 100000-1000000 | any positive integer | | | | |
+| accepted range | 100000-1000000 | 32768 and up | | | | |
 | when compaction starts | when the context approaches the window | at 90% of the window (Codex's default auto-compact limit) | | | | |
 | above the model's own window | capped to the model's window by the CLI | capped to the model's catalog maximum by Codex | | | | |
+| unset | the model's full window: a host `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is blanked | the host's Codex config: a `model_context_window` in `$CODEX_HOME/config.toml` still applies | | | | |
 
 - **claude-code**: the environment variable outranks `--autocompact` and every settings
   scope, so a host or project `autoCompactWindow` cannot change the cap. Setting
-  `claude_settings.autoCompactWindow` together with `context_window` fails at load.
+  `claude_settings.autoCompactWindow` together with `context_window` fails at load when
+  `claude_settings` is an inline dict; a settings file's `autoCompactWindow` is not read,
+  and is overridden the same way. When `context_window` is unset, a host-set
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is blanked, so a run recorded as uncapped is never
+  capped by the host. This applies to every claude-code run, capped or not.
 - **codex**: the value replaces the model's context window, so the hard-cap
   compaction at the usable window (a per-model share of it, 95% for Codex's fallback
-  model metadata) also moves.
+  model metadata) also moves. The floor of 32768 rejects a window too small to work in,
+  such as a dropped `000` or a YAML `yes`, which would load as 1. When `context_window`
+  is unset, coder_eval sets nothing, so a host `model_context_window` in
+  `$CODEX_HOME/config.toml` still applies.
 - Neither harness reports when the model's own window has lowered the cap. A cap
   above the model's window runs at the model's window.
 

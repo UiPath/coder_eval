@@ -241,10 +241,9 @@ variants:
     agent: { context_window: 400000 }
 ```
 
-Only `claude-code` and `codex` can apply the cap. On every other agent type the
-experiment fails at load. See
-[Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness) for what
-the cap does on each harness.
+An agent type that cannot apply the cap fails the experiment at load.
+[Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness) lists which
+agent types accept it and what the cap does on each.
 
 ## Recipe: A/B a Prompt
 

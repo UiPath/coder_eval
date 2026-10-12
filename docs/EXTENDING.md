@@ -80,6 +80,22 @@ class MyAgentConfig(BaseAgentConfig):
 The factory `create_agent(kind, config, …)` raises `TypeError` if the passed config
 isn't an instance of the registered `config_class`, so keep them paired.
 
+To accept `agent.context_window`, declare the inclusive range of tokens your harness
+can cap its context window to, and apply `self.config.context_window` when the agent
+starts. A config class that declares nothing rejects the field at load, which is the
+right default: a capped variant must never run uncapped.
+
+```python
+from typing import ClassVar
+
+class MyAgentConfig(BaseAgentConfig):
+    type: Literal["my-agent"] = "my-agent"
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (32_768, None)
+```
+
+Add your harness to the table in
+[Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness).
+
 ### The `Agent` ABC — implementation checklist
 
 Implement these three abstract methods:
