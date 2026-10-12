@@ -85,7 +85,7 @@ def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
         return []
     logger.warning(
         "No pricing rate for %s. Turns the agent's own backend prices are unaffected, but any "
-        + "judge call, timed-out turn or killed partial will book its tokens with no cost, so "
+        + "judge call, simulator turn, timed-out turn or killed partial will book its tokens with no cost, so "
         + "run-level totals will understate the bill (RunSummary.cost_complete reports false). "
         + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
         ", ".join(repr(m) for m in missing),

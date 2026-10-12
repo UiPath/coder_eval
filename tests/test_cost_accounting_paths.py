@@ -261,6 +261,7 @@ class TestRowCostProjection:
         row = eval_result_to_task_dict(result)
         assert row["judge_cost_usd"] == pytest.approx(0.02)
         assert row["total_cost_usd"] == pytest.approx(0.12)
+        assert row["cost_complete"] is False
 
     @staticmethod
     def _simulated(**env) -> EvaluationResult:
@@ -306,6 +307,11 @@ class TestRowCostProjection:
         assert row["simulator_cost_usd"] is None
         # The agent's own spend still lands; only the simulator slice is missing.
         assert row["total_cost_usd"] == pytest.approx(0.1)
+        assert row["cost_complete"] is False
+
+    def test_cost_complete_true_when_the_simulator_is_priced(self):
+        result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
+        assert eval_result_to_task_dict(result)["cost_complete"] is True
 
 
 class TestTotalCost:
