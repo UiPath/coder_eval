@@ -21,6 +21,7 @@ from coder_eval.models import (
     FinalStatus,
     JudgeCriterionResult,
     ResolvedTask,
+    SimulationConfig,
     SimulationTelemetry,
     TaskDefinition,
     TokenUsage,
@@ -110,6 +111,19 @@ class TestPricingPreflight:
         """The out-of-the-box judge must not warn on a stock task."""
         judge = {"type": "llm_judge", "description": "d", "prompt": "grade it"}
         assert check_pricing_coverage([_resolved("claude-sonnet-5", tmp_path, [judge])]) == []
+
+    def test_simulator_model_is_pre_flighted(self, tmp_path):
+        """``simulator_cost_usd`` always prices from the rate card, so an unpriced simulator books no cost."""
+        resolved = _resolved("claude-sonnet-5", tmp_path)
+        resolved.task.simulation = SimulationConfig(
+            enabled=True, model="us.anthropic.claude-sonnet-99", persona="p", goal="g"
+        )
+        assert check_pricing_coverage([resolved]) == ["us.anthropic.claude-sonnet-99"]
+
+    def test_disabled_simulation_is_not_pre_flighted(self, tmp_path):
+        resolved = _resolved("claude-sonnet-5", tmp_path)
+        resolved.task.simulation = SimulationConfig(model="us.anthropic.claude-sonnet-99", persona="p", goal="g")
+        assert check_pricing_coverage([resolved]) == []
 
 
 class TestRowCostProjection:

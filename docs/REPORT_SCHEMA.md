@@ -125,7 +125,7 @@ spent and the only way back is to run it again. So the framework warns loudly an
 keeps going.
 
 The warning fires up front. `check_pricing_coverage` walks every model the run pins
-(subject agents and judge criteria) before the first task dispatches, and logs the
+(subject agents, judge criteria and the simulated user) before the first task dispatches, and logs the
 ones the card cannot price — early enough to fix the card and restart while it is
 still cheap. After that the run is on its own: totals become floors, and
 `tasks_cost_incomplete` says how many rows are behind that floor.

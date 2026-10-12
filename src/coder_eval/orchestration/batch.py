@@ -46,11 +46,12 @@ logger = logging.getLogger(__name__)
 
 
 def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
-    """Every model id this run pins up front: subject agents and judge criteria.
+    """Every model id this run pins up front: subject agents, judge criteria and the simulated user.
 
-    A criterion's model is always priced from the rate card (no judge backend
-    reports a cost), so it matters more here than the agent's, which only falls
-    back to the card on a turn the backend never priced.
+    A criterion's model and the simulator's are always priced from the rate card
+    (no judge backend reports a cost, and ``simulator_cost_usd`` prices its tokens),
+    so they matter more here than the agent's, which only falls back to the card on
+    a turn the backend never priced.
     """
     for rt in resolved_tasks:
         agent = rt.task.agent
@@ -60,6 +61,8 @@ def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
             yield agent.model if agent else None
         for criterion in rt.task.success_criteria:
             yield getattr(criterion, "model", None)
+        if rt.task.simulation is not None and rt.task.simulation.enabled:
+            yield rt.task.simulation.model
 
 
 def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
