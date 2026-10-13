@@ -223,8 +223,9 @@ def _build_catalogue() -> list[DelegateScenario]:
         )
     )
 
-    # (b) a max_turns cut. The host gets no chance to send a result, so the record
-    # keeps the usage frames of the calls under the cap and drops the call that crossed it.
+    # (b) a max_turns cut. The host gets no chance to send a result. The crossing call
+    # streams text first, so it is cut at that text, before its usage frame: the record
+    # keeps the usage frames of the calls under the cap and drops the crossing call's.
     scenarios.append(
         DelegateScenario(
             name="b_max_turns_cut",
@@ -265,6 +266,52 @@ def _build_catalogue() -> list[DelegateScenario]:
                 _ev(type="message", content="Waiting.", isStepStart=True),
                 _host_result("Waiting.", [_totals(100, 20)]),
             ],
+        )
+    )
+
+    # (e) a max_turns cut where the crossing call is tool-only. It streams no text, so
+    # it is cut at its own usage frame, before the stream shows its tool: the record books its usage.
+    scenarios.append(
+        DelegateScenario(
+            name="e_tool_only_call_crosses_cap",
+            frames=[
+                _ev(type="message", content="", isStepStart=True),
+                *[
+                    frame
+                    for n in range(3)
+                    for frame in (
+                        _usage(10 * (n + 1), n + 1),
+                        _tool_call(f"t{n}", command=f"step {n}"),
+                        _tool_result(f"t{n}", f"out {n}"),
+                    )
+                ],
+                _host_result("done", [_totals(10, 1), _totals(20, 2), _totals(30, 3)]),
+            ],
+            max_turns=2,
+        )
+    )
+
+    # (f) one batched reply whose three tools the host runs one at a time. It is one
+    # call, so the turn completes under max_turns=2.
+    scenarios.append(
+        DelegateScenario(
+            name="f_batched_tools_in_sequence",
+            frames=[
+                _ev(type="message", content="", isStepStart=True),
+                _usage(100, 20),
+                *[
+                    frame
+                    for name in ("a", "b", "c")
+                    for frame in (
+                        _tool_call(f"tool-{name}", "Bash", command=f"echo {name}"),
+                        _tool_result(f"tool-{name}", name),
+                    )
+                ],
+                _ev(type="message", content="Done.", isStepStart=True),
+                _usage(50, 30),
+                _host_result("Done.", [_totals(100, 20), _totals(50, 30)]),
+            ],
+            max_turns=2,
         )
     )
 

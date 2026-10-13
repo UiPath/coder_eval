@@ -855,12 +855,29 @@ shared `agents/_skills.py` resolver: the SDK wants ONE parent directory, not a l
 ran 7 steps). The adapter counts calls from the event stream and abandons the host when call N+1
 opens; `len(turnUsages)` from the `result` then replaces the estimate as `num_turns`.
 
+**A call opens on its first text, or on its `usage` frame when it streams none — never on a tool
+event.** The host streams a call's text, flushes the call's `usage` frame, then runs the call's
+tools, and it runs a batched reply's tools one at a time: `tool_call`, `tool_result`, `tool_call`,
+`tool_result`. The adapter once opened call N+1 when every open tool had returned. With that order
+the open set empties after each tool, so every tool counted as a call: a downstream suite saw a turn
+with 16 round-trips and 96 tool calls cut at `max_turns: 80`. Now a `thinking` or `message` event
+opens a call unless the open call has already streamed text, and a `usage` frame opens one only for
+a call that streamed none. A crossing call that streams text is cut at that text, before any of its
+tools. A tool-only crossing call is cut at its own frame, and its first tool can start before the kill:
+the host starts a call's tools right after the frame, and the stream gives no earlier boundary. A host
+without `usage` frames counts only the calls that stream text; such a host is below the 1.203.0 floor,
+which is also the first release that takes the `auth` init option.
+Only `_TurnState.on_text` / `on_tool_event` / `on_usage_frame` / `on_result` write the count, so the rule
+lives in one place. `on_result` compares the live count with `len(turnUsages)` and warns when they
+differ: the order is read from the 1.203.1 host and SDK source, not from a live transcript, so a host
+release that reorders the frames shows up in the logs instead of silently moving the cap.
+
 **A cut turn keeps the usage of its finished calls.** A turn cut by `max_turns` or a stop gets no
 `result`, so the adapter sums the per-round-trip `usage` frames; the `result`'s total replaces the sum
-when it arrives. Ordering (from SDK/backend source, not a live transcript): call N's `usage` frame
-always precedes the `tool_result` that opens call N+1. The frame is NOT a call boundary — it arrives
-before its call's tools run — so the cap stays on "the previous call's tools have all returned". The
-adapter warns when a cut turn had finished calls but no usage.
+when it arrives. Ordering (from the host and SDK source, not a live transcript): call N's `usage` frame
+precedes every tool event of call N. A crossing call that streams text is cut at that text, so its usage
+is dropped; a tool-only crossing call is cut at its own frame, so its usage is booked. The adapter warns
+when a cut turn had finished calls but no usage.
 
 **One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
@@ -966,8 +983,9 @@ introduced or should silently "fix" by picking one number over the other.
 
 ### Delegate agent golden-master coverage
 
-`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for four
-scenarios: a tool call, a `max_turns` cut, an `error`-frame crash and an orphaned tool. The `event`,
+`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for six
+scenarios: a tool call, a `max_turns` cut, an `error`-frame crash, an orphaned tool, a tool-only call
+that crosses the cap, and a batched reply whose tools run one at a time. The `event`,
 `result` and `error` frames mirror the live `1.202.1` transcript. The `usage` frame and the `result`
 fields new in `1.203.0` follow the host source of UiPath/Autopilot#6656 (`src/usage.ts` and
 `handleSend`): every usage object carries all four buckets with `input_tokens` exclusive of cache,

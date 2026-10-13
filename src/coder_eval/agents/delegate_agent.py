@@ -39,7 +39,6 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, NoReturn
 from urllib.parse import urlparse
@@ -76,7 +75,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import close_window
+from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import process_plugins
 
 from .registry import AgentRegistry
@@ -424,12 +423,14 @@ class _TurnState:
     richer transcript would need.
     """
 
-    def __init__(self, *, iteration: int, user_input: str, model: str | None) -> None:
+    def __init__(self, *, iteration: int, user_input: str, model: str | None, clock: TurnClock) -> None:
         self.iteration = iteration
         self.user_input = user_input
         self.turn_id = f"delegate-{iteration}"
-        self.started_at = time.monotonic()
-        self.started_dt = datetime.now()
+        # Every recorded stamp and duration_seconds derive from this one clock, so the
+        # time buckets tile the turn. Rationale: .claude/notes/timing.md § TurnClock
+        self.clock = clock
+        self.started_dt = clock.now()
 
         self.content_blocks: list[ContentBlock] = []
         self.text_parts: list[str] = []
@@ -437,13 +438,10 @@ class _TurnState:
         self.open_tools: dict[str, CommandTelemetry] = {}
         self.sequence = 0
         self.message_events = 0
-        # Backend round-trips begun. A tool-only reply streams no text, so each call
-        # after the first opens once the previous call's tools have all returned.
+        # Backend round-trips begun. Only the on_* methods below write these two fields.
+        # Rationale: .claude/notes/agents.md § Delegate agent
         self.api_calls = 0
-        # A result arrived while other tools were still open, so the next call is not
-        # counted yet. If the model speaks or calls a new tool first, the next call has
-        # begun; the open tools stay open, because the SDK can still deliver their results.
-        self.results_incomplete = False
+        self.call_streaming = False
 
         self.model_used: str | None = model
         # The sum of the per-call `usage` frames, until the `result` replaces it with the turn total.
@@ -456,6 +454,43 @@ class _TurnState:
     @property
     def agent_output(self) -> str:
         return self.final_response if self.final_response is not None else "".join(self.text_parts)
+
+    def on_text(self) -> None:
+        """A ``thinking`` or ``message`` event. The first one of a call opens the call."""
+        if not self.call_streaming:
+            self.api_calls += 1
+            self.call_streaming = True
+
+    def on_tool_event(self) -> None:
+        """A ``tool_call`` or ``tool_result``. It ends the call's text and never opens a call.
+
+        The host runs a batched reply's tools one at a time, so one call streams
+        ``tool_call``, ``tool_result``, ``tool_call``, ``tool_result``.
+        """
+        self.call_streaming = False
+
+    def on_usage_frame(self) -> None:
+        """A call's ``usage`` frame, which the host writes right before it starts the call's tools.
+
+        It opens the call only when the call streamed no text. A tool-only call N+1
+        is cut here, and its first tool can start before the kill, because the
+        stream gives no earlier boundary.
+        """
+        if self.call_streaming:
+            self.call_streaming = False
+        else:
+            self.api_calls += 1
+
+    def on_result(self, reported_calls: int) -> None:
+        """Replace the live count with the host's ``turnUsages`` count, and warn when they differ."""
+        if self.api_calls != reported_calls:
+            logger.warning(
+                "delegate: the event stream showed %d model call(s), but the host reported %d; "
+                + "max_turns counts from the stream, so the host's frame order has changed",
+                self.api_calls,
+                reported_calls,
+            )
+        self.api_calls = reported_calls
 
 
 @AgentRegistry.register(AgentKind.DELEGATE, DelegateAgentConfig)
@@ -768,12 +803,23 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             iteration=self._iteration,
             user_input=user_input,
             model=self.config.model,
+            clock=TurnClock(),
         )
 
         emit(
-            AgentStartEvent(task_id=self.task_id, prompt=user_input, iteration=self._iteration, model=self.config.model)
+            AgentStartEvent(
+                task_id=self.task_id,
+                prompt=user_input,
+                iteration=self._iteration,
+                model=self.config.model,
+                timestamp=state.started_dt,
+            )
         )
-        emit(TurnStartEvent(task_id=self.task_id, turn_id=state.turn_id, model=self.config.model))
+        emit(
+            TurnStartEvent(
+                task_id=self.task_id, turn_id=state.turn_id, model=self.config.model, timestamp=state.started_dt
+            )
+        )
 
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
@@ -813,14 +859,14 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 if mtype == "error":
                     await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
                 if mtype == "usage":
+                    state.on_usage_frame()
                     self._add_call_usage(msg, state)
-                    continue
-                event = msg.get("event")
-                if mtype != "event" or not isinstance(event, dict):
-                    logger.debug("delegate: ignoring host message %r", mtype)
-                    continue
-
-                self._handle_event(event, state, emit)
+                else:
+                    event = msg.get("event")
+                    if mtype != "event" or not isinstance(event, dict):
+                        logger.debug("delegate: ignoring host message %r", mtype)
+                        continue
+                    self._handle_event(event, state, emit)
 
                 if max_turns is not None and state.api_calls > max_turns:
                     state.max_turns_exhausted = True
@@ -871,13 +917,10 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         if isinstance(session_id, str) and session_id:
             self._session_id = session_id
 
-        if state.api_calls == 0 and (event_type in _TEXT_EVENT_TYPES or event_type == "tool_call"):
-            state.api_calls = 1
-        elif state.results_incomplete and (
-            event_type in _TEXT_EVENT_TYPES or (event_type == "tool_call" and _tool_id(event) not in state.open_tools)
-        ):
-            state.api_calls += 1
-            state.results_incomplete = False
+        if event_type in _TEXT_EVENT_TYPES:
+            state.on_text()
+        elif event_type in ("tool_call", "tool_result"):
+            state.on_tool_event()
 
         if event_type == "message":
             text = event.get("content")
@@ -894,9 +937,6 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             self._handle_tool_call(event, state, emit)
         elif event_type == "tool_result":
             self._handle_tool_result(event, state, emit)
-            state.results_incomplete = bool(state.open_tools)
-            if not state.open_tools:
-                state.api_calls += 1
         elif event_type == "error":
             state.error_message = str(event.get("error") or "unknown error")
             logger.warning("delegate: SDK reported an error event: %s", state.error_message)
@@ -923,12 +963,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             str(event.get("toolName") or "unknown"), raw_args if isinstance(raw_args, dict) else {}
         )
         state.sequence += 1
+        started = state.clock.now()
         telemetry = CommandTelemetry(
             tool_name=tool_name,
             tool_id=tool_id,
             assistant_turn_index=state.message_events,
-            timestamp=datetime.now(),
-            execution_started_at=datetime.now(),
+            timestamp=started,
+            execution_started_at=started,
             parameters=parameters,
             sequence_number=state.sequence,
         )
@@ -953,13 +994,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 tool_name=_orphan_tool_name(event, tool_id),
                 tool_id=tool_id or str(uuid.uuid4()),
                 assistant_turn_index=state.message_events,
-                timestamp=datetime.now(),
+                timestamp=state.clock.now(),
                 parameters=_orphan_tool_args(output),
                 sequence_number=state.sequence,
             )
         if isinstance(output, dict) and isinstance(output.get("content"), str):
             output = output["content"]
-        completed = datetime.now()
+        completed = state.clock.now()
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
@@ -984,7 +1025,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     def _add_call_usage(msg: dict[str, Any], state: _TurnState) -> None:
         """Add one model call's ``usage`` frame to the turn's running total.
 
-        The host writes a call's frame before any tool result that call caused,
+        The host writes a call's frame before any tool event that call caused,
         so a turn cut at ``max_turns`` or by an early stop keeps the usage of
         every call that finished.
         """
@@ -996,7 +1037,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
     def _warn_if_usage_missing(state: _TurnState, status: AgentEndStatus) -> None:
         """Warn when model calls finished but no usage arrived, so the turn books no tokens or cost.
 
-        A cut turn's in-flight call is not finished, so it is not counted.
+        A cut turn's in-flight call is not finished, so it is not counted. A host
+        with no ``usage`` frames shows only the calls that streamed text, so the
+        cut-turn figure is a floor.
         """
         if state.usage is not None:
             return
@@ -1009,8 +1052,8 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 )
         elif state.api_calls > 1:
             logger.warning(
-                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for its %d "
-                + "finished model call(s) are unknown",
+                "delegate: turn ended (%s) with no usage frame from the host; tokens and cost for at least "
+                + "%d finished model call(s) are unknown",
                 status.value,
                 state.api_calls - 1,
             )
@@ -1021,7 +1064,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         Its ``usage`` is the turn total, so it replaces the running sum of the
         ``usage`` frames. ``turnUsages`` has one entry per backend round-trip, so
         its length is the authoritative call count and replaces the running
-        estimate.
+        estimate, with a warning when the two differ.
         """
         response = msg.get("response")
         if isinstance(response, str):
@@ -1037,7 +1080,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             state.usage = usage
         turn_usages = msg.get("turnUsages")
         if isinstance(turn_usages, list) and turn_usages:
-            state.api_calls = len(turn_usages)
+            state.on_result(len(turn_usages))
 
     def _close_open_tools(self, state: _TurnState, emit: Callable[[StreamEvent], None]) -> None:
         for tool_id, telemetry in list(state.open_tools.items()):
@@ -1077,7 +1120,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
 
         messages = []
         if state.content_blocks:
-            completed = datetime.now()
+            completed = state.clock.now()
             # Single generation window for the whole turn (see .claude/notes/agents.md
             # § Delegate agent): tiles from the turn's own start, since there is no
             # prior emission to tile from.
@@ -1098,16 +1141,19 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 )
             )
 
+        ended = state.clock.now()
         emit(
             TurnEndEvent(
                 task_id=self.task_id,
                 turn_id=state.turn_id,
                 status=TurnEndStatus(status.value),
                 tokens=usage if not usage.is_empty() else None,
+                timestamp=ended,
             )
         )
         emit(
             AgentEndEvent(
+                timestamp=ended,
                 task_id=self.task_id,
                 status=status,
                 usage=usage,
@@ -1127,7 +1173,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                 ),
                 crashed=crashed,
                 crash_reason=crash_reason,
-                duration_seconds=time.monotonic() - state.started_at,
+                duration_seconds=(ended - state.started_dt).total_seconds(),
             )
         )
 
