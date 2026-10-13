@@ -2,6 +2,65 @@
 
 <!-- version list -->
 
+## v0.12.13 (2026-10-13)
+
+### Bug Fixes
+
+- **agent**: Address the context_window review
+  ([#219](https://github.com/UiPath/coder_eval/pull/219),
+  [`ae02485`](https://github.com/UiPath/coder_eval/commit/ae02485a7a21944e2ee15a0f72131def5f2e425a))
+
+- **agents**: Count Delegate batched tool calls once under max_turns and stamp turns off one
+  TurnClock ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+- **claude-code**: Book only the turn's own usage on a resumed session
+  ([#221](https://github.com/UiPath/coder_eval/pull/221),
+  [`c9456e5`](https://github.com/UiPath/coder_eval/commit/c9456e58b49174c29f48577507f249eb9e98a94b))
+
+- **delegate**: Count a batched reply's tools as one model call under max_turns
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+- **delegate**: Keep the max_turns count in one place and warn when it drifts
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+- **delegate**: Stamp the whole turn off one TurnClock
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+- **pricing**: Add Haiku 5.5, Sonnet 5.5 and GPT-6.1 Sol, re-verify every row
+  ([#220](https://github.com/UiPath/coder_eval/pull/220),
+  [`b3ae960`](https://github.com/UiPath/coder_eval/commit/b3ae96033d32f3e88bff68a15219e85372762220))
+
+### Chores
+
+- **no-mistakes/document**: Name Delegate among the TurnClock harnesses in timing docs
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+### Documentation
+
+- **delegate**: Count the six Delegate golden-master scenarios in the notes
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+- **delegate**: Document the tool-only cut race and relax the live test count
+  ([#222](https://github.com/UiPath/coder_eval/pull/222),
+  [`db2067e`](https://github.com/UiPath/coder_eval/commit/db2067e94e458796c10cfe5f2b0c0383a3c8db03))
+
+### Features
+
+- **agent**: Cap Pi's context window with agent.context_window
+  ([#219](https://github.com/UiPath/coder_eval/pull/219),
+  [`ae02485`](https://github.com/UiPath/coder_eval/commit/ae02485a7a21944e2ee15a0f72131def5f2e425a))
+
+- **agent**: Cap the agent's context window with agent.context_window
+  ([#219](https://github.com/UiPath/coder_eval/pull/219),
+  [`ae02485`](https://github.com/UiPath/coder_eval/commit/ae02485a7a21944e2ee15a0f72131def5f2e425a))
+
+
 ## v0.12.12 (2026-10-06)
 
 ### Bug Fixes
