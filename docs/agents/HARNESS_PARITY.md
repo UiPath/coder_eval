@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens on its first streamed text, or on its `usage` frame when it streams none; a tool-only call N+1's first tool can start before the kill |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -34,8 +34,8 @@ wall clock its numbers account for.
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` | set |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent | synthetic `<turn_id>-msg-0` (exactly one per turn) |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes, trivially — one window IS the turn |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn | raw `datetime.now()` (no `TurnClock` — CE064 does not require one, since there is only one window and no inter-window drift it could correct) |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its own single-window bounds |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn | one `TurnClock` per turn (its raw `datetime.now()` bounds drifted from the monotonic `duration_seconds` on Windows and put the tail past the whole turn) |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) | the same `TurnClock` (**CE064**) |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
@@ -126,8 +126,8 @@ Two consequences worth stating, because both are behaviour changes:
   (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
   subtracts the overlap once, and re-apportions so the parts still sum.
 
-**Two clock bases remain, and the row above says which.** Antigravity, Pi and
-claude-code derive every recorded wall stamp from one `TurnClock` per turn, so
+**Two clock bases remain, and the row above says which.** Antigravity, Pi,
+claude-code and Delegate derive every recorded wall stamp from one `TurnClock` per turn, so
 a turn's bounds and the tool spans subtracted from them cannot disagree, and
 neither can be moved by a DST transition or an NTP step inside the turn.
 Antigravity needed it first: its span was monotonic while its tool intervals
@@ -555,16 +555,18 @@ Each harness finds the call boundary in its own stream (the table above):
   step, so a rise in that total closes the call, and the next call opens with a MODEL
   step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
-- **Delegate**'s event stream marks a round-trip only on a text reply
-  (`isStepStart`), and a tool-only reply streams only its tool call, with no text
-  before it. The host's own `maxSteps` option does not stop the turn, so the
-  adapter does not send it and enforces the cap itself. So the next call opens when every tool the
-  previous call announced has returned, since those results go back to the model,
-  and the cap fires before call N+1 can run anything. A reply that announces
-  several tools before their results counts once. If a tool never returns, the
-  next call opens at the model's next text or new tool call instead.
-  The host sends each call's `usage` frame before that call's tool results, so
-  the calls under the cap keep their tokens and cost.
+- **Delegate** streams a call's text, then writes the call's `usage` frame, then
+  runs the call's tools. It runs a batched reply's tools one at a time, so one call
+  streams `tool_call`, `tool_result`, `tool_call`, `tool_result`, and a tool event
+  cannot mark a call boundary. A call therefore opens on its first `thinking` or
+  `message` event. A tool-only reply streams no text, so it opens on its `usage`
+  frame. A call N+1 that streams text is cut at that text, before any of its tools.
+  A tool-only call N+1 is cut at its `usage` frame, and its first tool can start
+  before the kill: the host starts a call's tools right after the frame, and the
+  stream gives no earlier boundary. The host's own `maxSteps` option does not stop
+  the turn, so the adapter does not send it and enforces the cap itself. A host that
+  sends no `usage` frames counts only the calls that stream text. The calls under
+  the cap keep their tokens and cost.
 
 Every harness enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops

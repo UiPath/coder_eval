@@ -30,6 +30,7 @@ from coder_eval.errors.retry import should_retry
 from coder_eval.models import AgentKind, DelegateAgentConfig
 from coder_eval.reports.markdown import collect_agent_settings_rows
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
+from tests._bracket_clock import ANCHOR, AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams.delegate_fixtures import (
     _ev,
     _FakeProcess,
@@ -732,7 +733,7 @@ class TestCommunicate:
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=1)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0"]
+        assert [c.tool_id for c in record.commands] == ["t0"]
         assert record.num_turns == 2
 
     @staticmethod
@@ -826,19 +827,23 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
-    async def test_max_turns_stops_a_tool_only_reply_before_its_tool_runs(self, patch_exec, tmp_path):
-        """A tool-only reply streams no text event, only its tool call."""
+    async def test_max_turns_cuts_a_tool_only_reply_at_its_usage_frame(self, patch_exec, tmp_path):
+        """A tool-only reply streams no text event; its usage frame still precedes its tool call."""
         events = [
             _ev(type="message", content="on it", isStepStart=True),
-            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
+            *[frame for n in range(3) for frame in (_usage(10, 1), _tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["t0", "t1"]
+        assert [c.tool_id for c in record.commands] == ["t0", "t1"]
         assert record.num_turns == 3
+        # The crossing call is cut at its own usage frame, so the cut turn books its usage too.
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (30, 3)
 
-    async def test_max_turns_counts_a_batched_reply_once(self, patch_exec, tmp_path):
+    async def test_max_turns_counts_text_calls_on_a_host_without_usage_frames(self, patch_exec, tmp_path):
+        """A host below the 1.203.0 floor sends no usage frames; each call that streams text still counts once."""
         events = [
             _ev(type="message", content="", isStepStart=True),
             _tool_call("a"),
@@ -853,18 +858,99 @@ class TestCommunicate:
         assert record.max_turns_exhausted is False
         assert record.num_turns == 2
 
-    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
-        """Tool b never returns, so the next call opens on its first new tool call."""
+    async def test_max_turns_counts_a_batched_reply_once_when_the_host_runs_its_tools_in_sequence(
+        self, patch_exec, tmp_path, caplog
+    ):
+        """The host runs a batched reply's tools one at a time; tool events never open a call, so it counts once."""
         events = [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            *[frame for name in "abc" for frame in (_tool_call(name), _tool_result(name))],
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(20, 2),
+            _host_result("done", [_totals(10, 1), _totals(20, 2)]),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert [c.tool_id for c in record.commands] == ["a", "b", "c"]
+        assert record.num_turns == 2
+        assert not any("event stream showed" in r.message for r in caplog.records)
+
+    async def test_stream_count_that_differs_from_turn_usages_warns(self, patch_exec, tmp_path, caplog):
+        """A usage frame after the call's first tool event counts a call twice; the result's turnUsages shows it."""
+        events = [
+            *[
+                frame
+                for n in range(2)
+                for frame in (
+                    _ev(type="message", content=f"step {n}", isStepStart=True),
+                    _tool_call(f"t{n}"),
+                    _usage(10, 1),
+                    _tool_result(f"t{n}"),
+                )
+            ],
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        with caplog.at_level(logging.WARNING):
+            record = await agent.communicate("hi")
+        assert record.num_turns == 2
+        assert any("event stream showed 4 model call(s), but the host reported 2" in r.message for r in caplog.records)
+
+    async def test_tool_events_a_sub_agent_streams_do_not_open_calls(self, patch_exec, tmp_path):
+        """A sub-agent's calls write no usage frame to the main session; only its tool events reach the stream."""
+        events = [
+            _ev(type="message", content="delegating", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("agent"),
+            *[frame for n in range(4) for frame in (_tool_call(f"sub{n}"), _tool_result(f"sub{n}"))],
+            _tool_result("agent"),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(10, 1),
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi", max_turns=2)
+        assert record.max_turns_exhausted is False
+        assert record.num_turns == 2
+
+    async def test_early_stop_can_fire_on_a_usage_frame_before_its_tool_events(self, patch_exec, tmp_path):
+        events = [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("t0"),
+            _tool_result("t0"),
+            _usage(10, 1),
+            _tool_call("t1"),
+            _tool_result("t1"),
+        ]
+        agent, _proc = await _started_agent(patch_exec, events, tmp_path)
+        polls = {"n": 0}
+
+        def should_stop() -> bool:
+            polls["n"] += 1
+            return polls["n"] == 5
+
+        record = await agent.communicate("hi", should_stop=should_stop)
+        assert [c.tool_id for c in record.commands] == ["t0"]
+        assert record.token_usage is not None
+        assert (record.token_usage.uncached_input_tokens, record.token_usage.output_tokens) == (20, 2)
+
+    async def test_max_turns_still_counts_after_a_tool_never_returns(self, patch_exec, tmp_path):
+        """Tool b never returns, so only the usage frames show the next calls."""
+        events = [
+            _usage(10, 1),
             _tool_call("a"),
             _tool_call("b"),
             _tool_result("a"),
-            *[frame for n in range(3) for frame in (_tool_call(f"t{n}"), _tool_result(f"t{n}"))],
+            *[frame for n in range(3) for frame in (_usage(10, 1), _tool_call(f"t{n}"), _tool_result(f"t{n}"))],
         ]
         agent, _proc = await _started_agent(patch_exec, events, tmp_path)
         record = await agent.communicate("hi", max_turns=2)
         assert record.max_turns_exhausted is True
-        assert [c.tool_id for c in record.commands if c.result_status == "success"] == ["a", "t0"]
+        assert [c.tool_id for c in record.commands] == ["a", "b", "t0"]
         assert record.num_turns == 3
 
     async def test_communicate_before_start_raises(self):
@@ -1036,6 +1122,50 @@ class TestCommunicate:
             await agent.communicate("hi", timeout=0.05, stream_callback=_Recorder())
         assert sum(isinstance(e, AgentStartEvent) for e in seen) == 1
         assert sum(isinstance(e, AgentEndEvent) for e in seen) == 1
+
+
+class TestTurnClock:
+    """Every recorded stamp comes from the turn's ``TurnClock``, the basis of ``duration_seconds``.
+
+    A raw ``datetime.now()`` drifts from ``time.monotonic()`` on Windows, which put
+    the teardown bucket past the whole turn in ``test_delegate_golden[a_tool_call]``.
+    """
+
+    @staticmethod
+    def _events() -> list[bytes]:
+        return [
+            _ev(type="message", content="", isStepStart=True),
+            _usage(10, 1),
+            _tool_call("t0"),
+            _tool_result("t0"),
+            _ev(type="message", content="done", isStepStart=True),
+            _usage(10, 1),
+            _host_result("done", [_totals(10, 1), _totals(10, 1)]),
+        ]
+
+    async def test_the_turn_bracket_is_on_the_clock(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        agent, _proc = await _started_agent(patch_exec, self._events(), tmp_path)
+        seen: list[Any] = []
+
+        class _Recorder:
+            def on_event(self, event: Any) -> None:
+                seen.append(event)
+
+        await agent.communicate("hi", stream_callback=_Recorder())
+        assert_bracket_on_the_clock(seen)
+
+    async def test_windows_and_tool_spans_are_on_the_clock(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        agent, _proc = await _started_agent(patch_exec, self._events(), tmp_path)
+        record = await agent.communicate("hi")
+        assert_overhead_is_measured(record)
+        assert record.commands
+        for command in record.commands:
+            assert command.execution_started_at is not None and command.execution_started_at >= ANCHOR
+            assert command.execution_completed_at is not None and command.execution_completed_at >= ANCHOR
+        assert record.messages
+        assert all(m.started_at is not None and m.started_at >= ANCHOR for m in record.messages)
 
 
 class TestStop:

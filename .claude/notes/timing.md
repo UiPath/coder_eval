@@ -16,6 +16,11 @@ removes:
   transition or an NTP step inside a turn lands directly in a generation window — an
   hour-long jump in a millisecond field. Nightly runs start at 04:18 and run for hours,
   so it is reachable rather than theoretical. A monotonic-derived stamp cannot express it.
+- Delegate stamped its one window and its tool spans with raw `datetime.now()` but measured
+  `duration_seconds` with `time.monotonic()`. On Windows the wall clock moved 0.24-0.37 ms
+  further than the monotonic one inside a sub-millisecond turn, so the tail alone came out
+  longer than the whole turn and `test_delegate_golden[a_tool_call]` failed at random. One
+  window has no inter-window drift to correct, but it still shares the turn's duration.
 
 It is an EXTRACTION, not an invention: antigravity already captured this exact pair at
 the top of `communicate` and simply did not use it for later stamps.
@@ -205,7 +210,7 @@ Magnitudes are only real where a scripted clock makes them real, so each case dr
 harness's own reducer with a hand-moved clock and feeds its output through a real
 `EventCollector`, the seam production uses to compute the head and the tail. The module
 reuses the three clock-injection idioms the per-harness suites already use rather than
-inventing a fourth: an injected `TurnClock` stand-in (pi, antigravity, claude-code), a
+inventing a fourth: an injected `TurnClock` stand-in (pi, antigravity, claude-code, delegate), a
 `datetime` subclass patched onto the module (opencode), and scripted SDK epoch-millisecond
 stamps (codex). OpenCode needs a `datetime` SUBCLASS rather than a stub because the
 reducer also calls `datetime.fromtimestamp` through the same module global to convert the
