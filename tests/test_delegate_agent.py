@@ -413,7 +413,7 @@ class TestCommunicate:
         events = [
             _ev(type="session_start", sessionId="sess-1"),
             _ev(type="thinking", content="let me think"),
-            _tool_call("tool-1", "ExecutePowershellCommand", command="ls"),
+            _tool_call("tool-1", "Bash", command="ls"),
             _tool_result("tool-1", "file.txt"),
             _ev(type="thinking", content=""),
             _ev(type="message", content="here is my answer", isStepStart=True),
@@ -428,7 +428,7 @@ class TestCommunicate:
         assert not record.crashed
         assert len(record.commands) == 1
         command = record.commands[0]
-        assert command.tool_name == "ExecutePowershellCommand"
+        assert command.tool_name == "Bash"
         assert command.parameters == {"command": "ls"}
         assert command.result_status == "success"
         assert command.result_summary == "file.txt"
@@ -617,6 +617,19 @@ class TestCommunicate:
         [command] = record.commands
         assert (command.tool_name, command.parameters) == ("Skill", {"skill": "uipath-rpa", "plugin": ""})
         assert _engaged_skill_names(command) == {"uipath-rpa"}
+
+    async def test_powershell_command_is_recorded_as_the_canonical_bash_call(self, patch_exec, tmp_path):
+        """Shell criteria read `Bash` + `command`; on Windows the host sends `ExecutePowershellCommand`."""
+        command = '& "C:\\Tools\\UiPath.Upgrade.exe" analyze --output-format sarif'
+        events = [
+            _tool_call("p1", "ExecutePowershellCommand", command=command, steps=["Run analyze"]),
+            _tool_result("p1"),
+            _result(response="done"),
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path)
+        record = await agent.communicate("hi")
+        [recorded] = record.commands
+        assert (recorded.tool_name, recorded.parameters) == ("Bash", {"command": command, "steps": ["Run analyze"]})
 
     async def test_skill_api_call_keeps_its_name_arg(self, patch_exec, tmp_path):
         """The host already reports ExecuteSkillApi as `Skill`; its `name` is not a skill load."""

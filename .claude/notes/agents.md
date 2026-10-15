@@ -580,11 +580,16 @@ Four cases are worth knowing:
 - **Pi's search tool is `find`** (glob-by-pattern), not `glob`; there is no `glob` tool in
   its built-in set, so mapping `find` to the canonical `Glob` is what keeps
   `command_executed` and `commands_efficiency` comparable.
-- **Delegate's host maps most names itself, but not `LoadSkill`.** `delegate-stdio` reports
-  `ReadFile` as `Read` and `ExecuteSkillApi` as `Skill`, so `DelegateAgent` maps only
-  `LoadSkill {name}` to `Skill {skill}`; without it `skill_triggered` never sees a Delegate skill
-  load. The rename is keyed by the host's name: keyed by `Skill`, it would also turn
-  ExecuteSkillApi's `name`, an API call, into a skill engagement.
+- **Delegate's host maps most names itself, but not `LoadSkill` or its Windows shell.**
+  `delegate-stdio` reports `ReadFile` as `Read`, `ExecuteBashCommand` as `Bash` and
+  `ExecuteSkillApi` as `Skill`, so `DelegateAgent` maps only `LoadSkill {name}` to
+  `Skill {skill}` and `ExecutePowershellCommand` to `Bash`. Without the first,
+  `skill_triggered` never sees a Delegate skill load. Without the second, every Windows shell
+  call misses `tool_name: Bash` criteria and is matched as JSON, where an escaped quote
+  (`UiPath.Upgrade.exe\" analyze`) breaks the pattern and the call's plain-English `steps`
+  can trip an exclusion (coder_eval_uipath nightly 13817754 scored correct migrator and genome
+  runs 0.8–0.94 this way). The rename is keyed by the host's name: keyed by `Skill`, it would
+  also turn ExecuteSkillApi's `name`, an API call, into a skill engagement.
 
 Antigravity additionally strips the result payload out of a tool call's arguments: the
 harness folds result fields into the same `args` dict at DONE. Beyond a static key list,

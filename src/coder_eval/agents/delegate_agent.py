@@ -150,11 +150,12 @@ _FAILED_TOOL_STATUSES = frozenset({"failed", "interrupted"})
 """``toolStatus`` values the SDK's ``tool_result`` carries for a tool that did not complete."""
 
 # The host reports most tools under their canonical (Claude) names already
-# (ReadFile -> Read, ...), but not LoadSkill, which loads a catalog skill by name.
+# (ReadFile -> Read, ExecuteBashCommand -> Bash, ...), but not LoadSkill, which loads a
+# catalog skill by name, nor ExecutePowershellCommand, the Windows shell tool.
 # Keyed by the host's name, not the canonical one: the host also reports
 # ExecuteSkillApi as `Skill`, and that call's `name` is an API call, not a skill load.
 # Rationale: .claude/notes/agents.md § Tool-name and argument normalization
-_TOOL_NAME_MAP: dict[str, str] = {"LoadSkill": "Skill"}
+_TOOL_NAME_MAP: dict[str, str] = {"LoadSkill": "Skill", "ExecutePowershellCommand": "Bash"}
 _DELEGATE_ARG_RENAME: dict[str, dict[str, str]] = {"LoadSkill": {"name": "skill"}}
 
 
