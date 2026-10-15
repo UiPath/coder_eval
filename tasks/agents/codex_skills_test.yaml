@@ -1,5 +1,5 @@
 task_id: codex_skills_test
-description: Test that CodexAgent properly sets up and discovers SKILL.md files
+description: Test that CodexAgent installs SKILL.md files for the turn and removes them before grading
 
 tags:
   - codex
@@ -15,16 +15,16 @@ agent:
       path: "$PLUGIN_PATH"
 
 initial_prompt: |
-  List all available skills in your environment by checking the .agents/skills directory.
-  Count how many SKILL.md files are available.
+  Run `find .agents/skills -name SKILL.md | wc -l` and write the number it prints, and
+  nothing else, to skill_count.txt.
 
 success_criteria:
   - type: run_command
-    description: .agents/skills directory should exist
-    command: test -d .agents/skills
+    description: find should see at least one SKILL.md under .agents/skills
+    command: grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]*$' skill_count.txt
     expected_exit_code: 0
 
   - type: run_command
-    description: Should have at least one SKILL.md file
-    command: find .agents/skills -name "SKILL.md" | wc -l | grep -v "^0$"
+    description: The skill copies are gone by grading time
+    command: test ! -e .agents
     expected_exit_code: 0
