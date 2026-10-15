@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.12.14 (2026-10-15)
+
+### Bug Fixes
+
+- **codex**: Copy skills into .agents/skills instead of symlinking
+  ([#225](https://github.com/UiPath/coder_eval/pull/225),
+  [`1895a2c`](https://github.com/UiPath/coder_eval/commit/1895a2cfb0c2f0d8a171b2e445b0b034440209b2))
+
+
 ## v0.12.13 (2026-10-13)
 
 ### Bug Fixes
