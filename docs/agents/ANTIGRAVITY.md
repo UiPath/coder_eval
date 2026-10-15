@@ -127,7 +127,7 @@ Antigravity supports [Agent Skills](https://agentskills.io/specification)
 2. the runtime plugin directory passed to `start()`.
 
 For each source, the harness is handed whichever of `<source>/skills` or `<source>`
-directly contains subdirectories with a `SKILL.md`. Unlike Codex — which symlinks
+directly contains subdirectories with a `SKILL.md`. Unlike Codex — which copies
 skills into `.agents/skills/` — Antigravity is given the search-path roots directly
 via the SDK's `skills_paths`, and those roots are also added to the harness
 `workspaces` allowlist (otherwise the agent would find a skill but be denied the
