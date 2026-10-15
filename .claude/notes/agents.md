@@ -720,12 +720,11 @@ being hardcoded, so a plugin that relocates its skills keeps working.
 - **Codex** copies each skill dir into `.agents/skills/`, which the CLI auto-discovers from
   the working directory upward. Copies, not symlinks, for two reasons that compound. Codex
   resolves a symlinked skill to its source, finds the plugin manifest there and lists the
-  skill as `uipath:uipath-planner`; models sometimes turn that into the nonexistent path
-  `.agents/skills/uipath/uipath-planner/SKILL.md`. The search that follows (`rg --files`,
-  `find`) skips symlinks and returns nothing, so the agent works without the skill. In the
-  2026-10-15 codex nightly, 41 of 471 Linux tasks opened the wrong path and 15 never read
-  a skill. The copies are made before each turn and removed after it, the same concern that
-  kept OpenCode out of the sandbox: criteria and run artifacts must see only what the agent
+  skill as `<plugin>:<skill>`; models sometimes turn that into the nonexistent path
+  `.agents/skills/<plugin>/<skill>/SKILL.md`. The search that follows (`rg --files`,
+  `find`) skips symlinks and returns nothing, so the agent works without the skill. The
+  copies are made before each turn and removed after it, the same concern that kept
+  OpenCode out of the sandbox: criteria and run artifacts must see only what the agent
   left. Skill dirs the workspace already has are never touched.
 - **Antigravity** takes search paths natively via `skills_paths` — but those only drive
   DISCOVERY. The file-tool allowlist is `workspaces` alone, so the skill roots must appear
