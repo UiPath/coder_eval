@@ -854,6 +854,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
+        self._skill_dirs: list[Path] = []
+        self._skill_copies: list[Path] = []
+        self._skill_parent_dirs: list[Path] = []
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -909,8 +912,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         "CodexAgent: login_api_key failed — agent will fall back to env-based auth: %s", exc
                     )
 
-            # Set up skills from plugin_tools_dir or plugins config
-            self._setup_skills(plugin_tools_dir)
+            self._collect_skills(plugin_tools_dir)
 
             # Log permission and tool configuration
             self._log_config_enforcement()
@@ -954,6 +956,27 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not self.working_directory or not self.codex_client:
             raise RuntimeError("Agent not started. Call start() first.")
 
+        self._install_skills()
+        try:
+            return await self._communicate_turn(
+                user_input,
+                stream_callback=stream_callback,
+                timeout=timeout,
+                max_turns=max_turns,
+                should_stop=should_stop,
+            )
+        finally:
+            self._remove_skills()
+
+    async def _communicate_turn(
+        self,
+        user_input: str,
+        *,
+        stream_callback: StreamCallback | None,
+        timeout: float | None,
+        max_turns: int | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> TurnRecord:
         assert self.config.type is not None, "CodexAgent requires AgentConfig.type to be set before communicate()"
 
         # Reset the pending slot + bump the iteration counter (shared lifecycle).
@@ -1092,6 +1115,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._thread_usage_baseline = _ThreadTotals()
         self._active_turn_handle = None
         self._cleanup_login_shell_home()
+        self._remove_skills()
         self._mark_stopped()
 
     async def kill(self) -> None:
@@ -1108,6 +1132,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._interrupt_active_turn()
         self._close_client()
         self._cleanup_login_shell_home()
+        self._remove_skills()
 
     def _interrupt_active_turn(self) -> None:
         """Interrupt the in-flight Codex turn, if any (best-effort, idempotent)."""
@@ -1147,17 +1172,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
             "codex_model_is_deployment": True,
         }
 
-    def _setup_skills(self, plugin_tools_dir: str | None) -> None:
-        """Set up .agents/skills directory from plugins or plugin_tools_dir.
+    def _collect_skills(self, plugin_tools_dir: str | None) -> None:
+        """Resolve the skill dirs that :meth:`_install_skills` copies in for each turn.
 
-        Codex auto-discovers skills in ``.agents/skills/``, scanned from the working
-        directory up to the repo root, so each source's skill dirs are symlinked
-        (or copied, on Windows) into it.
+        A source may hold skill dirs directly or be a plugin root whose skills live
+        one level deeper; both layouts are scanned, and the first source to provide
+        a skill name wins.
 
         Rationale: .claude/notes/agents.md § Skills, per harness
         """
-        if not self.working_directory:
-            return
+        self._skill_dirs = []
 
         skills_sources: list[Path] = []
 
@@ -1179,7 +1203,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
                             self._log.warning(
                                 f"Plugin skills path did not resolve: {path_str!r} "
-                                + f"→ {expanded_path!r} ({hint}); no skills linked from it"
+                                + f"→ {expanded_path!r} ({hint}); no skills taken from it"
                             )
 
         # Also check plugin_tools_dir parameter
@@ -1192,52 +1216,74 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not skills_sources:
             return
 
-        # Create .agents/skills directory (Codex auto-discovery location)
-        agents_skills_dir = self.working_directory / ".agents" / "skills"
         try:
-            agents_skills_dir.mkdir(parents=True, exist_ok=True)
-
-            # A source may hold skill dirs directly or be a plugin root whose
-            # skills live one level deeper. Scan both layouts.
             for skills_source in skills_sources:
                 scan_dirs = [skills_source]
                 nested = skills_source / "skills"
                 if nested.is_dir():
                     scan_dirs.append(nested)
-
                 for scan_dir in scan_dirs:
                     for skill_dir in scan_dir.iterdir():
                         if not (skill_dir.is_dir() and (skill_dir / "SKILL.md").exists()):
                             continue
-                        target = agents_skills_dir / skill_dir.name
-                        if target.exists():
-                            # Skip if already exists (first source wins)
-                            continue
+                        if all(d.name != skill_dir.name for d in self._skill_dirs):
+                            self._skill_dirs.append(skill_dir)
+        except OSError as e:
+            self._log.warning(f"Failed to scan skills: {e}")
 
-                        try:
-                            # Try to create a symlink for efficiency
-                            target.symlink_to(skill_dir)
-                            self._log.debug(f"Linked skill: {skill_dir.name}")
-                        except (OSError, NotImplementedError):
-                            # Fall back to copying if symlink fails (Windows compatibility)
-                            shutil.copytree(skill_dir, target, dirs_exist_ok=True)
-                            self._log.debug(f"Copied skill: {skill_dir.name}")
+        if self._skill_dirs:
+            self._log.debug(f"Found {len(self._skill_dirs)} skill(s): {[d.name for d in self._skill_dirs]}")
+        else:
+            # Sources existed but held no SKILL.md, so codex runs with no
+            # skill context at all.
+            self._log.warning(
+                f"0 skills found in {len(skills_sources)} plugin source(s): "
+                + f"{[str(s) for s in skills_sources]}; "
+                + "check the plugin path points at a skills repo root"
+            )
 
-            linked = list(agents_skills_dir.iterdir())
-            if linked:
-                self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
-            else:
-                # Sources existed but held no SKILL.md, so codex runs with no
-                # skill context at all.
-                self._log.warning(
-                    f"0 skills linked into {agents_skills_dir} despite "
-                    + f"{len(skills_sources)} plugin source(s): "
-                    + f"{[str(s) for s in skills_sources]}; "
-                    + "check the plugin path points at a skills repo root"
-                )
+    def _install_skills(self) -> None:
+        """Copy the collected skills into ``.agents/skills/``, where Codex auto-discovers them.
 
+        Real copies, not symlinks. Codex resolves a symlinked skill to its source,
+        finds the plugin manifest there and lists it as ``<plugin>:<skill>``, which
+        models turn into a nonexistent ``<plugin>/<skill>/`` path; ``rg --files`` and
+        ``find`` then skip the symlinks, so the search that follows finds nothing. A
+        skill dir already in the workspace is left alone and never removed.
+
+        Rationale: .claude/notes/agents.md § Skills, per harness
+        """
+        if not (self.working_directory and self._skill_dirs):
+            return
+        agents_skills_dir = self.working_directory / ".agents" / "skills"
+        try:
+            for parent in (agents_skills_dir.parent, agents_skills_dir):
+                if not parent.exists():
+                    parent.mkdir()
+                    self._skill_parent_dirs.append(parent)
+            for skill_dir in self._skill_dirs:
+                target = agents_skills_dir / skill_dir.name
+                if target.exists() or target.is_symlink():
+                    continue
+                self._skill_copies.append(target)
+                shutil.copytree(skill_dir, target, symlinks=True)
+            self._log.debug(f"Copied {len(self._skill_copies)} skill(s) into {agents_skills_dir}")
         except Exception as e:
             self._log.warning(f"Failed to set up skills: {e}")
+
+    def _remove_skills(self) -> None:
+        """Remove what :meth:`_install_skills` created (best-effort, idempotent).
+
+        Runs at the end of every turn, so criteria and run artifacts see the workspace
+        the agent left, not the skill copies.
+        """
+        copies, self._skill_copies = self._skill_copies, []
+        parents, self._skill_parent_dirs = self._skill_parent_dirs, []
+        for copy in copies:
+            shutil.rmtree(copy, ignore_errors=True)
+        for parent in reversed(parents):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
 
     @staticmethod
     def _resolve_base_url() -> str | None:

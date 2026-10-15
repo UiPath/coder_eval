@@ -684,7 +684,7 @@ This field breaks it silently.
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
 parents the skill directories and no skill loads. Codex
-(`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
+(`codex_agent._collect_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
 both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
 
 † Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a

@@ -14,8 +14,10 @@ module's ``importorskip("openai_codex")``.
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -272,3 +274,77 @@ class TestExecutionBoundsFromSdkStamps:
         # tool_use block; deriving it from the flush time would be a guess.
         tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 1)
         assert tel.generation_completed_at is None
+
+
+def _skills_repo(root: Path, *names: str) -> Path:
+    for name in names:
+        (root / "skills" / name / "references").mkdir(parents=True)
+        (root / "skills" / name / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
+        (root / "skills" / name / "references" / "guide.md").write_text("ref\n", encoding="utf-8")
+    return root
+
+
+class TestSkillCopies:
+    """Skills reach ``.agents/skills/`` as real files for each turn, and leave with it."""
+
+    @staticmethod
+    def _agent(tmp_path: Path, *names: str) -> CodexAgent:
+        plugin = _skills_repo(tmp_path / "plugin", *names)
+        agent = CodexAgent(
+            parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5", plugins=[{"type": "local", "path": str(plugin)}])
+        )
+        agent.working_directory = tmp_path / "work"
+        agent.working_directory.mkdir()
+        agent._collect_skills(None)
+        return agent
+
+    def test_a_walk_that_skips_symlinks_still_lists_the_skill(self, tmp_path):
+        # os.walk without followlinks sees what `rg --files` and `find` see.
+        agent = self._agent(tmp_path, "uipath-planner")
+        agent._install_skills()
+        skills_root = agent.working_directory / ".agents" / "skills"
+        found = sorted(
+            (Path(d) / f).relative_to(skills_root).as_posix() for d, _, files in os.walk(skills_root) for f in files
+        )
+        assert found == ["uipath-planner/SKILL.md", "uipath-planner/references/guide.md"]
+
+    def test_remove_restores_the_workspace(self, tmp_path):
+        agent = self._agent(tmp_path, "uipath-planner")
+        agent._install_skills()
+        agent._remove_skills()
+        assert list(agent.working_directory.iterdir()) == []
+
+    def test_workspace_skill_dirs_and_agent_files_survive(self, tmp_path):
+        agent = self._agent(tmp_path, "uipath-planner", "uipath-rpa")
+        own = agent.working_directory / ".agents" / "skills" / "uipath-rpa"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("task-provided\n", encoding="utf-8")
+        agent._install_skills()
+        (agent.working_directory / ".agents" / "notes.md").write_text("agent output\n", encoding="utf-8")
+        agent._remove_skills()
+        assert (own / "SKILL.md").read_text(encoding="utf-8") == "task-provided\n"
+        assert (agent.working_directory / ".agents" / "notes.md").is_file()
+        assert not (agent.working_directory / ".agents" / "skills" / "uipath-planner").exists()
+
+    @pytest.mark.parametrize("turn_raises", [False, True])
+    async def test_skills_exist_only_during_each_turn(self, tmp_path, monkeypatch, turn_raises):
+        agent = self._agent(tmp_path, "uipath-planner")
+        agent.codex_client = object()
+        skill_md = agent.working_directory / ".agents" / "skills" / "uipath-planner" / "SKILL.md"
+        seen: list[bool] = []
+
+        async def fake_turn(user_input, **_):
+            seen.append(skill_md.is_file())
+            if turn_raises:
+                raise RuntimeError("turn failed")
+            return "record"
+
+        monkeypatch.setattr(agent, "_communicate_turn", fake_turn)
+        for _ in range(2):
+            if turn_raises:
+                with pytest.raises(RuntimeError):
+                    await agent.communicate("go")
+            else:
+                assert await agent.communicate("go") == "record"
+            assert not (agent.working_directory / ".agents").exists()
+        assert seen == [True, True]

@@ -115,7 +115,7 @@ CodexAgent supports SKILL.md files following the [Agent Skills open standard](ht
 1. **config.plugins** - Local plugins with `type: local` and `path` pointing to a skills directory
 2. **plugin_tools_dir** parameter - Runtime plugin directory passed to `start()`
 
-Skills are symlinked (or copied) to `.agents/skills/` where the Codex CLI auto-discovers them. Environment variables in plugin paths (`$VAR`, `${VAR}`) are expanded at runtime.
+Skills are copied to `.agents/skills/` for each turn, where the Codex CLI auto-discovers them, and removed when the turn ends. Environment variables in plugin paths (`$VAR`, `${VAR}`) are expanded at runtime.
 
 Example with environment variable:
 ```yaml
@@ -206,8 +206,9 @@ The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills
 1. Scans `config.plugins` for local plugins with `path` field
 2. Checks `plugin_tools_dir` parameter passed to `start()`
 3. Expands environment variables in paths (`$PLUGIN_PATH`, `${PLUGIN_PATH}`)
-4. Symlinks skill directories (falls back to copying if symlink fails)
+4. Copies each skill directory into `.agents/skills/` before every turn (real files, not symlinks), skipping any skill dir the workspace already has
 5. Codex CLI auto-discovers skills in `.agents/skills/`
+6. Removes the copies when the turn ends, so criteria and run artifacts never see them
 
 ### Async Integration
 

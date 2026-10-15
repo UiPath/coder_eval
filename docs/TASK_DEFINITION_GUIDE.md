@@ -1345,7 +1345,7 @@ Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, 
 
 ### `skill_triggered`
 
-Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
+Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` copy).
 
 Observed label is `"yes"` when either signal is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
 
