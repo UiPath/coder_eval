@@ -1069,6 +1069,145 @@ def _collab_call(
     )
 
 
+class TestExecScriptCommandExtraction:
+    """Shell commands are read out of an `exec` script so recovered sub-agent rows are Bash rows."""
+
+    def test_json_quoted_keys(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = (
+            'const r = await tools.shell_command({"command":"git status --short --branch",'
+            '"workdir":"C:\\\\w","timeout_ms":10000}); text(r);'
+        )
+        assert _exec_shell_commands(script) == ["git status --short --branch"]
+
+    def test_bare_keys_single_quotes_and_escapes(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = (
+            'const a = await tools.shell_command({command:\'pytest --rootdir "C:\\\\p" '
+            '-q tests\',workdir:"C:\\\\repo"}); text(a);'
+        )
+        assert _exec_shell_commands(script) == ['pytest --rootdir "C:\\p" -q tests']
+
+    def test_promise_all_yields_every_command_in_order(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = (
+            "const r = await Promise.all([\n"
+            '  tools.shell_command({command:"git branch --show-current",workdir:"C:\\\\w"}),\n'
+            '  tools.shell_command({command:"git status --short",workdir:"C:\\\\w"}),\n'
+            "]);"
+        )
+        assert _exec_shell_commands(script) == ["git branch --show-current", "git status --short"]
+
+    def test_newline_escape_and_template_literal(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = 'await tools.shell_command({command:`echo "a"\\nls -la`})'
+        assert _exec_shell_commands(script) == ['echo "a"\nls -la']
+
+    def test_variable_command_is_not_a_literal(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = 'const cmd = "npm run build"; const r = await tools.shell_command({command: cmd});'
+        assert _exec_shell_commands(script) == []
+
+    def test_other_tools_are_ignored(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = (
+            'await tools.update_plan({plan:[{step:"x",status:"in_progress"}]}); await tools.view_image({path:"a.png"});'
+        )
+        assert _exec_shell_commands(script) == []
+
+    def test_exec_command_with_cmd_key(self):
+        from coder_eval.agents.codex_agent import _exec_shell_commands
+
+        script = (
+            'const r = await tools.exec_command({"cmd":"git log --oneline -1","workdir":"C:\\\\w",'
+            '"yield_time_ms":10000,"max_output_tokens":2000});\ntext(r.output);\n'
+        )
+        assert _exec_shell_commands(script) == ["git log --oneline -1"]
+
+    def test_exec_output_parts_are_joined_and_a_failed_script_is_an_error(self):
+        ok = {
+            "type": "custom_tool_call_output",
+            "call_id": "c1",
+            "output": [
+                {"type": "input_text", "text": "Script completed\nWall time 1.0 seconds\nOutput:\n"},
+                {"type": "input_text", "text": "ok\n"},
+            ],
+        }
+        failed = {
+            "type": "custom_tool_call_output",
+            "call_id": "c2",
+            "output": [
+                {"type": "input_text", "text": "Script failed\nWall time 1.6 seconds\nOutput:\n"},
+                {"type": "input_text", "text": "boom\n"},
+            ],
+        }
+        text, is_error = CodexAgent._subagent_output(ok)
+        assert "ok" in text
+        assert not is_error
+        text, is_error = CodexAgent._subagent_output(failed)
+        assert "boom" in text
+        assert is_error
+
+    def test_v1_exit_code_output_marks_non_zero_as_error(self):
+        assert CodexAgent._subagent_output({"output": "Exit code: 0\nWall time: 1 seconds\nOutput:\nok\n"}) == (
+            "Exit code: 0\nWall time: 1 seconds\nOutput:\nok\n",
+            False,
+        )
+        assert CodexAgent._subagent_output({"output": "Exit code: 1\nOutput:\nboom\n"})[1] is True
+        assert CodexAgent._subagent_output({"output": "5050\n"}) == ("5050\n", False)
+
+    def test_rollout_exec_call_becomes_a_bash_row_with_the_command(self):
+        payload = {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_x",
+            "input": ('const r = await tools.shell_command({command:"pytest tests/test_api.py -q"}); text(r);'),
+        }
+        assert CodexAgent._subagent_tool_name(payload) == "Bash"
+        assert CodexAgent._subagent_parameters(payload) == {"command": "pytest tests/test_api.py -q"}
+
+    def test_rollout_exec_call_without_a_literal_keeps_the_script_as_command_text(self):
+        script = 'const cmd = "npm run build"; await tools.shell_command({command: cmd});'
+        payload = {"type": "custom_tool_call", "name": "exec", "call_id": "call_y", "input": script}
+        assert CodexAgent._subagent_parameters(payload) == {"command": script}
+
+    def test_v1_shell_command_function_call_is_bash(self):
+        payload = {
+            "type": "function_call",
+            "name": "shell_command",
+            "call_id": "call_z",
+            "arguments": '{"command":"git status --short","workdir":"C:\\\\w","timeout_ms":10000}',
+        }
+        assert CodexAgent._subagent_tool_name(payload) == "Bash"
+        assert CodexAgent._subagent_parameters(payload)["command"] == "git status --short"
+
+
+def _sub_agent_activity(
+    kind: str,
+    *,
+    item_id: str,
+    child_thread: str,
+    agent_path: str = "agent-1",
+) -> SimpleNamespace:
+    """A subAgentActivity item root (Codex multi-agent v2's sub-agent lifecycle item).
+
+    ``kind`` is "started" (the spawn itself: ``item_id`` is the spawn_agent call id)
+    or a lifecycle notice ("completed", "interrupted", "interacted")."""
+    return SimpleNamespace(
+        type="subAgentActivity",
+        id=item_id,
+        kind=kind,
+        agent_thread_id=child_thread,
+        agent_path=agent_path,
+    )
+
+
 class TestCodexCollabSubAgent:
     """Codex spawns sub-agents via collabAgentToolCall (tool='spawnAgent'), not
     Claude's Task tool. The agent must surface these as tool calls AND nest the
@@ -1239,6 +1378,167 @@ class TestCodexSubAgentToolRecovery:
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         # Both the returned text ("5050") and the recovered tool-call message nest.
         assert any(sub_tool_id in m.tool_use_ids for m in nested)
+
+    async def test_v2_started_activity_is_the_spawn_and_feeds_recovery(self, monkeypatch, tmp_path):
+        # The wait names no child: only the `started` item can register it.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-dddd-7000-8000-000000000004"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "c_1",
+                    "input": 'await tools.exec_command({"cmd":"pytest tests/test_api.py -q"})',
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "c_1",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed\nWall time 3.0 seconds\nOutput:\n"},
+                        {"type": "input_text", "text": "1 passed in 0.31s\n"},
+                    ],
+                },
+            ],
+        )
+        started = _sub_agent_activity("started", item_id="call_spawn", child_thread=child)
+        wait = SimpleNamespace(
+            type="collabAgentToolCall",
+            id="call_wait",
+            tool="wait",
+            model=None,
+            prompt=None,
+            status="completed",
+            receiver_thread_ids=[],
+            agents_states={},
+        )
+        completed = _sub_agent_activity("completed", item_id="subagent-completed-turn_c1", child_thread=child)
+        notifications = [
+            _item_notification("item/started", started),
+            _item_notification("item/completed", started),
+            _item_notification("item/started", wait),
+            _item_notification("item/completed", wait),
+            _item_notification("item/started", completed),
+            _item_notification("item/completed", completed),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX, model="parent-model"), notifications)
+
+        record = await agent.communicate("delegate it")
+
+        # The spawn and the wait are the only Agent rows: the `completed` notice
+        # is neither an Agent row nor a raw "subAgentActivity" stub.
+        agent_rows = {c.tool_id: c for c in record.commands if c.tool_name == "Agent"}
+        assert set(agent_rows) == {"call_spawn", "call_wait"}
+        assert not [c for c in record.commands if c.tool_name == "subAgentActivity"]
+        assert not [c for c in record.commands if c.tool_id.startswith("subagent-completed")]
+        spawn_row = agent_rows["call_spawn"]
+        assert spawn_row.parameters["operation"] == "spawnagent"
+        assert spawn_row.parameters["agent_thread_id"] == child
+        assert spawn_row.result_status == "success"
+
+        # The child's command is recovered from its rollout and nests under the spawn.
+        bash = [c for c in record.commands if c.tool_name == "Bash"]
+        assert len(bash) == 1
+        assert bash[0].parameters["command"] == "pytest tests/test_api.py -q"
+        assert bash[0].result_status == "success"
+        assert "1 passed" in (bash[0].result_summary or "")
+        nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
+        assert any(bash[0].tool_id in m.tool_use_ids for m in nested)
+        assert all(m.model == "parent-model" for m in nested)
+
+    async def test_v2_lifecycle_notices_without_a_spawn_record_nothing(self, monkeypatch, tmp_path):
+        # `completed` / `interrupted` without a `started` are notices about a
+        # child this turn did not spawn: no tool rows, no sub-agent, no crash.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-eeee-7000-8000-000000000005"
+        completed = _sub_agent_activity("completed", item_id="subagent-completed-turn_x", child_thread=child)
+        interrupted = _sub_agent_activity("interrupted", item_id="subagent-interrupted-turn_x", child_thread=child)
+        notifications = [
+            _item_notification("item/started", completed),
+            _item_notification("item/completed", completed),
+            _item_notification("item/started", interrupted),
+            _item_notification("item/completed", interrupted),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        assert record.commands == []
+        assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
+
+    async def test_v2_repeated_started_notice_registers_the_child_once(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-ffff-7000-8000-000000000006"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": "c_1", "arguments": '{"cmd":"echo one"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "one\n"},
+            ],
+        )
+        started = _sub_agent_activity("started", item_id="call_spawn", child_thread=child)
+        notifications = [
+            _item_notification("item/started", started),
+            _item_notification("item/completed", started),
+            _item_notification("item/started", started),
+            _item_notification("item/completed", started),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        # One registration → the rollout is mined once; the command is not doubled.
+        assert len([c for c in record.commands if c.tool_name == "Bash"]) == 1
+
+    def test_forked_parent_history_is_not_credited_to_the_child(self, tmp_path):
+        # fork_turns copies the parent's history ahead of the child's own; the
+        # parent's shell call in that prefix must not be replayed as the child's.
+        child, parent = "019e0000-1111-7000-8000-000000000008", "019e0000-0000-7000-8000-000000000000"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "session_meta", "payload": {"id": child, "forked_from_id": parent}},
+                {"type": "session_meta", "payload": {"id": parent}},
+                {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "p_1",
+                    "arguments": '{"command":"git status"}',
+                },
+                {"type": "function_call_output", "call_id": "p_1", "output": "Exit code: 0\nOutput:\n"},
+                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
+                {"type": "turn_context", "payload": {"turn_id": "t_child"}},
+                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\nREADME.md\n"},
+            ],
+        )
+        gens = CodexAgent._parse_rollout_generations(CodexAgent._find_rollout_file(tmp_path, child))
+        assert [t["parameters"]["command"] for g in gens for t in g["tools"]] == ["ls"]
+
+    def test_rollout_without_fork_marker_is_parsed_whole(self, tmp_path):
+        child = "019e0000-2222-7000-8000-000000000009"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "session_meta", "payload": {"id": child}},
+                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\n"},
+                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
+            ],
+        )
+        gens = CodexAgent._parse_rollout_generations(CodexAgent._find_rollout_file(tmp_path, child))
+        assert [t["parameters"]["command"] for g in gens for t in g["tools"]] == ["ls"]
 
     async def test_missing_rollout_is_silently_skipped(self, monkeypatch, tmp_path):
         # No rollout written for the child → recovery finds nothing and the turn

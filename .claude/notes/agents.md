@@ -395,6 +395,30 @@ The rollout file can lag the parent's `turn/completed` by a beat (the recorder f
 a background task), so the lookup polls ~2 s — but bails immediately when
 `<home>/sessions` does not exist at all, since no flush can ever land there.
 
+Codex multi-agent v2 moved the spawn off the collab item. A v1 spawn is a
+`collabAgentToolCall` that names the child in `receiver_thread_ids`; a v2 spawn is a
+`subAgentActivity` item with `kind: started`, `id` = the spawn call id and
+`agent_thread_id` = the child, and its `wait` names no child at all. Registration keys off
+both items: keyed off the collab item alone, a v2 run recovers nothing the child ran. The
+other `subAgentActivity` kinds (`completed`, `interrupted`, `interacted`) are notices about
+a registered child, dropped before telemetry so they neither become unknown rows nor open
+a parent model call.
+
+The child's shell calls come in two shapes. v1 records a `shell_command` function call
+with JSON `arguments` and an output starting `Exit code: N`. v2 records a custom tool
+`exec` whose `input` is a JavaScript script calling the shell tool, often several in a
+`Promise.all`, and whose output is a list of content parts starting `Script completed` /
+`Script failed`. The script is read by hand: bare keys and single quotes are the norm, and
+`json.loads` recovers about a third. A command built from a variable falls back to the
+whole script as the command text, which still matches as text. Both outputs are read so a
+failed call is not recorded as a success.
+
+A spawn with `fork_turns` copies the parent's history, tool calls included, into the head
+of the child's rollout. In a forked rollout (`session_meta` carries `forked_from_id`),
+parsing starts at the first `thread_settings_applied` with the child's thread id, so the
+parent's commands are not credited to the child. A non-forked rollout is parsed whole:
+that event also appears mid-thread on a settings change.
+
 The thread-cumulative baseline is the other half. `ThreadTokenUsage.total` counts the whole
 THREAD, and the Codex thread is created once per task and reused, so by turn N it still
 carries turns 1..N-1. The orchestrator sums per-turn usages, so handing it the cumulative

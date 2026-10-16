@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -116,6 +117,7 @@ _TOOL_ITEM_NAMES: dict[str, str] = {
     "commandExecution": "Bash",
     "fileChange": "Write",
     "collabAgentToolCall": "Agent",
+    "subAgentActivity": "Agent",
     "mcpToolCall": "Mcp",
     "dynamicToolCall": "Tool",
     "webSearch": "WebSearch",
@@ -128,6 +130,11 @@ _TOOL_ITEM_NAMES: dict[str, str] = {
 # to recover. Lowercased to match _status_value's normalization.
 _COLLAB_SPAWN_TOOL = "spawnagent"
 
+# A subAgentActivity `started` item is the spawn; its other kinds are notices.
+# Rationale: .claude/notes/agents.md § Codex rollout rebuild
+_SUB_AGENT_ACTIVITY_ITEM = "subAgentActivity"
+_SUB_AGENT_SPAWN_KIND = "started"
+
 # Tool names for the raw ResponseItem function calls in a sub-agent's on-disk
 # rollout, which is the only place its inner tool calls survive.
 # Rationale: .claude/notes/agents.md § Codex rollout rebuild
@@ -135,10 +142,21 @@ _ROLLOUT_FN_NAMES: dict[str, str] = {
     "exec_command": "Bash",
     "shell": "Bash",
     "local_shell": "Bash",
+    "shell_command": "Bash",
+    # A script: _exec_shell_commands reads the commands out of it.
+    "exec": "Bash",
     "apply_patch": "Write",
     "spawn_agent": "Agent",
     "wait_agent": "Agent",
 }
+
+# The shell call inside an exec script; the object literal follows. cli 0.140-0.147
+# wrote `tools.shell_command({command: …})`, cli 0.162 writes
+# `tools.exec_command({"cmd": …})` — both names and both keys are accepted.
+_EXEC_SHELL_CALL = re.compile(r"tools\.(?:shell_command|exec_command)\s*\(")
+# The command key of that literal, quoted or bare (the script is JavaScript).
+_EXEC_COMMAND_KEY = re.compile(r"""(?:["'](?:command|cmd)["']|\b(?:command|cmd))\s*:\s*""")
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "b": "\b", "f": "\f", "v": "\v"}
 
 # Rollout ResponseItem payload types that are sub-agent tool CALLS and their
 # matching OUTPUT type (keyed by `call_id`). Anything not listed is skipped.
@@ -211,6 +229,90 @@ def _status_value(status: Any) -> str:
     """Normalize a Codex status (enum or str) to its lowercase string value."""
     value = getattr(status, "value", status)
     return str(value).lower() if value is not None else ""
+
+
+def _js_string_at(text: str, i: int) -> tuple[str, int] | None:
+    """Read the JavaScript string literal starting at ``text[i]``.
+
+    Returns (decoded value, index after the closing quote), or None when ``text[i]``
+    is not a quote or the literal never closes. Single, double and backtick quotes;
+    backslash escapes decoded (``\\n``, ``\\"``, ``\\\\``, ``\\uXXXX``); a ``${}``
+    inside a template literal stays verbatim.
+    """
+    if i >= len(text) or text[i] not in "\"'`":
+        return None
+    quote = text[i]
+    out: list[str] = []
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\" and j + 1 < len(text):
+            esc = text[j + 1]
+            if esc == "u" and j + 5 < len(text):
+                with contextlib.suppress(ValueError):
+                    out.append(chr(int(text[j + 2 : j + 6], 16)))
+                    j += 6
+                    continue
+            out.append(_JS_ESCAPES.get(esc, esc))
+            j += 2
+            continue
+        if ch == quote:
+            return "".join(out), j + 1
+        out.append(ch)
+        j += 1
+    return None
+
+
+def _matching_brace(text: str, start: int) -> int:
+    """Index just past the ``}`` matching ``text[start] == "{"``, skipping strings.
+
+    Falls back to ``len(text)`` for an unbalanced literal, so a truncated script
+    still yields whatever it holds.
+    """
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'`":
+            read = _js_string_at(text, i)
+            if read is None:
+                return len(text)
+            i = read[1]
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+def _exec_shell_commands(script: str) -> list[str]:
+    """Every literal command an exec script hands to the shell tool.
+
+    A command built from a variable is skipped.
+    Rationale: .claude/notes/agents.md § Codex rollout rebuild
+    """
+    commands: list[str] = []
+    for call in _EXEC_SHELL_CALL.finditer(script):
+        brace = script.find("{", call.end())
+        if brace < 0:
+            continue
+        body = script[brace : _matching_brace(script, brace)]
+        key = _EXEC_COMMAND_KEY.search(body)
+        if key is None:
+            continue
+        read = _js_string_at(body, key.end())
+        if read is not None and read[0]:
+            commands.append(read[0])
+    return commands
+
+
+def _is_subagent_lifecycle_notice(root: Any, root_type: str | None) -> bool:
+    """True for a subAgentActivity item other than its `started` spawn."""
+    return root_type == _SUB_AGENT_ACTIVITY_ITEM and _status_value(getattr(root, "kind", "")) != _SUB_AGENT_SPAWN_KIND
 
 
 def _fresh_input_tokens(raw_input: int, cached: int) -> int:
@@ -601,6 +703,8 @@ class _CodexTurnState:
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
+        if _is_subagent_lifecycle_notice(root, root_type):
+            return
         if not self.in_api_call and root_type not in _NON_MODEL_ITEM_TYPES:
             self._open_api_call()
         # Any item that isn't transcript content is a tool call (generic capture).
@@ -636,6 +740,8 @@ class _CodexTurnState:
             return
         completed_ms = getattr(notification.payload, "completed_at_ms", None)
         root_type = getattr(root, "type", None)
+        if _is_subagent_lifecycle_notice(root, root_type):
+            return
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
             seq = self.seq_by_id.get(tool_id, self.next_sequence)
@@ -687,6 +793,13 @@ class _CodexTurnState:
                     self.collab_spawn_by_thread,
                     self.spawned_children,
                     self.collab_results,
+                )
+            elif root_type == _SUB_AGENT_ACTIVITY_ITEM:
+                self._agent._handle_subagent_spawn(
+                    root,
+                    tool_id,
+                    self.collab_spawn_by_thread,
+                    self.spawned_children,
                 )
 
         elif root_type == "reasoning":
@@ -1751,6 +1864,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
             if prompt := getattr(root, "prompt", None):
                 params["prompt"] = prompt
             return params
+        if root_type == _SUB_AGENT_ACTIVITY_ITEM:
+            # Only the `started` kind reaches here; it is the spawn call.
+            params = {
+                "operation": _COLLAB_SPAWN_TOOL,
+                "agent_thread_id": str(getattr(root, "agent_thread_id", "") or ""),
+            }
+            if agent_path := getattr(root, "agent_path", None):
+                params["agent_path"] = str(agent_path)
+            return params
         if root_type in ("mcpToolCall", "dynamicToolCall"):
             params = {"tool": getattr(root, "tool", "")}
             if server := (getattr(root, "server", None) or getattr(root, "namespace", None)):
@@ -1813,6 +1935,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         try:
             status_str = _status_value(getattr(root, "status", "") or "")
+            if root_type == _SUB_AGENT_ACTIVITY_ITEM and not status_str:
+                # Codex emits the spawn activity only once the child thread
+                # exists, so a status-less item is a successful spawn.
+                status_str = "completed"
             err = getattr(root, "error", None)
             success = getattr(root, "success", None)
             is_error = bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES
@@ -1845,6 +1971,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             states = getattr(root, "agents_states", None) or {}
             messages = [s.message for s in states.values() if getattr(s, "message", None)]
             return f"collab {op}: {'; '.join(messages)[:200]}" if messages else f"collab {op}"
+        if root_type == _SUB_AGENT_ACTIVITY_ITEM:
+            target = getattr(root, "agent_path", "") or getattr(root, "agent_thread_id", "")
+            return f"collab {_COLLAB_SPAWN_TOOL}: {target}"
         if root_type == "webSearch":
             return f"query: {getattr(root, 'query', '')}"
         if root_type in ("mcpToolCall", "dynamicToolCall"):
@@ -1886,6 +2015,26 @@ class CodexAgent(Agent[CodexAgentConfig]):
             message = getattr(state, "message", None)
             if message and thread_id in spawn_by_thread:
                 collab_results[str(thread_id)] = str(message)
+
+    def _handle_subagent_spawn(
+        self,
+        root: Any,
+        tool_id: str,
+        spawn_by_thread: dict[str, str],
+        spawned_children: list[tuple[str, str, str | None]],
+    ) -> None:
+        """Register the child a `started` subAgentActivity item announces, under ``tool_id``.
+
+        Idempotent per thread. Rationale: .claude/notes/agents.md § Codex rollout rebuild
+        """
+        thread_id = getattr(root, "agent_thread_id", None)
+        if not thread_id:
+            return
+        thread_id = str(thread_id)
+        if thread_id in spawn_by_thread:
+            return
+        spawn_by_thread[thread_id] = tool_id
+        spawned_children.append((thread_id, tool_id, None))
 
     async def _recover_subagent_tool_calls(
         self,
@@ -1997,6 +2146,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 objs.append(json.loads(raw))
             except json.JSONDecodeError:
                 continue
+        objs = objs[cls._fork_boundary(objs) :]
 
         # Pass 1: tool OUTPUTs by call_id.
         outputs: dict[str, tuple[str, bool]] = {}
@@ -2057,6 +2207,31 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return gens
 
     @staticmethod
+    def _fork_boundary(objs: list[dict[str, Any]]) -> int:
+        """Index where the child's own history starts.
+
+        A spawn with ``fork_turns`` copies the parent's history into the child's
+        rollout first, parent tool calls included; replaying those would credit
+        them to the child. The copy ends at the ``thread_settings_applied`` event
+        carrying the rollout's own thread id (its first ``session_meta``); 0 when
+        the rollout is not a fork or has no such event.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
+        """
+        meta = next(((o.get("payload") or {}) for o in objs if o.get("type") == "session_meta"), {})
+        own = meta.get("id")
+        if not own or not meta.get("forked_from_id"):
+            return 0
+        for i, o in enumerate(objs):
+            p = o.get("payload") or {}
+            if (
+                o.get("type") == "event_msg"
+                and p.get("type") == "thread_settings_applied"
+                and p.get("thread_id") == own
+            ):
+                return i
+        return 0
+
+    @staticmethod
     def _message_text(content: Any) -> str:
         """Join the text of a rollout ``message`` ResponseItem's content parts."""
         if isinstance(content, str):
@@ -2081,8 +2256,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Best-effort parameters for a rollout tool-call ResponseItem.
 
         Shell-style calls are normalized to ``{"command": ...}`` so the transcript
-        renders the command line; everything else passes through.
+        renders the command line; everything else passes through. An ``exec``
+        script yields its literal commands, one per line, or itself when it has none.
         """
+        if payload.get("name") == "exec" and isinstance(payload.get("input"), str):
+            script = payload["input"]
+            commands = _exec_shell_commands(script)
+            return {"command": "\n".join(commands) if commands else script}
         args = payload.get("arguments")
         if isinstance(args, str) and args:
             with contextlib.suppress(json.JSONDecodeError):
@@ -2106,9 +2286,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
     @staticmethod
     def _subagent_output(payload: dict[str, Any]) -> tuple[str, bool]:
-        """(result_summary, is_error) for a rollout tool-output ResponseItem."""
+        """(result_summary, is_error) for a rollout tool-output ResponseItem.
+
+        An exec output is a list of content parts starting ``Script completed`` or
+        ``Script failed``; a shell output is a string starting ``Exit code: N``.
+        """
         output = payload.get("output")
         is_error = False
+        if isinstance(output, list):
+            text = "".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in output)
+            is_error = text.lstrip().startswith("Script failed")
+            return text, is_error
+        if isinstance(output, str) and (exit_code := re.match(r"Exit code: (\d+)", output)):
+            return output, exit_code.group(1) != "0"
         if isinstance(output, dict):
             if output.get("success") is False:
                 is_error = True
