@@ -962,6 +962,15 @@ these models implicitly cache prefixes (no separate cache-write fee), so their `
 `0.0` rather than mirroring input like most rows above them. Rates copied from the UiPath-only sibling
 plugin's own `pricing.py`, whose own module docstring documents the same rationale.
 
+**`delegate_rate_key` maps the backend's id to its key (`gpt_5_6_luna` → `gpt-5-6-luna`).** The adapter
+prices each turn under it, and the `check_pricing_coverage` pre-flight looks a Delegate agent's model
+up under it. The out-of-tree `delegate-sdk` adapter did this `replace("_", "-")` inline, and the port to
+the built-in agent lost it. Every config written in the backend's own ids (`model: gpt_5_6_luna`) then
+priced the agent's tokens at `None`, so a downstream suite's run totals held only the judges' cost, and
+the pre-flight warned that the model had no rate. The evalboard mirrors the rule as `rateKey` in
+`evalboard/lib/pricing.ts`. A board row does not record its harness, so `resolvePricing` tries that key
+only after the exact id, and an id that already has a rate keeps it.
+
 Two things in `_DELEGATE_PRICING` look like copy errors on a skim and are not — a code review flagged
 both before this line existed to point at.
 
