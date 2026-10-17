@@ -210,6 +210,29 @@ The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills
 5. Codex CLI auto-discovers skills in `.agents/skills/`
 6. Removes the copies when the turn ends, so criteria and run artifacts never see them
 
+### Sub-agents
+
+A sub-agent runs on its own Codex thread, and its tool calls never reach the parent's
+stream. After each turn the agent reads the child's rollout file under
+`$CODEX_HOME/sessions` and records the child's calls as telemetry, nested under the
+spawning `Agent` row. Spawns from multi-agent v1 (`spawnAgent`) and v2
+(`subAgentActivity`) are both recovered.
+
+- Each shell command the child ran is one `Bash` row with its own exit code. A non-zero
+  exit is `result_status: error`, so `command_executed` with `require_success: true` does
+  not count it. A code-mode script that runs several commands gives one row per command.
+- A call that Codex reports with no result is `result_status: unknown`. This is a call
+  that an interrupt stopped, or a call that still ran when its tool call returned.
+  `command_executed` with `require_success: true` does not count it. When a later `wait`
+  or `write_stdin` call resumes the call, the call takes that later result.
+- Each file the child patched is a `Write` row.
+- A code-mode `exec` script that ran no command and changed no file (for example, one
+  that only reads the tool list) is one `exec` row, not a `Bash` row.
+- A command that runs longer than its script is still recovered when a later script polls
+  it. A command built from a variable can be missing if it ends while no script runs.
+- A multi-agent v2 spawn names no model, so the child's generations are priced at the
+  parent's model.
+
 ### Async Integration
 
 The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and await coroutines, preserving the async interface.
