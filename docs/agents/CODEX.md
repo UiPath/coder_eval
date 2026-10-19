@@ -228,8 +228,8 @@ spawning `Agent` row. Spawns from multi-agent v1 (`spawnAgent`) and v2
 - Each file the child patched is a `Write` row.
 - A code-mode `exec` script that ran no command and changed no file (for example, one
   that only reads the tool list) is one `exec` row, not a `Bash` row.
-- CLI 0.147 and earlier write no command records; 0.156.1 and 0.162 do, and the versions
-  between them are not checked. On a CLI without records a code-mode script is one `exec`
+- Headless Codex through 0.147 writes no command records; 0.155.1 (the SDK floor),
+  0.156.1 and 0.162 do. On a CLI without records a code-mode script is one `exec`
   row, and the commands inside it are not recovered.
 - A multi-agent v2 spawn names no model, so the child's generations are priced at the
   parent's model.

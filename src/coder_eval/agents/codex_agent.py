@@ -180,6 +180,9 @@ _CALL_FAILED = re.compile(r"\w+ failed:")
 # flag that precedes the command (a `-c` cluster such as `-lc`, `-Command`, `/c`).
 _SHELL_PROGRAM = re.compile(r"(?:.*[\\/])?(?:[a-z]*sh|powershell|cmd)(?:\.exe)?", re.IGNORECASE)
 _SHELL_SCRIPT_FLAG = re.compile(r"-[a-z]*c|-command|/c", re.IGNORECASE)
+# A JavaScript string escape: `\n`, `\u00e9`, `\u{1F600}`, `\x41`, or any escaped character.
+_JS_ESCAPE = re.compile(r"\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", re.DOTALL)
+_JS_CHAR_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
 
 _ResultStatus = Literal["success", "error", "unknown"]
 
@@ -270,6 +273,21 @@ def _record_command_text(argv: Any) -> str:
     if len(parts) >= 3 and _SHELL_PROGRAM.fullmatch(parts[0]) and _SHELL_SCRIPT_FLAG.fullmatch(parts[-2]):
         return parts[-1]
     return shlex.join(parts)
+
+
+def _js_unescaped(source: str) -> str:
+    """A script source with its string escapes decoded: a ``"a\\nb"`` literal reads as the two-line command it runs."""
+
+    def decode(match: re.Match[str]) -> str:
+        escape = match[1]
+        if len(escape) == 1:
+            return _JS_CHAR_ESCAPES.get(escape, escape)
+        try:
+            return chr(int(escape.strip("ux{}"), 16))
+        except ValueError:
+            return match[0]
+
+    return _JS_ESCAPE.sub(decode, source)
 
 
 def _file_change_outcome(paths: list[str], status: str) -> tuple[_ResultStatus, str]:
@@ -2127,9 +2145,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         cur: list[dict[str, Any]] = []
         n_calls = 0
         direct_call_ids: set[str] = set()
-        # Every exec script, and the records each one wrote, by its call id: a
-        # script's records replace its row.
-        scripts: list[dict[str, Any]] = []
+        # Every exec script with the source text a record is matched against, and the
+        # records each one wrote, by its call id: a script's records replace its row.
+        scripts: list[tuple[dict[str, Any], str]] = []
         records: dict[str, list[dict[str, Any]]] = {}
 
         def close(tokens: tuple[int, int, int, int] | None) -> None:
@@ -2159,7 +2177,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         "status": status,
                     }
                     if name == _EXEC_TOOL:
-                        scripts.append(call)
+                        source = _js_unescaped(str(call["parameters"].get("input", ""))).replace("\\", "")
+                        scripts.append((call, source))
                     else:
                         direct_call_ids.add(call_id)
                     cur.append({"kind": "tool", "call": call})
@@ -2347,20 +2366,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return None
 
     @staticmethod
-    def _record_owner(record: dict[str, Any], scripts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _record_owner(record: dict[str, Any], scripts: list[tuple[dict[str, Any], str]]) -> dict[str, Any] | None:
         """The exec script a record came from.
 
-        The newest script whose source holds the record's command, compared with
-        backslashes removed; else the newest script. None only when the rollout holds
-        no script.
+        The newest script whose source holds the record's command, compared with the
+        source's string escapes decoded and backslashes removed; else the newest
+        script. None only when the rollout holds no script.
         Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
         command = record["parameters"].get("command")
         text = str(command or "").replace("\\", "")
-        sources = ((s, str(s["parameters"].get("input", "")).replace("\\", "")) for s in reversed(scripts))
-        owner = next((s for s, source in sources if text and text in source), None)
+        owner = next((s for s, source in reversed(scripts) if text and text in source), None)
         if owner is None and scripts:
-            owner = scripts[-1]
+            owner = scripts[-1][0]
             logger.debug(
                 "CodexAgent: %s record %r matches no script source; attributed to script %s",
                 record["tool_name"],

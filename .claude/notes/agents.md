@@ -424,17 +424,21 @@ command. A command can outlive its script: `tools.exec_command` returns at the c
 `yield_time_ms` with a session id, the script ends, and a later script polls the command
 with `tools.write_stdin`. The text match then gives the record to the script that started
 the command, so that script is not also left as an `exec` row that repeats the command.
-The match ignores backslashes, because the source escapes the backslashes and double
-quotes that the command holds; without that, no record of a real 0.156.1 Windows e2e
-child matched. A record that matches no source goes to the newest script: dropping it
+The match decodes the source's string escapes and then ignores backslashes. A multi-line
+command is a `"a\nb"` literal in the source but holds real newlines in its record; in a
+recorded 0.147 TUI thread, 3 of 10 such commands outlived their script and, undecoded,
+went to a later one. The source also escapes the backslashes and double quotes that the
+command holds; without ignoring backslashes, no record of a real 0.156.1 Windows e2e child
+matched. A record that matches no source goes to the newest script: dropping it
 would lose a command built from a variable, the miss this recovery exists to prevent,
 while a wrong guess only moves the row to another generation. A record whose id is a
 direct call's is dropped, so a direct call is never counted twice. Seen on real CLI
 0.156.1 runs, v1 and v2 children alike: the records sit between the script call and its
 output, before the generation's `token_count`, and a 45-second command was polled as
-described. CLIs through 0.147 write no `CommandExecution` records, so there a code-mode
-script stays one `exec` row and its commands are not recoverable; 0.156.1 and 0.162 write
-them, on Windows too; 0.155, the SDK floor, is not checked.
+described. Headless threads through 0.147 (the 0.144 SDK, 0.147 `codex exec`) write no
+`CommandExecution` records, so there a code-mode script stays one `exec` row and its
+commands are not recoverable. The 0.147 TUI and 0.155.1 (the SDK floor) write them, as do
+0.156.1 and 0.162, on Windows too.
 
 A call with no result is `unknown`, never a success, so `require_success` does not credit
 it: an interrupt cut it off, it still ran after its yield time, or `wait` stopped it. The

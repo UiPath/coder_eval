@@ -23,7 +23,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP, CodexAgent, _record_command_text
+from coder_eval.agents.codex_agent import (
+    _CLAUDE_TO_CODEX_TOOL_MAP,
+    CodexAgent,
+    _js_unescaped,
+    _record_command_text,
+)
 from coder_eval.models import AgentKind, parse_agent_config
 from tests._fixtures.codex_rollouts import (
     command_record,
@@ -493,8 +498,12 @@ class TestSubAgentRolloutRecovery:
         [
             ("sh -c 'sleep 45; exit 5'", "sh -c 'sleep 45; exit 5'"),
             ('pytest C:\\\\w\\\\tests -k \\"slow\\"', 'pytest C:\\w\\tests -k "slow"'),
+            (
+                "set +e\\nprintf '%s\\\\n' '== uip =='\\nuip --version",
+                "set +e\nprintf '%s\\n' '== uip =='\nuip --version",
+            ),
         ],
-        ids=["as-written", "escaped-in-the-source"],
+        ids=["as-written", "escaped-in-the-source", "multi-line"],
     )
     def test_a_long_command_polled_by_a_later_script_replaces_its_own_script(self, tmp_path, source_cmd, command):
         # The shape of a real CLI 0.156.1 run: the command outlives its script, a second
@@ -614,6 +623,20 @@ class TestSubAgentRolloutRecovery:
     )
     def test_record_command_text_drops_only_the_shell_wrapper(self, argv, text):
         assert _record_command_text(argv) == text
+
+    @pytest.mark.parametrize(
+        ("source", "decoded"),
+        [
+            ("a\\nb\\tc", "a\nb\tc"),
+            ("printf '%s\\\\n' \\\"x\\\"", "printf '%s\\n' \"x\""),
+            ("caf\\u00e9 \\u{1F600} \\x41", "caf\u00e9 \U0001f600 A"),
+            ("one \\\ntwo", "one two"),
+            ("\\u{110000}", "\\u{110000}"),
+        ],
+        ids=["newline-tab", "escaped-backslash-and-quote", "unicode-and-hex", "line-continuation", "bad-code-point"],
+    )
+    def test_js_unescaped_decodes_string_escapes(self, source, decoded):
+        assert _js_unescaped(source) == decoded
 
     def test_a_line_that_is_not_a_json_object_is_skipped(self, tmp_path):
         path = write_child_rollout(tmp_path, "t1", [exec_call("c1", "text(1);"), exec_output("c1", "1")])
