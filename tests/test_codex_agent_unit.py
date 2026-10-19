@@ -14,6 +14,7 @@ module's ``importorskip("openai_codex")``.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime
@@ -22,8 +23,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP, CodexAgent
+from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP, CodexAgent, _record_command_text
 from coder_eval.models import AgentKind, parse_agent_config
+from tests._fixtures.codex_rollouts import (
+    command_record,
+    exec_call,
+    exec_output,
+    file_change_record,
+    token_count_event,
+    wait_call,
+    wait_output,
+    write_child_rollout,
+)
+
+
+_BOUNDARY = token_count_event(inp=10, cached=0, out=5, tot_in=10, tot_cached=0, tot_out=5)
 
 
 def _item_notification(method: str, root: SimpleNamespace) -> SimpleNamespace:
@@ -348,3 +362,318 @@ class TestSkillCopies:
                 assert await agent.communicate("go") == "record"
             assert not (agent.working_directory / ".agents").exists()
         assert seen == [True, True]
+
+
+class TestSubAgentRolloutRecovery:
+    """A sub-agent's tool rows are rebuilt from its rollout file: pure parsing, no SDK.
+
+    A code-mode ``exec`` script's rows are the ``item_completed`` records Codex writes
+    while it runs, each with its own result.
+    """
+
+    @staticmethod
+    def _rows(path: Path) -> list[tuple[str, str, dict]]:
+        gens = CodexAgent._parse_rollout_generations(path)
+        return [(c["tool_name"], c["status"], c["parameters"]) for g in gens for c in g["tools"]]
+
+    def test_a_scripts_rows_are_its_records_each_with_its_own_result(self, tmp_path):
+        script = (
+            "await tools.apply_patch(p);"
+            ' await Promise.all([tools.exec_command({cmd:"pytest -q"}), tools.exec_command({cmd:"ls nope"})]);'
+        )
+        path = write_child_rollout(
+            tmp_path,
+            "t1",
+            [
+                exec_call("c1", script),
+                file_change_record("/w/a.txt", item_id="exec-1"),
+                command_record("pytest -q", exit_code=0, item_id="exec-2"),
+                command_record("ls nope", exit_code=1, item_id="exec-3"),
+                exec_output("c1", '[{"exit_code":0},{"exit_code":1}]'),
+            ],
+        )
+
+        gens = CodexAgent._parse_rollout_generations(path)
+
+        # `Script completed` says only that the script ended; each record keeps its own result.
+        assert [(c["call_id"], c["tool_name"], c["status"], c["parameters"]) for g in gens for c in g["tools"]] == [
+            ("exec-1", "Write", "success", {"paths": ["/w/a.txt"]}),
+            ("exec-2", "Bash", "success", {"command": "pytest -q"}),
+            ("exec-3", "Bash", "error", {"command": "ls nope"}),
+        ]
+
+    def test_a_script_that_ran_nothing_recorded_is_one_exec_row(self, tmp_path):
+        script = "text(ALL_TOOLS.filter(x => /agent/.test(x.name)));"
+        path = write_child_rollout(tmp_path, "t1", [exec_call("c1", script), exec_output("c1", "[]")])
+
+        assert self._rows(path) == [("exec", "success", {"input": script})]
+
+    @pytest.mark.parametrize(
+        ("output", "status"),
+        [
+            (exec_output("c1", "TypeError: x is undefined", head="Script failed"), "error"),
+            ({"type": "custom_tool_call_output", "call_id": "c1", "output": "code-mode host is disabled"}, "error"),
+            (None, "unknown"),
+            (exec_output("c1", head="Script running with cell ID 3"), "unknown"),
+            (exec_output("c1", head="Script terminated"), "unknown"),
+            ({"type": "custom_tool_call_output", "call_id": "c1", "output": "aborted by user after 2.5s"}, "unknown"),
+        ],
+        ids=["script-failed", "host-disabled", "no-output", "still-running", "terminated", "aborted"],
+    )
+    def test_an_exec_row_status_comes_from_the_script_output(self, tmp_path, output, status):
+        lines = [exec_call("c1", "await tools.view_image({path:'a.png'});")]
+        if output is not None:
+            lines.append(output)
+
+        assert self._rows(write_child_rollout(tmp_path, "t1", lines))[0][1] == status
+
+    @pytest.mark.parametrize(
+        ("script", "recorded"),
+        [
+            (
+                'const c = "rm -rf build"; await tools.exec_command({cmd: "ls"}); await tools.exec_command({cmd: c});',
+                ["ls", "rm -rf build"],
+            ),
+            (
+                'await tools.shell_command({justification:"re-run the command: tests", command:"pytest -q"});',
+                ["pytest -q"],
+            ),
+            ('for (const f of ["a", "b"]) await tools.exec_command({cmd: `cat ${f}`});', ["cat a", "cat b"]),
+        ],
+        ids=["variable", "key-inside-a-string", "loop"],
+    )
+    def test_commands_come_from_the_records_not_the_script_text(self, tmp_path, script, recorded):
+        lines = [exec_call("c1", script)]
+        lines += [command_record(cmd, exit_code=0, item_id=f"exec-{i}") for i, cmd in enumerate(recorded)]
+        lines.append(exec_output("c1"))
+
+        assert [p["command"] for _, _, p in self._rows(write_child_rollout(tmp_path, "t1", lines))] == recorded
+
+    def test_a_record_of_a_direct_call_is_not_a_row(self, tmp_path):
+        path = write_child_rollout(
+            tmp_path,
+            "t1",
+            [
+                exec_call("c1", "text(1);"),
+                {"type": "function_call", "name": "exec_command", "call_id": "c2", "arguments": '{"cmd":"ls"}'},
+                command_record("ls", exit_code=0, item_id="c2"),
+                {"type": "function_call_output", "call_id": "c2", "output": "Exit code: 0\nOutput:\na\n"},
+                exec_output("c1", "1"),
+            ],
+        )
+
+        assert self._rows(path) == [
+            ("exec", "success", {"input": "text(1);"}),
+            ("Bash", "success", {"cmd": "ls", "command": "ls"}),
+        ]
+
+    def test_a_late_record_matching_no_script_source_goes_to_the_newest_script(self, tmp_path):
+        # The command is built from a variable, so no script's source holds its text,
+        # and it ends after its script: it is still that script's row, not dropped.
+        script = "for (const f of files) await tools.exec_command({cmd:`pytest ${f}`});"
+        path = write_child_rollout(
+            tmp_path,
+            "t1",
+            [
+                exec_call("c1", script),
+                exec_output("c1", '{"session_id":4}'),
+                command_record("pytest test_a.py", exit_code=0, item_id="exec-1"),
+            ],
+        )
+
+        assert self._rows(path) == [("Bash", "success", {"command": "pytest test_a.py"})]
+
+    def test_a_record_in_a_rollout_with_no_script_is_not_a_row(self, tmp_path):
+        path = write_child_rollout(tmp_path, "t1", [command_record("ls", exit_code=0, item_id="exec-1")])
+
+        assert self._rows(path) == []
+
+    @pytest.mark.parametrize(
+        ("source_cmd", "command"),
+        [
+            ("sh -c 'sleep 45; exit 5'", "sh -c 'sleep 45; exit 5'"),
+            ('pytest C:\\\\w\\\\tests -k \\"slow\\"', 'pytest C:\\w\\tests -k "slow"'),
+        ],
+        ids=["as-written", "escaped-in-the-source"],
+    )
+    def test_a_long_command_polled_by_a_later_script_replaces_its_own_script(self, tmp_path, source_cmd, command):
+        # The shape of a real CLI 0.156.1 run: the command outlives its script, a second
+        # script polls it with write_stdin, and its record arrives while that one runs.
+        start = (
+            f'const r = await tools.exec_command({{cmd:"{source_cmd}",yield_time_ms:30000}}); text(JSON.stringify(r));'
+        )
+        poll = (
+            'const r = await tools.write_stdin({session_id:27738,chars:"",yield_time_ms:30000});'
+            " text(JSON.stringify(r));"
+        )
+        path = write_child_rollout(
+            tmp_path,
+            "t1",
+            [
+                exec_call("c1", start),
+                exec_output("c1", '{"session_id":27738}'),
+                _BOUNDARY,
+                exec_call("c2", poll),
+                command_record(command, exit_code=5, item_id="exec-1"),
+                exec_output("c2", '{"exit_code":5}'),
+                _BOUNDARY,
+            ],
+        )
+
+        gens = CodexAgent._parse_rollout_generations(path)
+
+        # The command's row sits in the generation that started it, so no generation is left empty.
+        assert [[(c["tool_name"], c["status"], c["parameters"]) for c in g["tools"]] for g in gens] == [
+            [("Bash", "error", {"command": command})],
+            [("exec", "success", {"input": poll})],
+        ]
+
+    def test_a_record_that_arrives_during_a_wait_goes_to_the_yielded_script(self, tmp_path):
+        path = write_child_rollout(
+            tmp_path,
+            "t1",
+            [
+                exec_call("c1", 'await tools.exec_command({cmd:"make build", yield_time_ms:120000});'),
+                exec_output("c1", head="Script running with cell ID 3"),
+                _BOUNDARY,
+                wait_call("w1", "3"),
+                wait_output("w1", head="Script running with cell ID 3"),
+                _BOUNDARY,
+                wait_call("w2", "3"),
+                command_record("make build", exit_code=2, item_id="exec-1"),
+                wait_output("w2", head="Script failed"),
+                _BOUNDARY,
+            ],
+        )
+
+        gens = CodexAgent._parse_rollout_generations(path)
+
+        assert [[(c["tool_name"], c["status"]) for c in g["tools"]] for g in gens] == [
+            [("Bash", "error")],
+            [("wait", "unknown")],
+            [("wait", "error")],
+        ]
+
+    def test_a_yielded_script_without_records_stays_unknown_and_its_wait_is_a_row(self, tmp_path):
+        lines = [
+            exec_call("c1", "await tools.view_image({path:'a.png'});"),
+            exec_output("c1", head="Script running with cell ID 9"),
+            wait_call("w1", "9"),
+            wait_output("w1", head="Script completed"),
+        ]
+
+        assert [row[:2] for row in self._rows(write_child_rollout(tmp_path, "t1", lines))] == [
+            ("exec", "unknown"),
+            ("wait", "success"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("output", "status"),
+        [
+            ("Exit code: 0\nWall time: 1 seconds\nOutput:\nok\n", "success"),
+            ("Exit code: 1\nWall time: 1 seconds\nOutput:\nboom\n", "error"),
+            ("Chunk ID: ab12\nWall time: 0.2 seconds\nProcess exited with code 2\nOutput:\nboom\n", "error"),
+            ("Chunk ID: ab12\nWall time: 0.2 seconds\nProcess exited with code 0\nOutput:\nExit code: 1\n", "success"),
+            ("5050\n", "success"),
+            (
+                "Chunk ID: ab12\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\nstill going\n",
+                "unknown",
+            ),
+            ("Wall time: 3.2 seconds\naborted by user", "unknown"),
+            ("aborted by user after 3.2s", "unknown"),
+            ("Exit code: 0\nWall time: 1 seconds\nOutput:\naborted by user\n", "success"),
+            ("write_stdin failed: Unknown process id 7", "error"),
+        ],
+        ids=[
+            "v1-ok",
+            "v1-failed",
+            "unified-exec-failed",
+            "exit-line-in-the-body",
+            "no-header",
+            "unified-exec-still-running",
+            "shell-aborted",
+            "call-aborted",
+            "abort-text-in-the-body",
+            "call-failed",
+        ],
+    )
+    def test_a_direct_shell_call_status_comes_from_its_output_header(self, output, status):
+        assert CodexAgent._subagent_output({"output": output}) == (output, status)
+
+    @pytest.mark.parametrize(
+        ("argv", "text"),
+        [
+            (["/bin/zsh", "-lc", "pytest -q"], "pytest -q"),
+            (["bash", "-c", "ls -la"], "ls -la"),
+            (["C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoProfile", "-Command", "git status"], "git status"),
+            (["cmd.exe", "/d", "/c", "dir"], "dir"),
+            (["python3", "-c", "print(1)"], "python3 -c 'print(1)'"),
+            ("echo hi", "echo hi"),
+        ],
+        ids=["zsh-login", "bash", "powershell", "cmd", "not-a-shell", "string"],
+    )
+    def test_record_command_text_drops_only_the_shell_wrapper(self, argv, text):
+        assert _record_command_text(argv) == text
+
+    def test_a_line_that_is_not_a_json_object_is_skipped(self, tmp_path):
+        path = write_child_rollout(tmp_path, "t1", [exec_call("c1", "text(1);"), exec_output("c1", "1")])
+        path.write_text('"a string"\n[1, 2]\n' + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        assert self._rows(path) == [("exec", "success", {"input": "text(1);"})]
+
+    def test_forked_parent_history_is_not_credited_to_the_child(self, tmp_path):
+        # fork_turns copies the parent's history ahead of the child's own; the
+        # parent's shell call in that prefix must not be replayed as the child's.
+        child, parent = "019e0000-1111-7000-8000-000000000008", "019e0000-0000-7000-8000-000000000000"
+        path = write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "session_meta", "payload": {"id": child, "forked_from_id": parent}},
+                {"type": "session_meta", "payload": {"id": parent}},
+                {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "p_1",
+                    "arguments": '{"command":"git status"}',
+                },
+                {"type": "function_call_output", "call_id": "p_1", "output": "Exit code: 0\nOutput:\n"},
+                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
+                {"type": "turn_context", "payload": {"turn_id": "t_child"}},
+                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\nREADME.md\n"},
+            ],
+        )
+
+        assert [p["command"] for _, _, p in self._rows(path)] == ["ls"]
+
+    def test_rollout_without_fork_marker_is_parsed_whole(self, tmp_path):
+        child = "019e0000-2222-7000-8000-000000000009"
+        path = write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "session_meta", "payload": {"id": child}},
+                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\n"},
+                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
+            ],
+        )
+
+        assert [p["command"] for _, _, p in self._rows(path)] == ["ls"]
+
+    def test_a_fork_without_its_own_settings_marker_is_parsed_whole_and_logged(self, tmp_path, caplog):
+        child, parent = "019e0000-3333-7000-8000-00000000000a", "019e0000-0000-7000-8000-000000000000"
+        path = write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "session_meta", "payload": {"id": child, "forked_from_id": parent}},
+                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\n"},
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="coder_eval.agents.codex_agent"):
+            assert [p["command"] for _, _, p in self._rows(path)] == ["ls"]
+        assert child in caplog.text

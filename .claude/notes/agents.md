@@ -373,7 +373,8 @@ Codex runs every sub-agent on its own child thread whose events never reach the 
 stream, and that thread persists with *Limited* rollout policy, which drops
 `commandExecution` events. So neither the live stream nor `thread.read` surfaces the
 sub-agent's shell commands, and `thread/tokenUsage/updated` only ever reports the PARENT
-thread.
+thread. (The commands a code-mode script runs are the exception: they persist as
+`item_completed` records, below.)
 
 But the child rollout ALWAYS persists the raw `function_call` / `local_shell_call` /
 `custom_tool_call` ResponseItems and a `token_count` event with the child's cumulative
@@ -398,26 +399,64 @@ a background task), so the lookup polls ~2 s — but bails immediately when
 Codex multi-agent v2 moved the spawn off the collab item. A v1 spawn is a
 `collabAgentToolCall` that names the child in `receiver_thread_ids`; a v2 spawn is a
 `subAgentActivity` item with `kind: started`, `id` = the spawn call id and
-`agent_thread_id` = the child, and its `wait` names no child at all. Registration keys off
-both items: keyed off the collab item alone, a v2 run recovers nothing the child ran. The
-other `subAgentActivity` kinds (`completed`, `interrupted`, `interacted`) are notices about
-a registered child, dropped before telemetry so they neither become unknown rows nor open
-a parent model call.
+`agent_thread_id` = the child, and its `wait` names no child at all. `_tool_item_root`
+maps a `started` item onto the v1 spawn shape where items enter the turn state, so one
+path registers both, and registers a child once: a repeated spawn item would otherwise
+mine the rollout twice and double the child's rows and tokens. The other kinds
+(`completed`, `interrupted`, `interacted`) are notices about a spawned child, dropped
+there, so they neither become rows nor open a parent model call.
 
-The child's shell calls come in two shapes. v1 records a `shell_command` function call
-with JSON `arguments` and an output starting `Exit code: N`. v2 records a custom tool
-`exec` whose `input` is a JavaScript script calling the shell tool, often several in a
-`Promise.all`, and whose output is a list of content parts starting `Script completed` /
-`Script failed`. The script is read by hand: bare keys and single quotes are the norm, and
-`json.loads` recovers about a third. A command built from a variable falls back to the
-whole script as the command text, which still matches as text. Both outputs are read so a
-failed call is not recorded as a success.
+A child's tool calls come in two shapes. A direct call is a function call, and its output
+header carries the exit code. A code-mode call is a custom tool `exec` whose input is a
+JavaScript script, often several shell calls in a `Promise.all`. Its output tells only
+whether the SCRIPT ran to the end: `tools.exec_command` hands a non-zero exit code back to
+the script and does not throw, so `Script completed` is not a command result. The script
+source is not parsed — a command built from a variable or a loop defeats any parser, and
+the source holds no exit code. Instead, while a script runs, Codex writes an
+`item_completed` record per shell command (`CommandExecution`: argv, exit code, output)
+and per patch (`FileChange`), and those records ARE the script's rows, each with its own
+result. A script that left no record stays one `exec` row, not a `Bash` row: its
+JavaScript is not a shell command. The argv's login-shell wrapper (`/bin/zsh -lc <cmd>`)
+is stripped, so a record's row reads like a direct call's.
+
+A record names no script, so it goes to the newest script whose source holds its
+command. A command can outlive its script: `tools.exec_command` returns at the call's own
+`yield_time_ms` with a session id, the script ends, and a later script polls the command
+with `tools.write_stdin`. The text match then gives the record to the script that started
+the command, so that script is not also left as an `exec` row that repeats the command.
+The match ignores backslashes, because the source escapes the backslashes and double
+quotes that the command holds; without that, no record of a real 0.156.1 Windows e2e
+child matched. A record that matches no source goes to the newest script: dropping it
+would lose a command built from a variable, the miss this recovery exists to prevent,
+while a wrong guess only moves the row to another generation. A record whose id is a
+direct call's is dropped, so a direct call is never counted twice. Seen on real CLI
+0.156.1 runs, v1 and v2 children alike: the records sit between the script call and its
+output, before the generation's `token_count`, and a 45-second command was polled as
+described. CLIs through 0.147 write no `CommandExecution` records, so there a code-mode
+script stays one `exec` row and its commands are not recoverable; 0.156.1 and 0.162 write
+them, on Windows too; 0.155, the SDK floor, is not checked.
+
+A call with no result is `unknown`, never a success, so `require_success` does not credit
+it: an interrupt cut it off, it still ran after its yield time, or `wait` stopped it. The
+abort output is matched whole, so a command that prints `aborted by user` keeps its exit
+code. The `wait` or `write_stdin` call that later returns the result is a row of its own
+and does not change the yielded call: the records already carry each command's exit code,
+so only a yielded script that ran no command, or a direct `exec_command` that a direct
+`write_stdin` polls (no recorded run has one), stays `unknown`. A resuming call stays a
+row because a generation that only resumed would otherwise hold no block, and the recovery
+drops such a generation with its tokens; so each poll is one row, where the parent stream
+records a polled command once. The abort forms come from `abort_message` in
+`core/src/tools/parallel.rs` (only `exec_command` gets the wall time). A script yields
+after `DEFAULT_EXEC_YIELD_TIME_MS` (10 s); about 8% of the scripts in recorded 0.144 to
+0.147 threads yielded.
 
 A spawn with `fork_turns` copies the parent's history, tool calls included, into the head
 of the child's rollout. In a forked rollout (`session_meta` carries `forked_from_id`),
 parsing starts at the first `thread_settings_applied` with the child's thread id, so the
 parent's commands are not credited to the child. A non-forked rollout is parsed whole:
-that event also appears mid-thread on a settings change.
+that event also appears mid-thread on a settings change. A fork without that event is
+also parsed whole, with a warning, so a format change that would credit the parent's
+commands to the child shows in the logs.
 
 The thread-cumulative baseline is the other half. `ThreadTokenUsage.total` counts the whole
 THREAD, and the Codex thread is created once per task and reused, so by turn N it still

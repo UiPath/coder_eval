@@ -500,10 +500,22 @@ import tempfile  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
+from typing import Any  # noqa: E402
 
-from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
+from openai_codex.generated.v2_all import (  # noqa: E402
+    SubAgentActivityThreadItem,
+    Turn,
+    TurnCompletedNotification,
+)
 
 from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
+from tests._fixtures.codex_rollouts import (  # noqa: E402
+    command_record,
+    exec_call,
+    exec_output,
+    token_count_event,
+    write_child_rollout,
+)
 
 
 def _item_notification(
@@ -1047,13 +1059,14 @@ def _collab_call(
     prompt: str | None = None,
     result: str | None = None,
     status: str = "completed",
-    child_thread: str = "thread_child",
+    child_thread: str | None = "thread_child",
 ) -> SimpleNamespace:
     """A collabAgentToolCall item root (Codex's native multi-agent tool).
 
     ``tool`` is the collab operation value ("spawnAgent" or "wait"); ``result``
     becomes a spawned agent's returned message (under agents_states). The spawn
-    and the wait share ``child_thread`` so the result nests under the spawn."""
+    and the wait share ``child_thread`` so the result nests under the spawn; a
+    multi-agent v2 wait names no child (``child_thread=None``)."""
     states = {}
     if result is not None:
         states[child_thread] = SimpleNamespace(message=result, status="completed")
@@ -1064,128 +1077,9 @@ def _collab_call(
         model=model,
         prompt=prompt,
         status=status,
-        receiver_thread_ids=[child_thread],
+        receiver_thread_ids=[child_thread] if child_thread else [],
         agents_states=states,
     )
-
-
-class TestExecScriptCommandExtraction:
-    """Shell commands are read out of an `exec` script so recovered sub-agent rows are Bash rows."""
-
-    def test_json_quoted_keys(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = (
-            'const r = await tools.shell_command({"command":"git status --short --branch",'
-            '"workdir":"C:\\\\w","timeout_ms":10000}); text(r);'
-        )
-        assert _exec_shell_commands(script) == ["git status --short --branch"]
-
-    def test_bare_keys_single_quotes_and_escapes(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = (
-            'const a = await tools.shell_command({command:\'pytest --rootdir "C:\\\\p" '
-            '-q tests\',workdir:"C:\\\\repo"}); text(a);'
-        )
-        assert _exec_shell_commands(script) == ['pytest --rootdir "C:\\p" -q tests']
-
-    def test_promise_all_yields_every_command_in_order(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = (
-            "const r = await Promise.all([\n"
-            '  tools.shell_command({command:"git branch --show-current",workdir:"C:\\\\w"}),\n'
-            '  tools.shell_command({command:"git status --short",workdir:"C:\\\\w"}),\n'
-            "]);"
-        )
-        assert _exec_shell_commands(script) == ["git branch --show-current", "git status --short"]
-
-    def test_newline_escape_and_template_literal(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = 'await tools.shell_command({command:`echo "a"\\nls -la`})'
-        assert _exec_shell_commands(script) == ['echo "a"\nls -la']
-
-    def test_variable_command_is_not_a_literal(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = 'const cmd = "npm run build"; const r = await tools.shell_command({command: cmd});'
-        assert _exec_shell_commands(script) == []
-
-    def test_other_tools_are_ignored(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = (
-            'await tools.update_plan({plan:[{step:"x",status:"in_progress"}]}); await tools.view_image({path:"a.png"});'
-        )
-        assert _exec_shell_commands(script) == []
-
-    def test_exec_command_with_cmd_key(self):
-        from coder_eval.agents.codex_agent import _exec_shell_commands
-
-        script = (
-            'const r = await tools.exec_command({"cmd":"git log --oneline -1","workdir":"C:\\\\w",'
-            '"yield_time_ms":10000,"max_output_tokens":2000});\ntext(r.output);\n'
-        )
-        assert _exec_shell_commands(script) == ["git log --oneline -1"]
-
-    def test_exec_output_parts_are_joined_and_a_failed_script_is_an_error(self):
-        ok = {
-            "type": "custom_tool_call_output",
-            "call_id": "c1",
-            "output": [
-                {"type": "input_text", "text": "Script completed\nWall time 1.0 seconds\nOutput:\n"},
-                {"type": "input_text", "text": "ok\n"},
-            ],
-        }
-        failed = {
-            "type": "custom_tool_call_output",
-            "call_id": "c2",
-            "output": [
-                {"type": "input_text", "text": "Script failed\nWall time 1.6 seconds\nOutput:\n"},
-                {"type": "input_text", "text": "boom\n"},
-            ],
-        }
-        text, is_error = CodexAgent._subagent_output(ok)
-        assert "ok" in text
-        assert not is_error
-        text, is_error = CodexAgent._subagent_output(failed)
-        assert "boom" in text
-        assert is_error
-
-    def test_v1_exit_code_output_marks_non_zero_as_error(self):
-        assert CodexAgent._subagent_output({"output": "Exit code: 0\nWall time: 1 seconds\nOutput:\nok\n"}) == (
-            "Exit code: 0\nWall time: 1 seconds\nOutput:\nok\n",
-            False,
-        )
-        assert CodexAgent._subagent_output({"output": "Exit code: 1\nOutput:\nboom\n"})[1] is True
-        assert CodexAgent._subagent_output({"output": "5050\n"}) == ("5050\n", False)
-
-    def test_rollout_exec_call_becomes_a_bash_row_with_the_command(self):
-        payload = {
-            "type": "custom_tool_call",
-            "name": "exec",
-            "call_id": "call_x",
-            "input": ('const r = await tools.shell_command({command:"pytest tests/test_api.py -q"}); text(r);'),
-        }
-        assert CodexAgent._subagent_tool_name(payload) == "Bash"
-        assert CodexAgent._subagent_parameters(payload) == {"command": "pytest tests/test_api.py -q"}
-
-    def test_rollout_exec_call_without_a_literal_keeps_the_script_as_command_text(self):
-        script = 'const cmd = "npm run build"; await tools.shell_command({command: cmd});'
-        payload = {"type": "custom_tool_call", "name": "exec", "call_id": "call_y", "input": script}
-        assert CodexAgent._subagent_parameters(payload) == {"command": script}
-
-    def test_v1_shell_command_function_call_is_bash(self):
-        payload = {
-            "type": "function_call",
-            "name": "shell_command",
-            "call_id": "call_z",
-            "arguments": '{"command":"git status --short","workdir":"C:\\\\w","timeout_ms":10000}',
-        }
-        assert CodexAgent._subagent_tool_name(payload) == "Bash"
-        assert CodexAgent._subagent_parameters(payload)["command"] == "git status --short"
 
 
 def _sub_agent_activity(
@@ -1193,19 +1087,27 @@ def _sub_agent_activity(
     *,
     item_id: str,
     child_thread: str,
-    agent_path: str = "agent-1",
-) -> SimpleNamespace:
+    agent_path: str = "/root/run_tests",
+) -> SubAgentActivityThreadItem:
     """A subAgentActivity item root (Codex multi-agent v2's sub-agent lifecycle item).
 
     ``kind`` is "started" (the spawn itself: ``item_id`` is the spawn_agent call id)
-    or a lifecycle notice ("completed", "interrupted", "interacted")."""
-    return SimpleNamespace(
+    or a lifecycle notice ("completed", "interrupted", "interacted"). Built as the
+    SDK model, so a renamed field fails here and not silently in the agent."""
+    return SubAgentActivityThreadItem(
         type="subAgentActivity",
         id=item_id,
         kind=kind,
         agent_thread_id=child_thread,
         agent_path=agent_path,
     )
+
+
+def _spawn(shape: str, child: str, *, call_id: str = "call_spawn") -> Any:
+    """The spawn of ``child``: a v1 collab call or a multi-agent v2 ``started`` item."""
+    if shape == "v1":
+        return _collab_call("spawnAgent", call_id=call_id, model="gpt-5.5", child_thread=child)
+    return _sub_agent_activity("started", item_id=call_id, child_thread=child)
 
 
 class TestCodexCollabSubAgent:
@@ -1292,44 +1194,6 @@ class TestCodexCollabSubAgent:
         assert "call_orphan" in block_ids
 
 
-def _write_child_rollout(home, thread_id: str, items: list[dict]) -> None:
-    """Write a minimal child-thread rollout JSONL under <home>/sessions.
-
-    The thread id is embedded in the filename verbatim (that's how the agent
-    locates it). Each entry is either a raw ResponseItem payload (function_call,
-    function_call_output, …) — wrapped as a ``response_item`` line — or, if it
-    already carries a top-level ``"type"`` (e.g. an ``event_msg`` token_count),
-    written verbatim so generations can be interleaved with token boundaries."""
-    import json as _json
-
-    sessions = home / "sessions" / "2026" / "06" / "05"
-    sessions.mkdir(parents=True, exist_ok=True)
-    path = sessions / f"rollout-2026-06-05T14-22-36-{thread_id}.jsonl"
-    _line_types = {"response_item", "event_msg", "session_meta", "turn_context"}
-    lines = [
-        _json.dumps(it if it.get("type") in _line_types else {"type": "response_item", "payload": it}) for it in items
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _token_count_event(*, inp: int, cached: int, out: int, tot_in: int, tot_cached: int, tot_out: int) -> dict:
-    """A child-rollout ``token_count`` event_msg (a generation boundary)."""
-    return {
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {
-                "last_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "output_tokens": out},
-                "total_token_usage": {
-                    "input_tokens": tot_in,
-                    "cached_input_tokens": tot_cached,
-                    "output_tokens": tot_out,
-                },
-            },
-        },
-    }
-
-
 class TestCodexSubAgentToolRecovery:
     """A Codex sub-agent runs on a child thread whose tool calls never reach the
     parent stream and are dropped from `thread.read` (Limited persistence). But
@@ -1340,7 +1204,7 @@ class TestCodexSubAgentToolRecovery:
     async def test_inner_shell_command_recovered_and_nested(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-aaaa-7000-8000-000000000001"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
@@ -1383,37 +1247,22 @@ class TestCodexSubAgentToolRecovery:
         # The wait names no child: only the `started` item can register it.
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-dddd-7000-8000-000000000004"
-        _write_child_rollout(
+        script = (
+            'await Promise.all([tools.exec_command({cmd:"pytest tests/test_api.py -q"}),'
+            ' tools.exec_command({cmd:"ruff check ."})]);'
+        )
+        write_child_rollout(
             tmp_path,
             child,
             [
-                {
-                    "type": "custom_tool_call",
-                    "name": "exec",
-                    "call_id": "c_1",
-                    "input": 'await tools.exec_command({"cmd":"pytest tests/test_api.py -q"})',
-                },
-                {
-                    "type": "custom_tool_call_output",
-                    "call_id": "c_1",
-                    "output": [
-                        {"type": "input_text", "text": "Script completed\nWall time 3.0 seconds\nOutput:\n"},
-                        {"type": "input_text", "text": "1 passed in 0.31s\n"},
-                    ],
-                },
+                exec_call("c_1", script),
+                command_record("pytest tests/test_api.py -q", exit_code=0, item_id="exec-1", output="1 passed\n"),
+                command_record("ruff check .", exit_code=1, item_id="exec-2", output="E501 line too long\n"),
+                exec_output("c_1", '[{"exit_code":0},{"exit_code":1}]'),
             ],
         )
         started = _sub_agent_activity("started", item_id="call_spawn", child_thread=child)
-        wait = SimpleNamespace(
-            type="collabAgentToolCall",
-            id="call_wait",
-            tool="wait",
-            model=None,
-            prompt=None,
-            status="completed",
-            receiver_thread_ids=[],
-            agents_states={},
-        )
+        wait = _collab_call("wait", call_id="call_wait", child_thread=None)
         completed = _sub_agent_activity("completed", item_id="subagent-completed-turn_c1", child_thread=child)
         notifications = [
             _item_notification("item/started", started),
@@ -1436,46 +1285,51 @@ class TestCodexSubAgentToolRecovery:
         assert not [c for c in record.commands if c.tool_name == "subAgentActivity"]
         assert not [c for c in record.commands if c.tool_id.startswith("subagent-completed")]
         spawn_row = agent_rows["call_spawn"]
-        assert spawn_row.parameters["operation"] == "spawnagent"
-        assert spawn_row.parameters["agent_thread_id"] == child
+        assert spawn_row.parameters == {"operation": "spawnagent", "agent_path": "/root/run_tests"}
         assert spawn_row.result_status == "success"
 
-        # The child's command is recovered from its rollout and nests under the spawn.
+        # Each command the child's script ran is a row with its own exit code, under the spawn.
         bash = [c for c in record.commands if c.tool_name == "Bash"]
-        assert len(bash) == 1
-        assert bash[0].parameters["command"] == "pytest tests/test_api.py -q"
-        assert bash[0].result_status == "success"
+        assert [(c.parameters["command"], c.result_status) for c in bash] == [
+            ("pytest tests/test_api.py -q", "success"),
+            ("ruff check .", "error"),
+        ]
         assert "1 passed" in (bash[0].result_summary or "")
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
-        assert any(bash[0].tool_id in m.tool_use_ids for m in nested)
+        blocks = {b.tool_use_id: b for m in nested for b in m.content_blocks if b.block_type == "tool_use"}
+        assert [blocks[c.tool_id].is_error for c in bash] == [False, True]
         assert all(m.model == "parent-model" for m in nested)
 
-    async def test_v2_lifecycle_notices_without_a_spawn_record_nothing(self, monkeypatch, tmp_path):
-        # `completed` / `interrupted` without a `started` are notices about a
-        # child this turn did not spawn: no tool rows, no sub-agent, no crash.
+    @pytest.mark.parametrize("delta", [True, False], ids=["with-text", "notices-only"])
+    async def test_v2_lifecycle_notices_without_a_spawn_record_nothing(self, monkeypatch, tmp_path, delta):
+        # `completed` / `interrupted` / `interacted` without a `started` are notices
+        # about a child this turn did not spawn: no tool rows, no sub-agent, and no
+        # model call of their own.
+        from coder_eval.models import AssistantMessage
+
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-eeee-7000-8000-000000000005"
-        completed = _sub_agent_activity("completed", item_id="subagent-completed-turn_x", child_thread=child)
-        interrupted = _sub_agent_activity("interrupted", item_id="subagent-interrupted-turn_x", child_thread=child)
-        notifications = [
-            _item_notification("item/started", completed),
-            _item_notification("item/completed", completed),
-            _item_notification("item/started", interrupted),
-            _item_notification("item/completed", interrupted),
-            _delta("done"),
-            _turn_completed(),
-        ]
+        notifications = []
+        for kind in ("completed", "interrupted", "interacted"):
+            notice = _sub_agent_activity(kind, item_id=f"subagent-{kind}-turn_x", child_thread=child)
+            notifications += [_item_notification("item/started", notice), _item_notification("item/completed", notice)]
+        notifications += [_delta("done"), _turn_completed()] if delta else [_turn_completed()]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
         record = await agent.communicate("go")
 
         assert record.commands == []
         assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
+        if not delta:
+            assert not [m for m in record.messages if isinstance(m, AssistantMessage)]
 
-    async def test_v2_repeated_started_notice_registers_the_child_once(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("first", ["v1", "v2"])
+    async def test_a_second_spawn_of_one_child_does_not_register_it_again(self, monkeypatch, tmp_path, first):
+        # A repeated `started` item, or a v1 and a v2 spawn of one child, would mine its
+        # rollout twice and double the child's rows and tokens.
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-        child = "019e0000-ffff-7000-8000-000000000006"
-        _write_child_rollout(
+        child = "019e0000-abab-7000-8000-00000000000b"
+        write_child_rollout(
             tmp_path,
             child,
             [
@@ -1483,12 +1337,58 @@ class TestCodexSubAgentToolRecovery:
                 {"type": "function_call_output", "call_id": "c_1", "output": "one\n"},
             ],
         )
-        started = _sub_agent_activity("started", item_id="call_spawn", child_thread=child)
+        notifications = []
+        for spawn in (_spawn(first, child, call_id="call_1"), _spawn("v2", child, call_id="call_2")):
+            notifications += [_item_notification("item/started", spawn), _item_notification("item/completed", spawn)]
+        notifications += [_delta("done"), _turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        assert len([c for c in record.commands if c.tool_name == "Bash"]) == 1
+        assert {m.parent_tool_use_id for m in record.messages if getattr(m, "parent_tool_use_id", None)} == {"call_1"}
+
+    async def test_a_failed_or_cut_off_child_call_is_not_recovered_as_a_success(self, monkeypatch, tmp_path):
+        # A require_success criterion reads result_status: a failed or cut-off call must not reach it as a success.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-cdcd-7000-8000-00000000000c"
+        write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "c_1",
+                    "arguments": '{"command":"pytest"}',
+                },
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 1\nOutput:\n1 failed\n"},
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "c_2",
+                    "arguments": '{"cmd":"make build"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "c_2",
+                    "output": "Chunk ID: ab12\nWall time: 0.4 seconds\nProcess exited with code 2\nOutput:\nboom\n",
+                },
+                exec_call("c_3", "await tools.view_image({path: 'missing.png'});"),
+                exec_output("c_3", "Error: no such file", head="Script failed"),
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "c_4",
+                    "arguments": '{"cmd":"sleep 60"}',
+                },
+                {"type": "function_call_output", "call_id": "c_4", "output": "Wall time: 3.2 seconds\naborted by user"},
+            ],
+        )
+        spawn = _collab_call("spawnAgent", call_id="call_spawn", child_thread=child)
         notifications = [
-            _item_notification("item/started", started),
-            _item_notification("item/completed", started),
-            _item_notification("item/started", started),
-            _item_notification("item/completed", started),
+            _item_notification("item/started", spawn),
+            _item_notification("item/completed", spawn),
             _delta("done"),
             _turn_completed(),
         ]
@@ -1496,49 +1396,17 @@ class TestCodexSubAgentToolRecovery:
 
         record = await agent.communicate("go")
 
-        # One registration → the rollout is mined once; the command is not doubled.
-        assert len([c for c in record.commands if c.tool_name == "Bash"]) == 1
-
-    def test_forked_parent_history_is_not_credited_to_the_child(self, tmp_path):
-        # fork_turns copies the parent's history ahead of the child's own; the
-        # parent's shell call in that prefix must not be replayed as the child's.
-        child, parent = "019e0000-1111-7000-8000-000000000008", "019e0000-0000-7000-8000-000000000000"
-        _write_child_rollout(
-            tmp_path,
-            child,
-            [
-                {"type": "session_meta", "payload": {"id": child, "forked_from_id": parent}},
-                {"type": "session_meta", "payload": {"id": parent}},
-                {
-                    "type": "function_call",
-                    "name": "shell_command",
-                    "call_id": "p_1",
-                    "arguments": '{"command":"git status"}',
-                },
-                {"type": "function_call_output", "call_id": "p_1", "output": "Exit code: 0\nOutput:\n"},
-                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
-                {"type": "turn_context", "payload": {"turn_id": "t_child"}},
-                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
-                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\nREADME.md\n"},
-            ],
-        )
-        gens = CodexAgent._parse_rollout_generations(CodexAgent._find_rollout_file(tmp_path, child))
-        assert [t["parameters"]["command"] for g in gens for t in g["tools"]] == ["ls"]
-
-    def test_rollout_without_fork_marker_is_parsed_whole(self, tmp_path):
-        child = "019e0000-2222-7000-8000-000000000009"
-        _write_child_rollout(
-            tmp_path,
-            child,
-            [
-                {"type": "session_meta", "payload": {"id": child}},
-                {"type": "function_call", "name": "shell_command", "call_id": "c_1", "arguments": '{"command":"ls"}'},
-                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 0\nOutput:\n"},
-                {"type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_id": child}},
-            ],
-        )
-        gens = CodexAgent._parse_rollout_generations(CodexAgent._find_rollout_file(tmp_path, child))
-        assert [t["parameters"]["command"] for g in gens for t in g["tools"]] == ["ls"]
+        recovered = [c for c in record.commands if c.tool_id.startswith("sub:")]
+        assert [(c.tool_name, c.result_status) for c in recovered] == [
+            ("Bash", "error"),
+            ("Bash", "error"),
+            ("exec", "error"),
+            ("Bash", "unknown"),
+        ]
+        blocks = [
+            b for m in record.messages for b in m.content_blocks if b.tool_use_id in {c.tool_id for c in recovered}
+        ]
+        assert [b.is_error for b in blocks] == [True, True, True, False]
 
     async def test_missing_rollout_is_silently_skipped(self, monkeypatch, tmp_path):
         # No rollout written for the child → recovery finds nothing and the turn
@@ -1569,7 +1437,7 @@ class TestCodexSubAgentToolRecovery:
         # output tokens must be 90, not 0).
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-cccc-7000-8000-000000000003"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
@@ -1581,10 +1449,10 @@ class TestCodexSubAgentToolRecovery:
                 },
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050\n"},
                 # gen1 boundary: the tool-call generation (90 output tokens).
-                _token_count_event(inp=11860, cached=3456, out=90, tot_in=11860, tot_cached=3456, tot_out=90),
+                token_count_event(inp=11860, cached=3456, out=90, tot_in=11860, tot_cached=3456, tot_out=90),
                 {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "5050"}]},
                 # gen2 boundary: the final reply (6 output tokens). Totals cumulative.
-                _token_count_event(inp=11999, cached=11648, out=6, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=11999, cached=11648, out=6, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
@@ -1628,13 +1496,13 @@ class TestCodexSubAgentToolRecovery:
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-dddd-7000-8000-000000000004"
         # Child cumulative: cache_read 15104, fresh 8755 (23859-15104), output 96.
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
@@ -2427,7 +2295,8 @@ class TestMaxTurnsApiCallCap:
         assert record.max_turns_exhausted is False
         assert len(record.commands) == 1
 
-    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("shape", ["v1", "v2"])
+    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path, shape):
         """A capped turn must not lose the child threads' spend.
 
         Codex bills sub-agents on separate threads the parent total never sees, and
@@ -2439,16 +2308,16 @@ class TestMaxTurnsApiCallCap:
         """
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-eeee-7000-8000-000000000005"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
-        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        spawn = _spawn(shape, child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
         # The cap fires once the second call's tools finish, before turn/completed is dispatched.
         notifications = [
@@ -2474,20 +2343,21 @@ class TestMaxTurnsApiCallCap:
         assert record.token_usage.output_tokens >= 96
         assert record.token_usage.cache_read_input_tokens >= 15104
 
-    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("shape", ["v1", "v2"])
+    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path, shape):
         """The early-stop path keeps its pre-existing skip: an armed gate already decided."""
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-ffff-7000-8000-000000000006"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
-        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        spawn = _spawn(shape, child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
         notifications = [
             _item_notification("item/started", spawn),
