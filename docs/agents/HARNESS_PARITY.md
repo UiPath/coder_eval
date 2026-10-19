@@ -531,6 +531,18 @@ what that cell means: measured, but not placeable. On historical codex runs, thi
 moves ~8 h in aggregate out of Tool exec and into Unaccounted. No built-in agent
 writes this shape now.
 
+## Sub-agent tool calls
+
+Only claude-code and codex nest a sub-agent's work under its spawn row
+(`parent_tool_use_id`); the other harnesses record no sub-agent path.
+
+| | claude-code | codex |
+|---|---|---|
+| spawn row | `Agent`, with the brief in `description` / `prompt` | `Agent` (`operation: spawnagent`), from a v1 `collabAgentToolCall` or a v2 `subAgentActivity` `started` item; on v2, no prompt (the spawn message is encrypted) and no model |
+| the child's generations | nested live, with the child's real model | nested after the turn, rebuilt from the child's rollout under `$CODEX_HOME/sessions`, priced at the parent's model on v2 |
+| the child's shell commands | one `Bash` row per call, status and `duration_ms` measured live | one `Bash` row per command, with its exit code, rebuilt from the child's rollout (CLI 0.156.1 and later); no `duration_ms`. See [Codex § Sub-agents](CODEX.md#sub-agents) |
+| when the rows exist | during the turn, so live criteria see them | after the turn, so live criteria and `stop_early` do not see them |
+
 ## `max_turns` counts model API calls on every harness
 
 One turn is one main-thread model API call, the unit Claude Code's `--max-turns`
