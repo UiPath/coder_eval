@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.12.16 (2026-10-21)
+
+### Bug Fixes
+
+- **codex**: Crash a turn codex ended as failed instead of grading it
+  ([#230](https://github.com/UiPath/coder_eval/pull/230),
+  [`30c62ce`](https://github.com/UiPath/coder_eval/commit/30c62ce212efd1bf517332497422327cf34bf7a7))
+
+
 ## v0.12.15 (2026-10-21)
 
 ### Bug Fixes
