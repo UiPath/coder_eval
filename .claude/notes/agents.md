@@ -267,10 +267,15 @@ matter how much the run actually billed. So the CLI harnesses crash rather than 
   arm keys on a step the CLI reported as FINISHED, its own claim that a generation
   completed, rather than on `usage.is_empty()` alone, which would also condemn a stream
   cut before any step could finish.
-- **A terminal provider error** (Pi, OpenCode) — `pi -p` exits 0 after exhausting its
+- **A terminal provider error** (Pi, OpenCode, Codex) — `pi -p` exits 0 after exhausting its
   internal retries, so without the crash the turn books as a clean COMPLETED
   (`FinalStatus.FAILURE`, category "failed"), silently depressing the measured pass rate.
   Crashing routes it to `FinalStatus.ERROR`, which is excluded from outcomes.
+  Codex reports the same thing differently: its `turn/completed` arrives normally but
+  carries `turn.status == failed` and a `TurnError` (for example `rateLimitExceeded`
+  after its own stream retries ran out). The harness reads that status and crashes, with
+  the provider's message, so `categorize_error` routes a rate limit to
+  `AGENT_RATE_LIMIT` and its retry budget like any other agent crash.
 - **A CLI that closed its stream but would not exit** within the grace period.
 
 Every arm is gated on `stopped_early` / `max_turns_exhausted`, because an intentional cut
