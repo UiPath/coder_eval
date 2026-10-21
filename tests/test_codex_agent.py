@@ -2985,3 +2985,125 @@ class TestProviderErrorNotifications:
         st, collector = self._state()
         st.finalize(AgentEndStatus.COMPLETED)
         assert collector.build_turn_record().provider_errors == []
+
+
+# The provider message codex reported in adhoc-2026-10-21_16-16-27
+# (v2/skill-case-diagnose-formal-arg-slot-ids): five retried stream disconnects,
+# then a rate limit it would not retry, then a `failed` turn/completed.
+_RATE_LIMIT_MESSAGE = (
+    "rate limit exceeded: Your requests to gpt-5.6-luna for gpt-5.6-luna in eastus2 have exceeded token rate limit."
+)
+
+
+def _error_notification(error: dict, *, will_retry: bool) -> SimpleNamespace:
+    from openai_codex.generated.v2_all import ErrorNotification
+
+    payload = ErrorNotification.model_validate(
+        {"error": error, "threadId": "t1", "turnId": "u1", "willRetry": will_retry}
+    )
+    return SimpleNamespace(method="error", payload=payload)
+
+
+def _turn_failed(error: dict | None) -> SimpleNamespace:
+    turn = Turn.model_validate(
+        {
+            "id": "turn_1",
+            "status": "failed",
+            "durationMs": 21847,
+            "error": error,
+            "items": [],
+            "itemsView": "notLoaded",
+        }
+    )
+    return SimpleNamespace(method="turn/completed", payload=TurnCompletedNotification(thread_id="th_1", turn=turn))
+
+
+def _rate_limited_turn(*, commands: int) -> list[SimpleNamespace]:
+    notes: list[SimpleNamespace] = []
+    for i in range(commands):
+        root = SimpleNamespace(
+            type="commandExecution",
+            id=f"cmd_{i}",
+            command=f"uip maestro case validate {i}",
+            exit_code=0,
+            aggregated_output="ok\n",
+            duration_ms=5,
+        )
+        notes += [_item_notification("item/started", root), _item_notification("item/completed", root)]
+    notes.append(_delta("I'm using the Maestro Case skill to repair the plan."))
+    for attempt in range(1, 6):
+        notes.append(
+            _error_notification(
+                {
+                    "message": f"Reconnecting... {attempt}/5",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+                    "additionalDetails": _RATE_LIMIT_MESSAGE,
+                },
+                will_retry=True,
+            )
+        )
+    notes.append(
+        _error_notification({"message": _RATE_LIMIT_MESSAGE, "codexErrorInfo": "rateLimitExceeded"}, will_retry=False)
+    )
+    notes.append(_turn_failed({"message": _RATE_LIMIT_MESSAGE, "codexErrorInfo": "rateLimitExceeded"}))
+    return notes
+
+
+class TestFailedTurnIsACrash:
+    """A `turn/completed` whose turn is `failed` is a crash, never a COMPLETED turn.
+
+    Before this, codex's terminal rate limit booked as COMPLETED and the row was
+    graded FAILURE: 27 of 114 rows in adhoc-2026-10-21_16-16-27 (codex,
+    gpt-5.6-luna) were scored on a turn the provider cut off.
+    """
+
+    @pytest.mark.parametrize("commands", [0, 4])
+    async def test_rate_limited_turn_raises_crash_and_keeps_the_partial(self, commands):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), _rate_limited_turn(commands=commands))
+
+        with pytest.raises(AgentCrashError) as excinfo:
+            await agent.communicate("repair the case")
+
+        assert _RATE_LIMIT_MESSAGE in str(excinfo.value)
+        assert "codexErrorInfo=rateLimitExceeded" in str(excinfo.value)
+        assert agent.get_state() == AgentState.ERROR
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert partial.crash_reason is not None and "rate limit exceeded" in partial.crash_reason
+        # The work done before the cut and the provider evidence both survive.
+        assert len(partial.commands) == commands
+        assert [(e.kind, e.will_retry) for e in partial.provider_errors] == [
+            *[("responseStreamDisconnected", True)] * 5,
+            ("rateLimitExceeded", False),
+        ]
+
+    async def test_rate_limit_crash_is_categorized_as_a_rate_limit(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), _rate_limited_turn(commands=0))
+        with pytest.raises(AgentCrashError) as excinfo:
+            await agent.communicate("repair the case")
+
+        assert categorize_error(excinfo.value, {"component": "agent"}) is ErrorCategory.AGENT_RATE_LIMIT
+
+    async def test_failed_turn_without_error_details_still_crashes(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), [_delta("hi"), _turn_failed(None)])
+
+        with pytest.raises(AgentCrashError, match="no error message"):
+            await agent.communicate("go")
+
+    async def test_completed_turn_with_a_retried_provider_error_is_not_a_crash(self):
+        notes = [
+            _error_notification({"message": "Reconnecting... 1/5"}, will_retry=True),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notes)
+
+        record = await agent.communicate("go")
+
+        assert record.crashed is False
+        assert agent.pending_turn is None

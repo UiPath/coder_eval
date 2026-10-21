@@ -259,6 +259,23 @@ def _status_value(status: Any) -> str:
     return str(value).lower() if value is not None else ""
 
 
+def _failed_turn_reason(turn: Any) -> str | None:
+    """The crash message for a Turn codex ended as ``failed``, or None for any other status.
+
+    Codex ends a turn ``failed`` when it gives up on the provider, e.g. a
+    ``rateLimitExceeded`` it will not retry. The message carries the provider's
+    own text, so ``categorize_error`` routes it (``rate limit`` ->
+    ``AGENT_RATE_LIMIT``) like any other agent crash.
+    """
+    if turn is None or _status_value(getattr(turn, "status", None)) != "failed":
+        return None
+    error = getattr(turn, "error", None)
+    message = str(getattr(error, "message", "") or "").strip() or "no error message"
+    kind, _ = _codex_error_kind(error)
+    suffix = f" (codexErrorInfo={kind})" if kind else ""
+    return f"Codex turn failed: {message}{suffix}"
+
+
 def _record_command_text(argv: Any) -> str:
     """The command a CommandExecution record ran, without the shell wrapper Codex adds.
 
@@ -384,24 +401,29 @@ _LOGIN_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".z
 _ZSH_PROFILE_NAMES = frozenset({".zshenv", ".zprofile", ".zshrc"})
 
 
-def _provider_error_from(payload: Any) -> ProviderError:
-    """Map a codex ``ErrorNotification`` payload onto a ``ProviderError``.
+def _codex_error_kind(error: Any) -> tuple[str | None, int | None]:
+    """``(kind, http_status)`` of a codex ``TurnError``'s ``codexErrorInfo``.
 
     ``codexErrorInfo`` is either a bare category (enum) or a one-key object whose
     key is the category and whose value may carry ``httpStatusCode``.
     """
-    error = getattr(payload, "error", None)
-    kind: str | None = None
-    http_status: int | None = None
-    info = getattr(getattr(error, "codex_error_info", None), "root", None)
+    info: Any = getattr(getattr(error, "codex_error_info", None), "root", None)
     if isinstance(info, Enum):
-        kind = str(info.value)
-    elif hasattr(info, "model_dump"):
+        return str(info.value), None
+    if hasattr(info, "model_dump"):
         dumped = info.model_dump(by_alias=True, mode="json")
         if len(dumped) == 1:
             kind, body = next(iter(dumped.items()))
             if isinstance(body, dict) and isinstance(body.get("httpStatusCode"), int):
-                http_status = body["httpStatusCode"]
+                return kind, body["httpStatusCode"]
+            return kind, None
+    return None, None
+
+
+def _provider_error_from(payload: Any) -> ProviderError:
+    """Map a codex ``ErrorNotification`` payload onto a ``ProviderError``."""
+    error = getattr(payload, "error", None)
+    kind, http_status = _codex_error_kind(error)
     return ProviderError(
         at=datetime.now(),
         message=str(getattr(error, "message", "") or ""),
@@ -1199,6 +1221,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # like every other timeout path.
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout)
+            failed_reason = None if state.ended_cleanly else _failed_turn_reason(state.result_turn)
+            if failed_reason is not None:
+                # Codex gave up on the turn (a provider error it would not retry),
+                # so the agent never finished: crash, never score it.
+                # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
+                self._finalize_and_raise_crash(state.finalize, truncate_crash_message(failed_reason))
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
