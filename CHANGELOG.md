@@ -2,6 +2,50 @@
 
 <!-- version list -->
 
+## v0.12.15 (2026-10-21)
+
+### Bug Fixes
+
+- **codex**: Match a multi-line command record to its exec script
+  ([#227](https://github.com/UiPath/coder_eval/pull/227),
+  [`b3242f9`](https://github.com/UiPath/coder_eval/commit/b3242f97540ac743c8c159b479a77bcac05809a7))
+
+- **codex**: Read a sub-agent's commands from its rollout records
+  ([#227](https://github.com/UiPath/coder_eval/pull/227),
+  [`b3242f9`](https://github.com/UiPath/coder_eval/commit/b3242f97540ac743c8c159b479a77bcac05809a7))
+
+- **codex**: Recover v2 sub-agent tool calls ([#227](https://github.com/UiPath/coder_eval/pull/227),
+  [`b3242f9`](https://github.com/UiPath/coder_eval/commit/b3242f97540ac743c8c159b479a77bcac05809a7))
+
+- **deps**: Bump aiohttp 3.14.3 -> 3.14.4 for CVE-2026-111063 and CVE-2026-111064
+  ([#227](https://github.com/UiPath/coder_eval/pull/227),
+  [`b3242f9`](https://github.com/UiPath/coder_eval/commit/b3242f97540ac743c8c159b479a77bcac05809a7))
+
+- **deps**: Bump certifi and virtualenv to clear pip-audit advisories
+  ([#232](https://github.com/UiPath/coder_eval/pull/232),
+  [`7628641`](https://github.com/UiPath/coder_eval/commit/7628641e42a743dc85dc8299178ea87297bb07e2))
+
+- **deps**: Bump mcp 1.28.1 -> 1.30.0 for CVE-2026-59951
+  ([#228](https://github.com/UiPath/coder_eval/pull/228),
+  [`ea0e436`](https://github.com/UiPath/coder_eval/commit/ea0e436ec736f5bece0ed460f7f4c854de106d96))
+
+- **deps**: Bump next to 15.5.28 (Next.js security update, Oct 14 2026)
+  ([#226](https://github.com/UiPath/coder_eval/pull/226),
+  [`872f857`](https://github.com/UiPath/coder_eval/commit/872f85764ad4f4d07c9b0659ee17941df0a3b9c9))
+
+- **deps**: Bump next to patched release (Next.js security update, Oct 14 2026)
+  ([#226](https://github.com/UiPath/coder_eval/pull/226),
+  [`872f857`](https://github.com/UiPath/coder_eval/commit/872f85764ad4f4d07c9b0659ee17941df0a3b9c9))
+
+- **deps**: Pin evalboard sharp to 0.35.5 and clear prod audit findings
+  ([#226](https://github.com/UiPath/coder_eval/pull/226),
+  [`872f857`](https://github.com/UiPath/coder_eval/commit/872f85764ad4f4d07c9b0659ee17941df0a3b9c9))
+
+- **docker**: Pin uv in the agent image — 0.12.11+ copies cross-fs ~40x slower
+  ([#209](https://github.com/UiPath/coder_eval/pull/209),
+  [`634005d`](https://github.com/UiPath/coder_eval/commit/634005d2f0ee1848d96d08f080e79cf2bd43d56e))
+
+
 ## v0.12.14 (2026-10-15)
 
 ### Bug Fixes
