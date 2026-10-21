@@ -325,7 +325,7 @@ class TestSkillTriggeredCodex:
 
     The detectable signal is a command whose recorded text references the skill's
     directory, ``skills/<skill_name>/`` (present in both the repo path and the
-    ``.agents/skills/`` symlink).
+    ``.agents/skills/`` copy).
     """
 
     def _sed(self, path: str) -> CommandTelemetry:
@@ -347,7 +347,7 @@ class TestSkillTriggeredCodex:
         )
         assert result.score == 1.0 and result.observed_label == "yes"
 
-    def test_codex_reads_skill_md_agents_symlink_tp(self) -> None:
+    def test_codex_reads_skill_md_agents_copy_tp(self) -> None:
         result = _check(
             expected_skill="uipath-agents",
             skill_name="uipath-agents",

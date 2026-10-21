@@ -22,7 +22,7 @@ def register_builtins(registry: type[AgentRegistry]) -> None:
     ensure those modules are imported, which the package import already did.
 
     ``delegate`` registers unconditionally, exactly like every sibling agent
-    (``codex``/``antigravity``): its Node/``@uipath/delegate-sdk`` prerequisite
+    (``codex``/``antigravity``): its Node/``@uipath/delegate-stdio`` prerequisite
     is resolved lazily in ``start()``, which raises a clear ``AgentConfigError``
     if it is missing. There is no conditional-registration gate — that would be
     a second, ad-hoc dispatch mechanism the registry pattern already replaces.

@@ -218,7 +218,7 @@ def test_generate_markdown_basic():
 
     # Check P0 aggregate metrics
     assert "Avg Reliability Score**:" in report_md
-    assert "Avg Generation Latency**:" in report_md
+    assert "Avg End-to-end Latency**:" in report_md
     assert "Avg Ground Truth Similarity**:" in report_md
 
     # Check task details table has new columns
@@ -397,9 +397,9 @@ def test_generate_markdown_generation_metrics_section():
 
     assert "## Generation Metrics" in report_md
     # task1: 1 turn, 0 asst turns (no assistant_turn_count in test data)
-    assert "| task1 | 50.0s | 1 | 0 | 50.0s |" in report_md
+    assert "| task1 | 50.0s | 50.0s | 1 | 0 | 50.0s |" in report_md
     # task2: 3 turns, avg turn = (25+22+23)/3 = 23.3s
-    assert "| task2 | 70.0s | 3 | 0 | 23.3s |" in report_md
+    assert "| task2 | 70.0s | 70.0s | 3 | 0 | 23.3s |" in report_md
 
 
 def test_generate_markdown_no_generation_metrics_without_turns():
@@ -448,7 +448,7 @@ def test_generate_markdown_aggregate_metrics():
     # Avg reliability = (0.8 + 0.6) / 2 = 0.7
     assert "Avg Reliability Score**: 0.700" in report_md
     # Avg latency = (40 + 60) / 2 = 50.0s
-    assert "Avg Generation Latency**: 50.0s" in report_md
+    assert "Avg End-to-end Latency**: 50.0s" in report_md
 
 
 def test_generate_markdown_backward_compatible_task_results():
@@ -1535,3 +1535,64 @@ class TestReportsDoesNotImportCriteria:
         code = "import coder_eval.reports, sys; print('coder_eval.criteria' in sys.modules)"
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
         assert out.stdout.strip() == "False", "coder_eval.reports must not import coder_eval.criteria at module level"
+
+
+def test_task_details_split_end_to_end_into_agent_wall_and_grading():
+    """`Latency` is end-to-end; a slow checker must not read as a slow agent (#212).
+
+    Numbers from adhoc-2026-10-01_19-24-36, calculator flow-v2 run 00: 101.3 s
+    end to end = 55.7 s of agent turns + 13.7 s setup + 27.7 s grading + residual.
+    """
+    row = _make_task_result(
+        "calc", "SUCCESS", 1.0, 101.25, iteration_count=1, turns=[{"iteration": 1, "duration_seconds": 55.66}]
+    )
+    row.update(agent_wall_ms=55657.3, setup_ms=13677.6, grading_ms=27656.9)
+    summary = RunSummary(
+        run_id="r",
+        start_time=datetime(2026, 10, 1, 19, 24, 36),
+        end_time=datetime(2026, 10, 1, 19, 26, 17),
+        total_duration_seconds=101.25,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[row],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "| Task ID | Status | Reliability Score | Latency (end-to-end) | Agent Wall | Grading |" in report_md
+    assert "| calc | SUCCESS | 1.000 | 101.2s | 55.7s | 27.7s |" in report_md
+    assert "Avg Agent Wall**: 55.7s" in report_md
+    assert "Avg Grading**: 27.7s" in report_md
+
+
+def test_task_details_legacy_row_derives_agent_wall_and_never_fakes_grading():
+    """A run.json written before #212 has no `agent_wall_ms` / `grading_ms` keys.
+
+    Agent wall falls back to the row's own `iterations[].duration_seconds`; grading
+    was never recorded on the row, so it renders N/A, never 0.0s (CE058).
+    """
+    row = _make_task_result(
+        "old",
+        "SUCCESS",
+        1.0,
+        90.0,
+        turns=[{"iteration": 1, "duration_seconds": 30.0}, {"iteration": 2, "duration_seconds": 0.0}],
+    )
+    summary = RunSummary(
+        run_id="r",
+        start_time=datetime(2026, 10, 1, 19, 24, 36),
+        end_time=datetime(2026, 10, 1, 19, 26, 6),
+        total_duration_seconds=90.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[row],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "| old | SUCCESS | 1.000 | 90.0s | 30.0s | N/A |" in report_md
+    assert "Avg Grading" not in report_md

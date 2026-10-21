@@ -25,7 +25,7 @@ from .helpers import (
     paired_comparison,
 )
 from .html import write_experiment_html, write_variant_html
-from .markdown import ReportGenerator, resolve_agent_settings
+from .markdown import ReportGenerator, resolve_agent_settings, resolve_context_window
 
 
 logger = logging.getLogger(__name__)
@@ -536,7 +536,11 @@ class ExperimentReportGenerator:
                 settings_source, is_sdk = resolve_agent_settings(task_dicts)
                 if settings_source:
                     lines.append("")
-                    lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))
+                    lines.extend(
+                        ReportGenerator._generate_agent_settings_section(
+                            settings_source, is_sdk, context_window=resolve_context_window(task_dicts)
+                        )
+                    )
 
                 # Installed Tools
                 installed_tools_lines = ReportGenerator._generate_installed_tools_section(task_dicts)

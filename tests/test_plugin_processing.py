@@ -113,9 +113,9 @@ class TestPluginRootWarning:
     scores 0 and the suite reports recall 0.0, indistinguishable from a skill that
     never triggers. That shipped in six documentation surfaces before anyone noticed.
 
-    Codex (`codex_agent._setup_skills`) and Antigravity
+    Codex (`codex_agent._collect_skills`) and Antigravity
     (`antigravity_agent._resolve_skills_paths`) accept BOTH depths and already log
-    when they link zero skills. claude-code — the one harness where the wrong depth is
+    when they find zero skills. claude-code — the one harness where the wrong depth is
     fatal — was the only one that stayed silent, and a repo-scoped lint rule cannot
     reach the user repos where `/coder-eval:check-skill` writes these suites.
     """

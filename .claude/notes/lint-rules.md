@@ -845,7 +845,7 @@ assertion for each. A defaulted `AgentStartEvent` lands ~365 days before the clo
 first window, so the head blows any sane UPPER bound by the whole offset. A defaulted
 `AgentEndEvent` lands ~365 days BEFORE its own last message, so `decompose_turn` clamps the
 negative to `0.0` — "measured, and instant", which passes an upper bound. Only a strict
-`> 0.0` catches it. It holds on all three clocked harnesses because real work separates a
+`> 0.0` catches it. It holds on every clocked harness because real work separates a
 turn's last flush from its end event. The margin is smallest on antigravity, which holds
 its process across turns: it measures 0.007-0.035 ms there, 7-35 ticks of the 1 us
 resolution that both `datetime` and `time.monotonic()` have on Linux, macOS and Windows.

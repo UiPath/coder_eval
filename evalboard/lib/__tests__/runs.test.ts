@@ -379,6 +379,19 @@ describe("sortArtifacts", () => {
         ]);
     });
 
+    test("a .dmn rule ranks with the deliverables", () => {
+        const input = [
+            ref("d/artifacts/RiskRules/bindings_v2.json", "json"),
+            ref("d/artifacts/RiskRules/Business rule.dmn", "dmn"),
+            ref("d/artifacts/RiskRules/project.uiproj", "uiproj"),
+        ];
+        expect(sortArtifacts(input).map((a) => a.relPath)).toEqual([
+            "d/artifacts/RiskRules/Business rule.dmn",
+            "d/artifacts/RiskRules/project.uiproj",
+            "d/artifacts/RiskRules/bindings_v2.json",
+        ]);
+    });
+
     test("does not mutate the input array", () => {
         const input = [ref("b.txt", "txt"), ref("a.flow", "flow")];
         sortArtifacts(input);
@@ -515,6 +528,40 @@ describe("agentSecondsFromRaw", () => {
         expect(agentSecondsFromRaw({ duration: 24 })).toBeNull();
         expect(
             agentSecondsFromRaw({ iterations: [{ duration_seconds: null }] }),
+        ).toBeNull();
+    });
+
+    test("prefers the stored agent_wall_ms over the iterations sum (#212)", () => {
+        expect(
+            agentSecondsFromRaw({
+                duration: 101.25,
+                agent_wall_ms: 55657,
+                iterations: [{ duration_seconds: 1 }],
+            }),
+        ).toBeCloseTo(55.657, 6);
+    });
+
+    test("a stored null stays null rather than falling back", () => {
+        expect(
+            agentSecondsFromRaw({
+                agent_wall_ms: null,
+                iterations: [{ duration_seconds: 5 }],
+            }),
+        ).toBeNull();
+    });
+});
+
+describe("toTaskRow grading split (#212)", () => {
+    test("carries grading_ms as seconds", () => {
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: 27657 }).gradingSeconds,
+        ).toBeCloseTo(27.657, 6);
+    });
+
+    test("null on a run.json that predates the key, never 0", () => {
+        expect(toTaskRow({ task_id: "x" }).gradingSeconds).toBeNull();
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: null }).gradingSeconds,
         ).toBeNull();
     });
 });

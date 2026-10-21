@@ -63,6 +63,19 @@ def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, 
     return None, False
 
 
+def resolve_context_window(task_dicts: list[dict[str, Any]]) -> int | None:
+    """The ``agent.context_window`` the tasks ran with, or None when they ran uncapped.
+
+    Read from ``agent_config`` because the value never reaches ``sdk_options``: Claude Code
+    receives it in the CLI environment and Codex in the thread config.
+    """
+    for task in task_dicts:
+        config = task.get("agent_config")
+        if isinstance(config, dict) and config.get("context_window") is not None:
+            return int(config["context_window"])
+    return None
+
+
 def _unwrap_system_prompt(value: Any) -> tuple[str | None, Literal["replace"] | None]:
     """Reduce a persisted ``sdk_options.system_prompt`` value to (text, regime).
 
@@ -90,6 +103,7 @@ def collect_agent_settings_rows(
     is_sdk: bool,
     *,
     system_prompt_semantics: str | None = None,
+    context_window: int | None = None,
 ) -> list[tuple[str, str]]:
     """Extract ordered label/value pairs from an agent settings dict.
 
@@ -110,6 +124,9 @@ def collect_agent_settings_rows(
     model = settings_source.get("model")
     if model:
         rows.append(("Model", str(model)))
+    window = context_window if context_window is not None else settings_source.get("context_window")
+    if window is not None:
+        rows.append(("Context Window", f"{int(window):,} tokens"))
 
     if is_sdk:
         for key, label in (
@@ -263,6 +280,30 @@ def _pass_rate_lines(summary: RunSummary) -> list[str]:
     return lines
 
 
+def _row_agent_wall_ms(row: dict[str, Any]) -> float | None:
+    """A row's agent wall: the stored ``agent_wall_ms``, else the legacy derivation.
+
+    PREFERS THE STORED KEY, written once by ``result_metrics.agent_wall_ms``. A
+    ``run.json`` written before the key existed is still renderable: its 6-key
+    ``iterations`` projection carries each turn's ``duration_seconds``, and the
+    same rule (sum the positive ones) applies. Presence is tested with ``in``, not
+    with truthiness, so a stored ``None`` (no turn timed) stays ``None``.
+
+    Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
+    """
+    if "agent_wall_ms" in row:
+        return row["agent_wall_ms"]
+    seconds = [
+        d for t in row.get("iterations") or [] if isinstance(d := t.get("duration_seconds"), (int, float)) and d > 0
+    ]
+    return sum(seconds) * 1000.0 if seconds else None
+
+
+def _fmt_seconds_ms(ms: float | None) -> str:
+    """``ms`` as ``12.3s``, or ``N/A`` when it was not measured (never ``0.0s``)."""
+    return f"{ms / 1000.0:.1f}s" if ms is not None else "N/A"
+
+
 class ReportGenerator:
     """Generates reports from evaluation results."""
 
@@ -344,9 +385,9 @@ class ReportGenerator:
         lines = [
             "## Generation Metrics",
             "",
-            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency "
+            "| Task ID | Total Latency (end-to-end) | Agent Wall | Turns | Asst Turns | Avg Turn Latency "
             + "| Startup | Generation | Tool exec | Teardown |",
-            "|---------|---------------|-------|------------|------------------"
+            "|---------|----------------------------|------------|-------|------------|------------------"
             + "|---------|------------|-----------|----------|",
         ]
 
@@ -372,7 +413,11 @@ class ReportGenerator:
                 format_ms(task.get(key)) for key in ("startup_ms", "generation_ms", "tool_ms", "teardown_ms")
             )
 
-            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {buckets} |")
+            agent_wall = _fmt_seconds_ms(_row_agent_wall_ms(task))
+            lines.append(
+                f"| {task_id} | {total_latency} | {agent_wall} | {num_turns} | {asst_turns} "
+                + f"| {avg_turn_str} | {buckets} |"
+            )
 
         return lines
 
@@ -434,7 +479,16 @@ class ReportGenerator:
         if scores:
             lines.append(f"- **Avg Reliability Score**: {sum(scores) / len(scores):.3f}")
         if durations:
-            lines.append(f"- **Avg Generation Latency**: {sum(durations) / len(durations):.1f}s")
+            # `duration` is END-TO-END (setup + agent + grading), so the label says so.
+            # The agent's own share and the checker's share are averaged separately,
+            # each over only the rows that measured it (#212).
+            lines.append(f"- **Avg End-to-end Latency**: {sum(durations) / len(durations):.1f}s")
+        agent_walls = [ms for t in summary.task_results if (ms := _row_agent_wall_ms(t)) is not None]
+        if agent_walls:
+            lines.append(f"- **Avg Agent Wall**: {sum(agent_walls) / len(agent_walls) / 1000.0:.1f}s")
+        gradings = [ms for t in summary.task_results if (ms := t.get("grading_ms")) is not None]
+        if gradings:
+            lines.append(f"- **Avg Grading**: {sum(gradings) / len(gradings) / 1000.0:.1f}s")
 
         total_asst_turns = sum(
             sum(t.get("assistant_turn_count", 0) for t in task.get("iterations", [])) for task in summary.task_results
@@ -467,8 +521,11 @@ class ReportGenerator:
         has_tags = any(t.get("tags") for t in summary.task_results)
         has_cmds_efficiency = any(t.get("commands_efficiency") is not None for t in summary.task_results)
 
-        header = "| Task ID | Status | Reliability Score | Latency |"
-        separator = "|---------|--------|-------------------|---------|"
+        # `Latency` is END-TO-END: setup + the agent's turns + grading. `Agent Wall`
+        # and `Grading` split it, so a checker that runs a live command is not read
+        # as agent time (#212). An older run.json has no `grading_ms`: N/A, not 0.
+        header = "| Task ID | Status | Reliability Score | Latency (end-to-end) | Agent Wall | Grading |"
+        separator = "|---------|--------|-------------------|----------------------|------------|---------|"
         if has_model:
             header += " Model |"
             separator += "-------|"
@@ -489,7 +546,13 @@ class ReportGenerator:
             score_str = f"{weighted_score:.3f}" if weighted_score is not None else "N/A"
             duration = f"{task_result['duration']:.1f}s"
 
-            row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {duration} |"
+            agent_wall = _fmt_seconds_ms(_row_agent_wall_ms(task_result))
+            grading = _fmt_seconds_ms(task_result.get("grading_ms"))
+
+            row = (
+                f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {duration} "
+                + f"| {agent_wall} | {grading} |"
+            )
             if has_model:
                 model = task_result.get("model_used") or "N/A"
                 row += f" {model} |"
@@ -605,7 +668,10 @@ class ReportGenerator:
             semantics = (summary.environment_info or {}).get("system_prompt_semantics")
             lines.extend(
                 ReportGenerator._generate_agent_settings_section(
-                    settings_source, is_sdk, system_prompt_semantics=semantics
+                    settings_source,
+                    is_sdk,
+                    system_prompt_semantics=semantics,
+                    context_window=resolve_context_window(summary.task_results),
                 )
             )
 
@@ -626,11 +692,12 @@ class ReportGenerator:
         is_sdk: bool,
         *,
         system_prompt_semantics: str | None = None,
+        context_window: int | None = None,
     ) -> list[str]:
         """Generate Agent Settings markdown lines from a settings dict."""
         lines = ["## Agent Settings", ""]
         for label, value in collect_agent_settings_rows(
-            settings_source, is_sdk, system_prompt_semantics=system_prompt_semantics
+            settings_source, is_sdk, system_prompt_semantics=system_prompt_semantics, context_window=context_window
         ):
             lines.append(f"- **{label}**: {value}")
         return lines

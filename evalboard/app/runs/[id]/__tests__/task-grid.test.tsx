@@ -52,10 +52,12 @@ function cellFor(taskId: string, index: number): HTMLElement {
     return cells[index]!;
 }
 
-// Layout: Task, Status, Score, Duration, vs Exp, Cost, Turns, then the tokens
+// Layout: Task, Status, Score, End-to-end, Agent, Grading, vs Exp, Cost, Turns, then the tokens
 const durationCellFor = (taskId: string) => cellFor(taskId, 3);
-const vsExpCellFor = (taskId: string) => cellFor(taskId, 4);
-const turnsCellFor = (taskId: string) => cellFor(taskId, 6);
+const agentCellFor = (taskId: string) => cellFor(taskId, 4);
+const gradingCellFor = (taskId: string) => cellFor(taskId, 5);
+const vsExpCellFor = (taskId: string) => cellFor(taskId, 6);
+const turnsCellFor = (taskId: string) => cellFor(taskId, 8);
 
 describe("TaskGrid — mature rows", () => {
     test("opens a popover linking to the run where it last executed", () => {
@@ -195,7 +197,7 @@ describe("TaskGrid — vs Expected column", () => {
                 .slice(1)
                 .map((tr) => within(tr).getAllByRole("cell")[0].textContent);
 
-        fireEvent.click(screen.getByRole("button", { name: /^Duration$/ }));
+        fireEvent.click(screen.getByRole("button", { name: /^End-to-end$/ }));
         expect(order()[0]).toMatch(/long/i);
 
         fireEvent.click(screen.getByRole("button", { name: /^vs Expected$/ }));
@@ -262,7 +264,9 @@ describe("TaskGrid — Turns column", () => {
             "Task",
             "Status",
             "Score",
-            "Duration",
+            "End-to-end",
+            "Agent",
+            "Grading",
             "vs Expected",
             "Cost",
             "Turns",
@@ -273,7 +277,9 @@ describe("TaskGrid — Turns column", () => {
             "Task",
             "Status",
             "Score",
-            "Duration",
+            "End-to-end",
+            "Agent",
+            "Grading",
             "vs Expected",
             "Cost",
             "Turns",
@@ -300,7 +306,15 @@ describe("TaskGrid — column tooltips", () => {
         );
         expect(header("vs Expected")).toHaveAttribute(
             "title",
-            expect.stringContaining("Duration ÷"),
+            expect.stringContaining("End-to-end ÷"),
+        );
+        expect(header("End-to-end")).toHaveAttribute(
+            "title",
+            expect.stringContaining("+ grading"),
+        );
+        expect(header("Agent")).toHaveAttribute(
+            "title",
+            expect.stringContaining("Excludes sandbox setup"),
         );
         expect(header("Turns")).toHaveAttribute(
             "title",
@@ -593,5 +607,37 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
         expect(order[0]).toMatch(/mmm/i);
         expect(order[1]).toMatch(/aaa/i);
         expect(order[2]).toMatch(/zzz/i);
+    });
+});
+
+describe("TaskGrid — end-to-end vs agent vs grading (#212)", () => {
+    test("splits a slow checker out of the agent's time", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("calc", 3, null, {
+                        durationSeconds: 101.25,
+                        agentSeconds: 55.66,
+                        gradingSeconds: 27.66,
+                    }),
+                ]}
+            />,
+        );
+        expect(durationCellFor("calc")).toHaveTextContent("1m41s");
+        expect(agentCellFor("calc")).toHaveTextContent("55.7s");
+        expect(gradingCellFor("calc")).toHaveTextContent("27.7s");
+    });
+
+    test("an unmeasured grading time renders as a dash, never 0", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[row("old", 3, null, { durationSeconds: 10 })]}
+            />,
+        );
+        expect(gradingCellFor("old")).toHaveTextContent("—");
     });
 });

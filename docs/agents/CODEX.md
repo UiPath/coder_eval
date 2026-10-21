@@ -115,7 +115,7 @@ CodexAgent supports SKILL.md files following the [Agent Skills open standard](ht
 1. **config.plugins** - Local plugins with `type: local` and `path` pointing to a skills directory
 2. **plugin_tools_dir** parameter - Runtime plugin directory passed to `start()`
 
-Skills are symlinked (or copied) to `.agents/skills/` where the Codex CLI auto-discovers them. Environment variables in plugin paths (`$VAR`, `${VAR}`) are expanded at runtime.
+Skills are copied to `.agents/skills/` for each turn, where the Codex CLI auto-discovers them, and removed when the turn ends. Environment variables in plugin paths (`$VAR`, `${VAR}`) are expanded at runtime.
 
 Example with environment variable:
 ```yaml
@@ -192,6 +192,13 @@ The agent maps `permission_mode` to the Codex SDK's `Sandbox`. The approval mode
 
 `allowed_tools` / `disallowed_tools` are normalized (`Bash` → `shell`, `Write`/`Edit` → `apply_patch`, etc.) and passed as `enabled_tools` / `disabled_tools` in the thread `config`. **Note:** the Codex SDK does not currently enforce `disabled_tools`; do not rely on it as a security boundary (the agent logs a warning when it is set).
 
+### Context Window
+
+`agent.context_window` is passed as `model_context_window` in the thread `config`. Codex
+uses it as the model's context window, capped to the model's catalog maximum, and
+auto-compacts at 90% of it. See
+[Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness).
+
 ### Skills Discovery
 
 The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:
@@ -199,8 +206,33 @@ The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills
 1. Scans `config.plugins` for local plugins with `path` field
 2. Checks `plugin_tools_dir` parameter passed to `start()`
 3. Expands environment variables in paths (`$PLUGIN_PATH`, `${PLUGIN_PATH}`)
-4. Symlinks skill directories (falls back to copying if symlink fails)
+4. Copies each skill directory into `.agents/skills/` before every turn (real files, not symlinks), skipping any skill dir the workspace already has
 5. Codex CLI auto-discovers skills in `.agents/skills/`
+6. Removes the copies when the turn ends, so criteria and run artifacts never see them
+
+### Sub-agents
+
+A sub-agent runs on its own Codex thread, and its tool calls never reach the parent's
+stream. After each turn the agent reads the child's rollout file under
+`$CODEX_HOME/sessions` and records the child's calls as telemetry, nested under the
+spawning `Agent` row. Spawns from multi-agent v1 (`spawnAgent`) and v2
+(`subAgentActivity`) are both recovered.
+
+- Each shell command the child ran is one `Bash` row with its own exit code, also when it
+  runs longer than its script. A code-mode script that runs several commands gives one row
+  per command.
+- A non-zero exit is `result_status: error`. A call that Codex reports with no result is
+  `result_status: unknown`: an interrupt stopped it, or it still ran when its tool call
+  returned. `command_executed` with `require_success: true` counts neither. A later `wait`
+  or `write_stdin` call is a row of its own and does not change that status.
+- Each file the child patched is a `Write` row.
+- A code-mode `exec` script that ran no command and changed no file (for example, one
+  that only reads the tool list) is one `exec` row, not a `Bash` row.
+- Headless Codex through 0.147 writes no command records; 0.155.1 (the SDK floor),
+  0.156.1 and 0.162 do. On a CLI without records a code-mode script is one `exec`
+  row, and the commands inside it are not recovered.
+- A multi-agent v2 spawn names no model, so the child's generations are priced at the
+  parent's model.
 
 ### Async Integration
 

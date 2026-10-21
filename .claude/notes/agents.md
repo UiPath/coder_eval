@@ -306,6 +306,15 @@ cost bills it at the input rate and the cache buckets separately.
   id), and the `usage` snapshot the last resort. Cost is backfilled from the rate card
   when a turn was timed out or killed, so there is no terminal `ResultMessage` — the
   tokens are already captured, so this is pure pricing.
+  `model_usage` and `total_cost_usd` count the whole SESSION: a CLI resumed with
+  `resume=` restores the running totals it saved on exit, so a dialog's turn N reports
+  turns 1..N (`usage` and `num_turns` stay per-turn). `_turn_usage_slice` subtracts what
+  the same session last reported, from any ResultMessage, error or not, since the CLI
+  saves on every exit. Summing unsliced snapshots shows as a reconciliation row equal to
+  the previous turn's total (200/200 multi-turn tasks of a 2026-10-07 Haiku 5.5 run),
+  and inflates the simulator's tokens the same way. A counter that moved
+  backwards means no restore, and the snapshot is booked whole. A killed turn reports
+  nothing, so if its CLI saved totals, the next turn absorbs its usage.
 - **Codex/OpenAI** report `input_tokens` INCLUSIVE of the cached prefix, and bill no
   separate cache-write fee. So the fresh slice is `input - cached`, `cache_creation` is 0,
   and `cache_read` is `cached`.
@@ -364,7 +373,8 @@ Codex runs every sub-agent on its own child thread whose events never reach the 
 stream, and that thread persists with *Limited* rollout policy, which drops
 `commandExecution` events. So neither the live stream nor `thread.read` surfaces the
 sub-agent's shell commands, and `thread/tokenUsage/updated` only ever reports the PARENT
-thread.
+thread. (The commands a code-mode script runs are the exception: they persist as
+`item_completed` records, below.)
 
 But the child rollout ALWAYS persists the raw `function_call` / `local_shell_call` /
 `custom_tool_call` ResponseItems and a `token_count` event with the child's cumulative
@@ -385,6 +395,72 @@ have no rollout yet.
 The rollout file can lag the parent's `turn/completed` by a beat (the recorder flushes on
 a background task), so the lookup polls ~2 s — but bails immediately when
 `<home>/sessions` does not exist at all, since no flush can ever land there.
+
+Codex multi-agent v2 moved the spawn off the collab item. A v1 spawn is a
+`collabAgentToolCall` that names the child in `receiver_thread_ids`; a v2 spawn is a
+`subAgentActivity` item with `kind: started`, `id` = the spawn call id and
+`agent_thread_id` = the child, and its `wait` names no child at all. `_tool_item_root`
+maps a `started` item onto the v1 spawn shape where items enter the turn state, so one
+path registers both, and registers a child once: a repeated spawn item would otherwise
+mine the rollout twice and double the child's rows and tokens. The other kinds
+(`completed`, `interrupted`, `interacted`) are notices about a spawned child, dropped
+there, so they neither become rows nor open a parent model call.
+
+A child's tool calls come in two shapes. A direct call is a function call, and its output
+header carries the exit code. A code-mode call is a custom tool `exec` whose input is a
+JavaScript script, often several shell calls in a `Promise.all`. Its output tells only
+whether the SCRIPT ran to the end: `tools.exec_command` hands a non-zero exit code back to
+the script and does not throw, so `Script completed` is not a command result. The script
+source is not parsed — a command built from a variable or a loop defeats any parser, and
+the source holds no exit code. Instead, while a script runs, Codex writes an
+`item_completed` record per shell command (`CommandExecution`: argv, exit code, output)
+and per patch (`FileChange`), and those records ARE the script's rows, each with its own
+result. A script that left no record stays one `exec` row, not a `Bash` row: its
+JavaScript is not a shell command. The argv's login-shell wrapper (`/bin/zsh -lc <cmd>`)
+is stripped, so a record's row reads like a direct call's.
+
+A record names no script, so it goes to the newest script whose source holds its
+command. A command can outlive its script: `tools.exec_command` returns at the call's own
+`yield_time_ms` with a session id, the script ends, and a later script polls the command
+with `tools.write_stdin`. The text match then gives the record to the script that started
+the command, so that script is not also left as an `exec` row that repeats the command.
+The match decodes the source's string escapes and then ignores backslashes. A multi-line
+command is a `"a\nb"` literal in the source but holds real newlines in its record; in a
+recorded 0.147 TUI thread, 3 of 10 such commands outlived their script and, undecoded,
+went to a later one. The source also escapes the backslashes and double quotes that the
+command holds; without ignoring backslashes, no record of a real 0.156.1 Windows e2e child
+matched. A record that matches no source goes to the newest script: dropping it
+would lose a command built from a variable, the miss this recovery exists to prevent,
+while a wrong guess only moves the row to another generation. A record whose id is a
+direct call's is dropped, so a direct call is never counted twice. Seen on real CLI
+0.156.1 runs, v1 and v2 children alike: the records sit between the script call and its
+output, before the generation's `token_count`, and a 45-second command was polled as
+described. Headless threads through 0.147 (the 0.144 SDK, 0.147 `codex exec`) write no
+`CommandExecution` records, so there a code-mode script stays one `exec` row and its
+commands are not recoverable. The 0.147 TUI and 0.155.1 (the SDK floor) write them, as do
+0.156.1 and 0.162, on Windows too.
+
+A call with no result is `unknown`, never a success, so `require_success` does not credit
+it: an interrupt cut it off, it still ran after its yield time, or `wait` stopped it. The
+abort output is matched whole, so a command that prints `aborted by user` keeps its exit
+code. The `wait` or `write_stdin` call that later returns the result is a row of its own
+and does not change the yielded call: the records already carry each command's exit code,
+so only a yielded script that ran no command, or a direct `exec_command` that a direct
+`write_stdin` polls (no recorded run has one), stays `unknown`. A resuming call stays a
+row because a generation that only resumed would otherwise hold no block, and the recovery
+drops such a generation with its tokens; so each poll is one row, where the parent stream
+records a polled command once. The abort forms come from `abort_message` in
+`core/src/tools/parallel.rs` (only `exec_command` gets the wall time). A script yields
+after `DEFAULT_EXEC_YIELD_TIME_MS` (10 s); about 8% of the scripts in recorded 0.144 to
+0.147 threads yielded.
+
+A spawn with `fork_turns` copies the parent's history, tool calls included, into the head
+of the child's rollout. In a forked rollout (`session_meta` carries `forked_from_id`),
+parsing starts at the first `thread_settings_applied` with the child's thread id, so the
+parent's commands are not credited to the child. A non-forked rollout is parsed whole:
+that event also appears mid-thread on a settings change. A fork without that event is
+also parsed whole, with a warning, so a format change that would credit the parent's
+commands to the child shows in the logs.
 
 The thread-cumulative baseline is the other half. `ThreadTokenUsage.total` counts the whole
 THREAD, and the Codex thread is created once per task and reused, so by turn N it still
@@ -434,7 +510,13 @@ agent had produced; bounding it only by a fixed cycle count disconnected from `t
 path unreachable — the watchdog always wins, and the same spurious-orphan turn burns the
 full turn timeout before crashing with zero criteria evaluated.
 
-The cycle cap is the SOLE bound when a task sets no timeout at all. It is deliberately not
+The cycle cap (120 × 5 s) bounds the wait only when a task sets no timeout at all. With
+one, the deadline alone bounds it, so a never-ending command (a dev server, an unanswered
+prompt) can idle up to 80% of the turn, but a slow job gets the time the task author
+budgeted for it. Applying the cap under a timeout as well force-closed real solvers and
+simulations at 10 minutes: on the SkillsBench Gemini 4-arm campaign it ended 22 of 348
+rows, 4 of which had passed with the deadline alone (an exam-scheduling MIP solve that
+passed at 1211 s among them). It is deliberately not
 "break after N consecutive empty polls": `receive_steps()` returns identically empty
 whether a backgrounded job is still running or will never resolve, and there is no signal
 that tells the two apart except waiting. A count small enough to matter would abort real
@@ -446,6 +528,58 @@ succeeding); one large enough to be safe barely improves on a flat cap.
 answer in a headless eval), CANCELED and UNKNOWN — none of which the closed set ever marks
 done, and none of which the poll loop should wait out, since they will never become DONE
 on their own.
+
+It is also an allowlist on the TOOL: only a `run_command` can be backgrounded. Any other
+tool left ACTIVE never resolved in practice: an `edit_file` on the read-only skill mount,
+a `view_file` paged at a large `content_offset`, a `start_subagent`. In a 370-task
+SkillSpec run, 12 of 21 turns that polled to the deadline were waiting on one of those,
+after the model had already finished. `finalize` force-closes them as unresolved.
+
+## Antigravity tool allowlist
+
+`allowed_tools` / `disallowed_tools` map onto the harness's builtin toolset
+(`CapabilitiesConfig.enabled_tools` / `disabled_tools`) through
+`_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP`, so an experiment's allowlist confines Antigravity the
+way it confines Claude Code. Without it Antigravity ran with every builtin, including
+`start_subagent` and `search_web`, under a list that gave Claude Code neither. `Skill` and
+`TodoWrite` have no builtin (skills load through `skills_paths`) and are skipped. `finish`
+and `schedule` stay on under any allowlist: `finish` returns structured output, and
+`schedule` is the timer the model sleeps on while a backgrounded `run_command` finishes.
+Without `schedule`, Gemini re-checks the background task every few seconds and each check
+is a model call against `max_turns`: on the SkillsBench Gemini 4-arm campaign mean turns
+rose 36.8 → 50.2 and max-turn rows 4 → 16 on the same 110 rows, and the skill arms were hit
+2-3x harder than baseline. With `schedule` on they came back to 35.4 and 1.
+
+An allowlist only narrows the harness's default toolset (`BuiltinTools.default()`). `Glob`,
+`Grep` and `LS` map to `find_file`, `search_directory` and `list_directory`, which the
+harness ships off, so an allowlist naming them leaves them off. Turned on, Gemini used them
+in place of shell scripts (1,429 calls in 333 of 348 SkillsBench rows, none before), often
+one search per turn.
+
+`start_subagent` also stays on under any allowlist, because the harness builds its system
+prompt from the toolset: with `start_subagent` off it drops the whole subagents section
+(4,801 → 2,783 characters), and with it the prompt's only "you do NOT need to poll ... you
+will be notified" guidance. With it on, the system prompt is byte-identical to 0.12.9's.
+The section alone does not stop Gemini polling a long job with status checks: in a 48-row
+SkillsBench A/B it made 13.4 checks per row with the section and 13.7 without (8.5 on
+0.12.9). The tool descriptions are identical either way, and
+`enable_subagents` alone does not restore the section. Subagents the tool lists withhold
+(no `Task`) are denied by policy at `invoke_subagent` instead, which covers both the
+built-in `research` subagent and one the model defines with `define_subagent`; both get
+`search_web` regardless of the parent's toolset, and a parent policy on `search_web` does
+not reach a model-defined one. The SDK takes an allowlist OR a denylist, so with both set
+the denied tools are removed from the allowlist, except the always-enabled ones.
+
+## Antigravity non-interactive commands
+
+`run_command` runs in a real terminal: a command that blocks becomes a background task the
+model can check on and type into. A command that stops to ask (`npx` installing a missing
+package, git credentials, an apt/pip confirmation, a pager) and that the model then leaves
+behind keeps the turn waiting on a prompt no one answers. `_NONINTERACTIVE_ENV`
+(`CI`, `npm_config_yes`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND`, `PIP_NO_INPUT`,
+`PAGER`/`GIT_PAGER=cat`) rides the per-agent `env` seam, each variable only where the
+environment does not already set it, so those commands answer themselves or fail fast. It
+cannot close the terminal: a bare `read` or a server still runs until the poll deadline.
 
 ## The receive_steps re-entrancy window
 
@@ -500,7 +634,7 @@ shell-aware `parameters["command"]` extraction in `criteria/command_executed.py`
 to raw-JSON matching — so the same task scores differently per harness. Unknown names pass
 through unchanged.
 
-Three cases are worth knowing:
+Four cases are worth knowing:
 
 - **OpenCode's tool set varies by MODEL within the one harness.** A live 174-task run
   showed DeepSeek using `write`/`edit` 199 times and `apply_patch` 0, while GPT-5.6 used
@@ -513,6 +647,11 @@ Three cases are worth knowing:
 - **Pi's search tool is `find`** (glob-by-pattern), not `glob`; there is no `glob` tool in
   its built-in set, so mapping `find` to the canonical `Glob` is what keeps
   `command_executed` and `commands_efficiency` comparable.
+- **Delegate's host maps most names itself, but not `LoadSkill`.** `delegate-stdio` reports
+  `ReadFile` as `Read` and `ExecuteSkillApi` as `Skill`, so `DelegateAgent` maps only
+  `LoadSkill {name}` to `Skill {skill}`; without it `skill_triggered` never sees a Delegate skill
+  load. The rename is keyed by the host's name: keyed by `Skill`, it would also turn
+  ExecuteSkillApi's `name`, an API call, into a skill engagement.
 
 Antigravity additionally strips the result payload out of a tool call's arguments: the
 harness folds result fields into the same `args` dict at DONE. Beyond a static key list,
@@ -645,8 +784,15 @@ being hardcoded, so a plugin that relocates its skills keeps working.
   skips external *plugins*, not configured skill paths. An inherited value is appended to
   rather than clobbered, since the host may legitimately configure OpenCode the same way.
 - **Pi** passes each as `--skill <dir>`.
-- **Codex** symlinks (or copies, on Windows) each skill dir into `.agents/skills/`, which
-  the CLI auto-discovers from the working directory upward.
+- **Codex** copies each skill dir into `.agents/skills/`, which the CLI auto-discovers from
+  the working directory upward. Copies, not symlinks, for two reasons that compound. Codex
+  resolves a symlinked skill to its source, finds the plugin manifest there and lists the
+  skill as `<plugin>:<skill>`; models sometimes turn that into the nonexistent path
+  `.agents/skills/<plugin>/<skill>/SKILL.md`. The search that follows (`rg --files`,
+  `find`) skips symlinks and returns nothing, so the agent works without the skill. The
+  copies are made before each turn and removed after it, the same concern that kept
+  OpenCode out of the sandbox: criteria and run artifacts must see only what the agent
+  left. Skill dirs the workspace already has are never touched.
 - **Antigravity** takes search paths natively via `skills_paths` — but those only drive
   DISCOVERY. The file-tool allowlist is `workspaces` alone, so the skill roots must appear
   there too, or the agent discovers a skill and every read of its `SKILL.md` is denied as
@@ -743,89 +889,134 @@ release adding an unclassified field fails loudly instead of silently passing th
 
 ## Delegate agent
 
-`DelegateAgent` drives UiPath Autopilot's Delegate agent — reasoning in the UiPath backend,
-tools executing locally through the SDK's bundled interop process. Unlike every other CLI-driven
-agent in this file, there is no vendor-provided stdio protocol host to spawn: `@uipath/delegate-stdio`,
-the internal package a UiPath-only sibling plugin (`coder_eval_uipath`) drives, is not public. Only
-`@uipath/delegate-sdk` (a programmatic library exposing a `DelegateAgent` class with
-`initialize()`/`onEvent()`/`sendMessage()`/`destroy()`) and `@uipath/delegate-cli` (a terminal wrapper
-around it) are. So this agent ships its own first-party Node host, `agents/delegate/delegate_host.mjs`,
-which wraps the SDK class in a newline-JSON stdio protocol this framework designed, not one it had to
-reverse-engineer — verified live against a real `@uipath/delegate-sdk@0.1.12` install with no token,
-confirming both the plain-public-install story and that the SDK's own event vocabulary
-(`session_start`/`thinking`/`message`/`tool_call`/`tool_result`/`error`/`done`/`step`) substantially
-matches the internal sibling's protocol.
+`DelegateAgent` drives UiPath Autopilot's Delegate agent: reasoning in the UiPath backend, tools run
+locally. It spawns the host from the public `@uipath/delegate-stdio` npm package
+(`dist/delegate_stdio.mjs`), which pulls in `@uipath/delegate-sdk` and the interop binaries. The
+package README is the wire-protocol SSOT. `agents/delegate/package.json` sets the floor at `1.203.0`, the
+first release with the `auth` init option and the `usage` frame (UiPath/Autopilot#6656). The other frame
+shapes were confirmed against a live `1.202.1` transcript; the frame builders in
+`tests/_fixtures/golden_streams/delegate_fixtures.py` replay those shapes. (An earlier first-party
+`delegate_host.mjs` wrapper is gone; see git history.)
 
-**No multi-generation transcript splitting.** The internal sibling reconstructs one `AssistantMessage`
-per backend round-trip from an `isStepStart` flag and a `turnUsages` array on the host's terminal
-message. Neither is present on `DelegateAgent.onEvent`'s payloads (confirmed absent by grepping the
-installed SDK bundle's string literals), so there is no reliable per-round-trip boundary signal at this
-API layer. `DelegateAgent` builds exactly ONE `AssistantMessage` per `communicate()` call instead — a
-deliberate simplification, not an oversight; richer segmentation can be added once a real boundary
-signal is confirmed against a live backend. `timing.close_window` still opens that one window from the
-turn's own start (there is nothing to tile from), so the head and tail both measure ~0.
+**Auth goes to the host as the `auth` init option, not through its env.** `_env` reads the
+`DELEGATE_*` name first, then the bare `AUTH_TOKEN` / `TENANT_ID` / `ORG_ID` / `ORG_SLUG` /
+`TENANT_SLUG`. `DELEGATE_BACKEND_URL` → `backendUrl`, `DELEGATE_ENV` → `env`. We do not adopt the
+host's own names (`ORG_LOGICAL_NAME`, `BACKEND_URL`, …): bare names collide with other tooling, and CI
+secrets use the `DELEGATE_*` names. `_HOST_ENV_REMOVED` strips the host's names and the token from the
+host env, because the agent's shells inherit it (token leak to code under test) and a stray
+`BACKEND_URL` would reroute the host. A refresh source still writes the fresh token into the host's
+own `process.env.AUTH_TOKEN`. `_INIT_CONFIG_ERROR_HINT` names our variables beside the host's message,
+which names the host's own. `env=<slug>` without org/tenant
+slugs fails init.
 
-**Deferred, not ported speculatively.** The internal sibling's module docstring documents several
-hard-won failure-signature-specific recoveries: a Cloudflare WAF-block-page rewrite, an SSE-connect-
-timeout rewrite, session-conflict fresh-host recovery, and first-response stall-timeout+resend. None
-are ported here — porting a marker tuned to the internal sibling's own observed failures risks matching
-nothing (or the wrong thing) against the public SDK/backend's actual error surface. A crash still ends
-the turn correctly as a retryable `AgentCrashError`; it is just not specially diagnosed. Port these once
-the same failures are actually observed running this agent for real.
+**`LLMGW_*` leaves the host env only when a token file is set.** Without a token file, the host's
+`selectTokenSource` uses that S2S pair to refresh, so stripping it always would end refresh after an
+hour. `_strip_redundant_gateway_creds` mirrors the host's lookup exactly
+(`DELEGATE_AUTH_TOKEN_FILE ?? AUTH_TOKEN_FILE`, path-delimiter split, blanks ignored).
 
-**The process handle must be cleared on every path that leaves the host dead or dying** — EOF, a host
-`fatal` message, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
-`asyncio.wait_for`), cooperative stop, and `max_turns` exhaustion. A real bug shipped once during this
-agent's own development: a timeout elapsing mid-read fell through to the generic crash path instead of
-`TurnTimeoutError`, and left the process handle set, so the NEXT `communicate()` call reused a host with
-a `"send"` still nominally in flight instead of respawning — risking a stale response being consumed as
-the new turn's. `tests/test_delegate_agent.py`'s `test_timeout_elapsing_mid_read_still_raises_turn_timeout_error`
-pins the fix.
+**Effort rides `sdk_options.effort`** — the same key as Claude Code, so one `-D` drives both.
+`get_sdk_options()` returns the whole `init` dict (so the reports show Model and Effort), with
+credentials redacted: `auth` → its field names, `backendUrl` → its host (`None` when `urlparse` cannot
+parse the URL: the orchestrator reads it while it persists `task.json`, so a raise there would lose
+the file and hide the original error). It is persisted in
+`task.json`.
 
-**Skills mapping is deliberately NOT the shared `agents/_skills.py` resolver.** That resolver enumerates
-individual skill directories for a repeated `--skill <dir>`-style CLI argument (OpenCode/Pi's shape).
-The Delegate SDK's `bundledSkillsPath` wants exactly ONE parent directory whose children are skill
-folders — a genuinely different shape — so `_resolve_bundled_skills_path` mirrors the internal sibling's
-own mapping (`<plugin.path>/skills`, first plugin wins) instead of force-fitting the shared helper.
+**`enableSkills` must be sent explicitly**: the host default is `false`, so `bundledSkillsPath` alone
+loads nothing. `_resolve_bundled_skills_path` maps `<plugin.path>/skills` (first plugin wins), not the
+shared `agents/_skills.py` resolver: the SDK wants ONE parent directory, not a list of skill dirs.
 
-**Registered unconditionally**, exactly like `codex`/`antigravity` — there is no conditional-registration
-gate keyed on an optional-dependency extra anywhere in this codebase; `opencode`/`pi` declare an EMPTY
-extra purely as packaging-metadata documentation, and `delegate` follows that same shape (no new pip
-package — Node/`@uipath/delegate-sdk` is the real prerequisite, resolved lazily in `start()`).
+**`max_turns` stays client-side.** The host's `maxSteps` does not stop the turn (live: `maxSteps: 2`
+ran 7 steps). The adapter counts calls from the event stream and abandons the host when call N+1
+opens; `len(turnUsages)` from the `result` then replaces the estimate as `num_turns`.
 
-**`environment` resolution needs org/tenant SLUGS, not just IDs — confirmed by reading the installed
-SDK's own bundle, not by guessing from its error message.** When `DELEGATE_BACKEND_URL` is absent and
-`DELEGATE_ENV` (-> `environment` init option) is used instead, the SDK resolves the backend URL from
-`organizationName`/`orgLogicalName` and `tenantName` fields on the `auth` object passed to
-`initialize()` — NOT from `ORG_SLUG`/`TENANT_SLUG` read off `process.env` directly, despite that being
-exactly what the SDK's own thrown error suggests ("set ORG_SLUG and TENANT_SLUG env vars alongside
-ORG_ID/TENANT_ID"). That advice describes the separate `@uipath/delegate-cli`/`delegate-stdio` wrapper's
-own env-var-driven bootstrapping, not the `DelegateAgent` class itself, which we drive directly. So
-`_build_init_options` forwards `ORG_SLUG`/`TENANT_SLUG` (when set) into `auth.organizationName`/
-`auth.tenantName` itself — confirmed against `node_modules/@uipath/delegate-sdk/dist/index.mjs`'s own
-`yie()` resolver function live in CI (`pyright`/tests can't catch this class of bug; it only surfaces
-against a real backend). `tests/test_delegate_agent.py::TestStart::test_org_and_tenant_slug_forwarded_into_auth`
-pins it. Passing `DELEGATE_BACKEND_URL` directly instead of `DELEGATE_ENV` skips this whole path.
+**A call opens on its first text, or on its `usage` frame when it streams none — never on a tool
+event.** The host streams a call's text, flushes the call's `usage` frame, then runs the call's
+tools, and it runs a batched reply's tools one at a time: `tool_call`, `tool_result`, `tool_call`,
+`tool_result`. The adapter once opened call N+1 when every open tool had returned. With that order
+the open set empties after each tool, so every tool counted as a call: a downstream suite saw a turn
+with 16 round-trips and 96 tool calls cut at `max_turns: 80`. Now a `thinking` or `message` event
+opens a call unless the open call has already streamed text, and a `usage` frame opens one only for
+a call that streamed none. A crossing call that streams text is cut at that text, before any of its
+tools. A tool-only crossing call is cut at its own frame, and its first tool can start before the kill:
+the host starts a call's tools right after the frame, and the stream gives no earlier boundary. A host
+without `usage` frames counts only the calls that stream text; such a host is below the 1.203.0 floor,
+which is also the first release that takes the `auth` init option.
+Only `_TurnState.on_text` / `on_tool_event` / `on_usage_frame` / `on_result` write the count, so the rule
+lives in one place. `on_result` compares the live count with `len(turnUsages)` and warns when they
+differ: the order is read from the 1.203.1 host and SDK source, not from a live transcript, so a host
+release that reorders the frames shows up in the logs instead of silently moving the cap.
 
-**Token usage comes from two getters called after `sendMessage()` resolves, not from any event or the
-resolved value itself — confirmed by reading the installed SDK's bundle, not by guessing.** A first
-pass guessed at a flat `usage` dict carried on the resolved `sendMessage()` value or on a forwarded
-event, tried several plausible snake_case/camelCase bucket-name spellings, and silently returned zero
-tokens every turn against a real backend (`tests/test_delegate_agent_live.py::test_delegate_live_token_usage_populated`
-failed live: `record.crashed is False`, real text/tool output, `token_usage=None`). Reading
-`node_modules/@uipath/delegate-sdk/dist/index.mjs` directly settled it: `sendMessage()` always resolves
-to a plain string (never an object), and no event this host forwards via `agent.onEvent()` ever carries
-a `usage` field — the SDK's own internal event vocabulary has no `"usage"` member (that name IS used
-internally, but only inside the SDK's own Zustand store reducer that updates its "Token usage" UI
-panel, never re-emitted through the public `onEvent` bus). The only way to reach it is
-`DelegateAgent.getLastTurnUsage(sessionId?)` (defaults to the just-used session), so
-`delegate_host.mjs`'s `handleSend` calls it — and `getSessionId()` — right after `sendMessage()`
-resolves, and attaches both to the `send_ok` message itself. That getter's shape, read straight off the
-SDK's own `setUsage` store action, is `{promptTokens, completionTokens, promptTokensCached,
-cacheCreationTokens, turnTokenUnits, contextBreakdown}` — `promptTokens` is the TOTAL input token count
-(OpenAI-style, cached + uncached), `promptTokensCached` the cache-READ subset of it, so
-`_parse_usage` computes `uncached_input_tokens = promptTokens - promptTokensCached`. This is now
-CONFIRMED, not a guess, so `_parse_usage`'s docstring no longer marks it `# UNVERIFIED`.
+**A cut turn keeps the usage of its finished calls.** A turn cut by `max_turns` or a stop gets no
+`result`, so the adapter sums the per-round-trip `usage` frames; the `result`'s total replaces the sum
+when it arrives. Ordering (from the host and SDK source, not a live transcript): call N's `usage` frame
+precedes every tool event of call N. A crossing call that streams text is cut at that text, so its usage
+is dropped; a tool-only crossing call is cut at its own frame, so its usage is booked. The adapter warns
+when a cut turn had finished calls but no usage.
+
+**One `AssistantMessage` per `communicate()`.** `isStepStart` and `turnUsages` would allow a
+per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
+window at turn start, so head and tail measure ~0.
+
+**Known host failures are recategorized** in `_describe_host_error` / `_crash_on_host_error`, ported
+from the out-of-tree `delegate-sdk` adapter that drove the same host and backend:
+
+- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>` or "not available in
+  your country"): a WAF rule matched shell-like text in the request, not a geo/auth block. A retry
+  is blocked again, so the reason carries "content filter" (`AGENT_INVALID_OUTPUT`). Two markers,
+  because the host truncates near 50 KB and the country sentence sits after ~48 KB of CSS.
+- **SSE connect timeout**: no response headers, so the backend never started the turn. Rewritten to
+  "connection" (`AGENT_API_ERROR`, retried) with "timeout" removed, which would be `AGENT_TIMEOUT`
+  (not retried).
+- **Session conflict** ("A reply is already being generated", 409): `_session_id` is dropped so the
+  retry starts a new conversation, but only while no turn of that conversation has finished
+  (`_conversation_has_history`). On a later turn a new conversation would continue the task without
+  the earlier turns, and the row would still be graded as one trajectory. So the retry keeps the
+  session. The 409 is short-lived: the backend cancels the reply when the killed host's stream
+  disconnects, then releases its turn claim, so the 5 s and 10 s `AGENT_CRASH` retries usually
+  succeed. A claim it fails to release expires after `TURN_CLAIM_TTL_SECONDS` (900 s), and the task
+  ends as an error. A `session_id` pinned in config counts as history, and dropping it would not
+  help anyway: each respawn sends it in `init`, and the SDK falls back to it when `send` carries no
+  `sessionId` (`sessionId || this.options.sessionId` in the SDK's `sendMessage`).
+
+Not ported: stall-timeout+resend and the S2S token-file refresher. Port them when the need shows.
+
+**No crash reason carries the stderr tail.** Categorization matches substrings of the reason, and the
+tail holds incidental text (the sandbox path, so the task id). In build 13599116 "guardrail" in a task
+path turned a transient error into non-retryable `AGENT_INVALID_OUTPUT`. `_log_stderr_tail` logs the
+tail at WARNING instead.
+
+**Only an init error that a retry cannot fix is non-retryable.** `AgentConfigError` only on
+`_INIT_CONFIG_ERROR_MARKERS` (auth missing/rejected, missing slugs, unknown env) or on a whole-word
+401/403. A bare `"401"` substring also matched ports and GUIDs, such as `127.0.0.1:54013`, and ended a
+transient failure with no retry. Any other init error and the 60 s init deadline raise a retryable
+`AgentCrashError`. The shared categorizer matches status codes as whole words too
+(`errors/categorization.py::_mentions_status`): the `AgentCrashError` goes through `categorize_error`,
+whose raw `"401"` substring made the same port and GUID cases a non-retryable auth error. A mid-run
+respawn keeps the same classification: it once made every `AgentConfigError` retryable, so an expired
+token ended the task at `start()` but was retried later.
+
+**Clear the process handle on every path that leaves the host dead or dying** — EOF, `error` frame,
+timeout (pre-check AND mid-`wait_for`), stop, `max_turns`. A shipped bug left it set after a mid-read
+timeout, so the next turn reused a host with a `send` in flight
+(`test_timeout_elapsing_mid_read_still_raises_turn_timeout_error` pins it). `_force_kill_host` clears
+the handle before its reap. The adapter never reuses a host after a failed `send`, so no late event
+leaks into the retry.
+
+**Registered unconditionally**, like `codex`/`antigravity`; its extra is empty. Node and
+`@uipath/delegate-stdio` are the real prerequisite, resolved lazily in `start()`.
+
+**Host resolution: `DELEGATE_STDIO_PATH`, then local installs, then a global one.** Local means
+the cwd, its ancestors and `agents/delegate/`; a local install wins, as in Node. A global install
+is found through the package's `delegate-stdio` bin shim on `PATH`, not `npm root -g`, so the
+resolver runs no npm subprocess. On POSIX the shim is a symlink to the bundle. On Windows it is a
+`.cmd` file beside the prefix's `node_modules`. We never execute the `.cmd`: that would make
+`cmd.exe` parse the arguments again. The home probe and `DELEGATE_SDK_NODE_MODULES` are gone. The
+global search covers "install once, run from anywhere", and the root override only repeated the
+path override. The explicit path stays for CI: a source build has no install root, and an install
+in a temporary directory for each run keeps the runs on a shared host on their own versions.
+
+**Windows path length**: an install root that pushes the interop binary path past 260 characters makes
+the spawn fail with `ENOENT`. The docs tell users to install into a short path.
 
 ### Delegate agent pricing
 
@@ -855,16 +1046,14 @@ un-mirrored gap, with the same caveat comment). The two tables can price the SAM
 differently until someone reconciles them — a known, pre-existing state, not something this port
 introduced or should silently "fix" by picking one number over the other.
 
-### Delegate agent golden-master and timing-identity coverage
+### Delegate agent golden-master coverage
 
-`AgentKind.DELEGATE` is excluded from `tests/test_agent_golden_master.py`'s `_NO_GOLDEN_COVERAGE`
-allowlist rather than given fixture scenarios: a golden snapshot pins a byte-identical `TurnRecord`
-for a scripted event stream, and every event field name below the confirmed `type`/`content`/
-`toolName`/`sessionId`/`model`/`usage` set is a guess (see this file's own "Delegate agent" section
-above and `delegate_agent.py`'s module docstring). Snapshotting a guess would make it look verified.
-Add real scenarios once the fields are confirmed against a live backend.
-
-This does NOT extend to `tests/test_timing_identity_contract.py::test_delegate_buckets_tile_the_turn`,
-which IS a real, unexempted case: the ms-exact four-bucket identity depends only on this agent's own
-`close_window`/`_finalize_turn` code (a single window per turn, opened at `_TurnState.__init__` and
-closed at finalize), never on the SDK's field names, so there is nothing unverified for it to guess at.
+`tests/_fixtures/golden_streams/delegate_fixtures.py` scripts the host's stdout frames for six
+scenarios: a tool call, a `max_turns` cut, an `error`-frame crash, an orphaned tool, a tool-only call
+that crosses the cap, and a batched reply whose tools run one at a time. The `event`,
+`result` and `error` frames mirror the live `1.202.1` transcript. The `usage` frame and the `result`
+fields new in `1.203.0` follow the host source of UiPath/Autopilot#6656 (`src/usage.ts` and
+`handleSend`): every usage object carries all four buckets with `input_tokens` exclusive of cache,
+the frames flush before each event and before the `result` or `error`, and `result.usage` is the sum
+of `turnUsages`. No live `1.203.0` transcript has been compared yet. If one differs, change the
+builders and regenerate the snapshots with `GOLDEN_REGEN=1`.

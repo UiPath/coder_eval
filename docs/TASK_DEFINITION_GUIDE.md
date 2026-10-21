@@ -170,18 +170,31 @@ agent:
     - "Write"
     - "Bash"
   model: "claude-sonnet-5"            # Optional: specific model
-  sdk_options:                        # Optional: Claude Code SDK pass-through
-    effort: high                      # any non-framework-managed ClaudeAgentOptions field
+  context_window: 200000              # Optional: cap the context window, in tokens (claude-code, codex)
+  sdk_options:                        # Optional: agent SDK pass-through (keys depend on `type`)
+    effort: high                      # claude-code: any non-framework-managed ClaudeAgentOptions field
 ```
 
-**`sdk_options`** is a typed pass-through dict for Claude Code SDK
-`ClaudeAgentOptions` fields that Coder Eval doesn't own directly. Keys are
-validated against the SDK's dataclass at YAML load; framework-managed keys
-(`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
-are rejected. Deep-merged across the 5-layer config chain. Override via
-CLI with the repeatable `-D agent.sdk_options.KEY=VALUE`.
-**Requires `type: "claude-code"`** to function; on other agent types it raises
-an error.
+**`sdk_options`** is a pass-through dict for the agent SDK options that Coder
+Eval doesn't own directly. Only an agent type whose config declares the field
+accepts it; on another agent type it raises an error. Each agent type
+validates its own keys at YAML load:
+
+- `claude-code` — `ClaudeAgentOptions` fields, validated against the SDK's
+  dataclass; framework-managed keys (`model`, `allowed_tools`,
+  `permission_mode`, `hooks`, `mcp_servers`, …) are rejected. See the
+  [Claude Code guide](agents/CLAUDE_CODE.md).
+- `delegate` — only `effort`. See the [Delegate guide](agents/DELEGATE.md).
+
+Deep-merged across the 5-layer config chain. Override via CLI with the
+repeatable `-D agent.sdk_options.KEY=VALUE`.
+
+**`context_window`** caps the context window the agent works within, in tokens: the
+harness compacts the conversation before it outgrows the cap, and never runs past the
+model's own window. Override via CLI with `-D agent.context_window=400000`. Which agent
+types accept it, in what range, what each does with it and what an unset value means:
+[Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness). An agent
+type that cannot apply it rejects it at load.
 
 **Permission Modes:**
 - `default` — Default permission handling
@@ -1332,7 +1345,7 @@ Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, 
 
 ### `skill_triggered`
 
-Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
+Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` copy).
 
 Observed label is `"yes"` when either signal is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
 

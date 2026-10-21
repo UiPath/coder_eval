@@ -12,7 +12,7 @@
         "verify": "tsc --noEmit && vitest run && next build"
     },
     "dependencies": {
-        "next": "^15.5.20",
+        "next": "^15.5.28",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-markdown": "^10.1.0",
@@ -44,7 +44,10 @@
             "postcss": "^8.5.10",
             "fast-xml-builder": "^1.1.7",
             "@babel/core": "^7.29.6",
-            "uuid": "^11.1.1"
+            "uuid": "^11.1.1",
+            "sharp": "^0.35.5",
+            "nanoid": "^3.3.18",
+            "source-map-js": "^1.2.2"
         }
     }
 }
