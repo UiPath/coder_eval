@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator, Field, computed_field, model_validator
+from pydantic import BaseModel, Discriminator, Field, computed_field
 
 
 class TokenUsage(BaseModel):
@@ -29,25 +29,6 @@ class TokenUsage(BaseModel):
     COST bills ``uncached_input_tokens`` at the input rate, NOT ``input_tokens``
     (which already contains the cache buckets and would double-count them).
     """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _adopt_legacy_input_tokens(cls, data: Any) -> Any:
-        """Read pre-split ``task.json`` files without silently under-counting.
-
-        Before the uncached/derived split, the stored field was ``input_tokens``
-        and it carried the FULL prompt. It is now a computed field, so a naive
-        reload drops it and recomputes from the cache buckets only — turning a
-        stored ``input_tokens=1000`` into ``350``. When the new stored field
-        ``uncached_input_tokens`` is absent but a legacy ``input_tokens`` is
-        present, adopt the legacy value as ``uncached_input_tokens`` so the Python
-        read path agrees with the evalboard (which already falls back the same
-        way). Current-format payloads carry ``uncached_input_tokens`` and are
-        untouched.
-        """
-        if isinstance(data, dict) and "uncached_input_tokens" not in data and "input_tokens" in data:
-            data = {**data, "uncached_input_tokens": data["input_tokens"]}
-        return data
 
     uncached_input_tokens: int = Field(
         default=0,

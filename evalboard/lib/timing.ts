@@ -174,23 +174,16 @@ export function busyMs(
 //
 // A call the harness TIMED but did not BOUND contributes nothing — no
 // `durationMs` fallback. That is a policy, and it is the same one
-// `coder_eval.timing.main_thread_tool_spans` has always had on the Python side:
-// its `is not None` filter drops a command with no `execution_started_at` /
-// `execution_completed_at`, so every Python surface already ignored these while
-// this function folded them in. A duration with no bounds cannot be placed on
+// `coder_eval.timing.main_thread_tool_spans` has on the Python side: its
+// `is not None` filter drops a command with no `execution_started_at` /
+// `execution_completed_at`. A duration with no bounds cannot be placed on
 // the timeline, so it cannot be unioned with anything; adding it to a union
 // double-books whatever it overlapped and can drive the residual negative,
 // which destroys the disjointness the four-bucket identity rests on. Such time
 // lands in Unaccounted instead, which is precisely what that cell is for — the
-// harness measured a duration it cannot place.
+// harness measured a duration it cannot place. The retired `delegate-sdk`
+// adapter is the one harness that recorded only bare durations.
 //
-// Measured blast radius: 9336 of 12170 commands in the run history on disk are
-// unbounded, every one a codex `Bash`, ~8 h in aggregate. That population is
-// CLOSED — codex went from 0% bounded before 2026-09-10 to 100% after — so no
-// future run changes, but on historical codex runs this moves up to ~8 h out of
-// Tool exec and into Unaccounted. Going forward the only harness reporting a
-// bare duration is the out-of-tree `delegate-sdk`; see
-// docs/agents/HARNESS_PARITY.md.
 // The same union, but `null` when NOTHING bounded was recorded — the direct
 // twin of `result_metrics._turn_tool_union_ms`, and the one a display cell wants.
 //
@@ -201,10 +194,10 @@ export function busyMs(
 // list, and its caller turns an empty one into `None`), and this is that layer.
 //
 // The distinction is not academic. A turn that ran no tools, and a turn whose
-// tools were all TIMED BUT UNBOUNDED — the historical-codex and out-of-tree
-// `delegate-sdk` population — both produce an empty span list. Rendering `0ms`
-// there claims the tools were measured and took no time, while every Python
-// surface renders a dash for the same run.
+// tools were all TIMED BUT UNBOUNDED — the `delegate-sdk` population — both
+// produce an empty span list. Rendering `0ms` there claims the tools were
+// measured and took no time, while every Python surface renders a dash for the
+// same run.
 export function measuredToolExecutionMs(messages: MessageEvent[]): number | null {
     const anyBounded = messages.some((m) =>
         m.toolUses.some((t) => t.execStartMs != null && t.execEndMs != null),

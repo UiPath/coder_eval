@@ -512,31 +512,6 @@ def test_load_attaches_dict_when_schema_mismatch(tmp_path: Path) -> None:
     assert transcript["future_field"] == "from-newer-version"
 
 
-def test_load_reads_legacy_json_sibling(tmp_path: Path) -> None:
-    """Sibling files spilled before the YAML switch are ``judge-<idx>.json``.
-    The loader must still read them so archived runs render."""
-    judge = _make_judge_result(transcript=None)
-    judge.transcript_path = "judge-0.json"
-    legacy = (
-        '{"raw_verdict":"legacy","judge_prompt":"legacy","tool_calls":[],'
-        '"duration_seconds":0.0,"judge_system_prompt":"","truncated":false,"token_usage":null}'
-    )
-    (tmp_path / "judge-0.json").write_text(legacy, encoding="utf-8")
-    result = _make_evaluation_result(criteria=[judge])
-
-    n = load_judge_transcripts(result, tmp_path)
-
-    assert n == 1
-    transcript = getattr(judge, "transcript", None)
-    assert transcript is not None
-    # Loader prefers typed JudgeTranscript even for legacy .json siblings —
-    # the on-disk format changed but the schema is the same.
-    from coder_eval.models import JudgeTranscript
-
-    assert isinstance(transcript, JudgeTranscript)
-    assert transcript.raw_verdict == "legacy"
-
-
 # --- end-to-end ---
 
 

@@ -21,14 +21,13 @@ describe("RunIdentity", () => {
     test("uses the vendor logo, not just the raw harness id", () => {
         render(
             <RunIdentity
-                harness="delegate-sdk"
+                harness="delegate"
                 model="virtuoso-1-5"
                 modelCount={1}
             />,
         );
         // The UiPath mark stands in for the Delegate harness, which has no file
-        // of its own under /harness. The id stays `delegate-sdk` (that is what
-        // run.json carries); only the label is shortened.
+        // of its own under /harness.
         expect(screen.getByAltText("Delegate · UiPath")).toBeInTheDocument();
         expect(screen.getByText("Delegate")).toBeInTheDocument();
     });
@@ -67,7 +66,7 @@ describe("RunIdentity", () => {
         expect(screen.getByText("some-model")).toBeInTheDocument();
     });
 
-    test("renders nothing for a legacy run that identifies neither", () => {
+    test("renders nothing for a run that identifies neither", () => {
         const { container } = render(
             <RunIdentity harness={null} model={null} modelCount={0} />,
         );

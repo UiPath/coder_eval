@@ -232,7 +232,7 @@ def test_task_html_minimal_success():
                 commands=[
                     _make_command("Write", 0, parameters={"file_path": "Main.cs"}, result_summary="File created"),
                 ],
-                token_usage=TokenUsage(input_tokens=150, output_tokens=80),
+                token_usage=TokenUsage(uncached_input_tokens=150, output_tokens=80),
             )
         ],
     )
@@ -631,7 +631,7 @@ def test_variant_html_loads_rich_sections_from_run_dir(tmp_path: Path):
     task_json_dir.mkdir(parents=True)
     eval_result = _make_result()
     eval_result.task_id = "t1"
-    eval_result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=0.02)
+    eval_result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=0.02)
     eval_result.sdk_options = {"permission_mode": "auto", "allowed_tools": ["Bash"], "model": "m"}
     eval_result.environment_info = {"framework_version": "0.1"}
     (task_json_dir / "task.json").write_text(eval_result.model_dump_json())
@@ -885,7 +885,7 @@ def test_task_html_omits_commands_efficiency_when_absent():
 
 def test_task_html_renders_cost_badge_in_header():
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=0.5)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=0.5)
     html = HTMLReportGenerator.generate_task_html(result)
     # Header region ends at the </div> after ".header-bar"
     header = html[: html.index("<h2>") if "<h2>" in html else len(html)]
@@ -976,7 +976,7 @@ def test_task_html_no_expected_turns_badge_when_task_config_none():
 def test_task_html_omits_cost_badge_when_cost_is_none():
     """Cost badge is only rendered when total_cost_usd is populated."""
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=None)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=None)
     html = HTMLReportGenerator.generate_task_html(result)
     header = html[: html.index("<h2>")]
     assert "$" not in header
@@ -985,7 +985,7 @@ def test_task_html_omits_cost_badge_when_cost_is_none():
 def test_task_html_token_usage_cost_na_when_absent():
     """When tokens are recorded but cost is None, Token Usage cell renders N/A."""
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=None)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=None)
     html = HTMLReportGenerator.generate_task_html(result)
     token_section = html[html.index("<h2>Token Usage</h2>") :]
     # Next heading demarcates this section

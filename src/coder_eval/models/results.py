@@ -235,41 +235,15 @@ class JudgeCriterionResult(CriterionResult):
     )
 
 
-# Type-infers legacy ``task.json`` records that lack ``result_kind``. Listed HERE, not
-# on each criterion class: deserializing a row must not require importing every checker
-# (and ``criteria/*.py`` already imports from this module).
-#
-# CONVENTION: a new criterion type needing a non-``"basic"`` result class adds its
-# ``criterion_type`` to the matching frozenset in the same PR.
 JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge", "system_one_judge"})
-"""Criterion types whose rows deserialize as ``JudgeCriterionResult``. Also the
-rendering gate in ``reports/html.py`` — one set, so the two cannot drift."""
-_CLASSIFICATION_CRITERION_TYPES = frozenset({"classification_match", "skill_triggered"})
+"""Criterion types whose rows are ``JudgeCriterionResult``; the rendering gate in
+``reports/html.py``."""
 
 
 def _criterion_result_discriminator(v: Any) -> str:
-    """Dispatch ``CriterionResult`` subclasses for serialization and validation.
-
-    Prefers explicit ``result_kind`` (written by current code); falls back to
-    inference from ``criterion_type`` for legacy task.json files written before
-    this field existed. Unknown criterion_types fall through to ``"basic"``.
-
-    Explicit ``result_kind`` wins over ``criterion_type`` inference: a dict
-    carrying ``result_kind="basic"`` with ``criterion_type="llm_judge"`` is
-    routed to the base class. This matters for forward-compat experiments where
-    a writer deliberately downgrades a result shape.
-    """
+    """Dispatch ``CriterionResult`` subclasses on ``result_kind`` for serialization and validation."""
     if isinstance(v, dict):
-        kind = v.get("result_kind")
-        if kind:
-            return str(kind)
-        ct = v.get("criterion_type", "")
-        if ct in JUDGE_CRITERION_TYPES:
-            return "judge"
-        if ct in _CLASSIFICATION_CRITERION_TYPES:
-            return "classification"
-        return "basic"
-    # Pydantic instance — read the discriminator field.
+        return str(v.get("result_kind") or "basic")
     return getattr(v, "result_kind", "basic")
 
 
@@ -480,7 +454,7 @@ class SimulationTelemetry(BaseModel):
         description=(
             "Resolved model that played the simulated user, captured so a persisted "
             "task.json is self-describing and its cost prices from a fact rather than "
-            "from the run's route. None on records written before the model was pinned."
+            "from the run's route."
         ),
     )
 
@@ -1107,9 +1081,7 @@ def simulator_cost_usd(result: EvaluationResult) -> float | None:
     """Price an evaluation's simulator turns. ``None`` outside simulation mode.
 
     Priced at the SIMULATOR's own model — ``SimulationConfig.model``, recorded on
-    the record as ``simulator_model`` — not the subject's and not the route's. The
-    two older fallbacks remain for records written before the model was pinned, when
-    the simulator inherited ``BEDROCK_MODEL`` from the route.
+    the record as ``simulator_model`` — not the subject's and not the route's.
 
     A floor. ``UserSimulator`` records only ``uncached_input_tokens`` and drops
     both cache buckets, so a cached prefix is largely absent from the count.
@@ -1119,16 +1091,10 @@ def simulator_cost_usd(result: EvaluationResult) -> float | None:
     sim = result.simulation
     if sim is None or not (sim.simulator_input_tokens or sim.simulator_output_tokens):
         return None
-    route_model = (result.environment_info or {}).get("bedrock_model")
-    model = sim.simulator_model or (
-        # Legacy records only: the route's model, else the subject's on a non-Bedrock
-        # route where the SDK picked its own default and nothing named it.
-        route_model if isinstance(route_model, str) and route_model else result.model_used
-    )
-    if not model:
+    if not sim.simulator_model:
         return None
     return calculate_cost(
-        model,
+        sim.simulator_model,
         uncached_input_tokens=sim.simulator_input_tokens,
         output_tokens=sim.simulator_output_tokens,
     )

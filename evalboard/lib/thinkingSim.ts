@@ -14,12 +14,8 @@
 //   • Tool results are *injected* (not model output), so scaling them touches
 //     the cache write/read cascade only — never the output bill.
 //
-// Tool-result token volume is not recorded directly (only a 280-char preview),
-// so it is ESTIMATED as cache growth unexplained by the model's own output: a
-// result returned after call j is the new cache-written content on call j+1, so
-//   toolResult_j ≈ cacheWrite_{j+1} − output_j   (clamped ≥ 0).
-// This needs per-message tokens (coder_eval #336+); on older runs the tool lever
-// has nothing to estimate and is disabled.
+// Tool-result token volume is MEASURED from each call's recorded result_tokens
+// (cache-independent, so it holds with prompt caching on or off).
 //
 // Model (all per-call quantities indexed by emission j = 0..M-1, in order):
 //
@@ -44,7 +40,6 @@
 //   the first of those L_j is the cache write, the rest are cache reads →
 //   writes_j = (L_j ≥ 1 ? 1 : 0), reads_j = max(0, L_j - 1).
 //   (On a run with no sub-agents, L_j = M-1-j and this is the flat cascade.)
-//   Requires per-call branch ids; runs lacking them disable the model entirely.
 //
 // Held fixed ("assuming everything else is fine", per the feature request): the
 // trajectory itself — number of calls, tool calls, tool-result sizes, and the
@@ -221,7 +216,7 @@ export interface ThinkingModel {
     thinkTokens: number;
     // Total tool-result tokens injected across the run, MEASURED from the recorded
     // result content (cache-independent — see header). 0 only when the run made no
-    // tool calls (or predates per-tool resultTokens), which disables the lever.
+    // tool calls, which disables the lever.
     toolResultTokens: number;
     // Recorded cost (sum of iteration total_cost_usd), for reference. May be
     // null on runs that didn't record it. The projection's own baseline is
@@ -282,13 +277,8 @@ export function buildThinkingModel(
     // calls bubble up into the same message stream, but each sub-agent has its
     // own context that is re-read only within its own branch — never by the main
     // thread or sibling sub-agents (you can see it as the per-call cache_read
-    // collapsing back to a small base each time a sub-agent spawns). Modeling the
-    // cascade therefore requires each call's branch id (parent_tool_use_id).
-    // Runs that predate branch capture don't carry it; rather than fall back to a
-    // flat-list cascade that overstates re-read cost on any run with sub-agents,
-    // we decline to build the model — callers then hide the simulator.
-    const branchKnown = messages.every((m) => m.parentToolUseId !== undefined);
-    if (!branchKnown) return null;
+    // collapsing back to a small base each time a sub-agent spawns). Each call's
+    // branch id (parent_tool_use_id) is what models that tree.
     const perMessageOutputSum = messages.reduce(
         (s, m) => s + (m.outputTokens ?? 0),
         0,
@@ -372,7 +362,6 @@ export function buildThinkingModel(
     // same whether or not prompt caching was enabled, so the tool-output lever
     // works in both modes (cache-growth inference broke with caching off, where
     // cacheWrite is 0). toolPerCall[j] = Σ resultTokens of the tools called at j.
-    // 0 on legacy runs that predate the field (lever then has nothing to size).
     const toolPerCall: number[] = messages.map((m) =>
         m.toolUses.reduce((s, u) => s + (u.resultTokens ?? 0), 0),
     );
@@ -383,14 +372,14 @@ export function buildThinkingModel(
     // So `later` counts calls after j that share j's branch (parent_tool_use_id),
     // NOT all M-1-j subsequent calls. On a run with no sub-agents every call is
     // in the one (main) branch and this reduces to the flat M-1-j.
-    const branchTotal = new Map<string | null | undefined, number>();
+    const branchTotal = new Map<string | null, number>();
     for (const m of messages) {
         branchTotal.set(
             m.parentToolUseId,
             (branchTotal.get(m.parentToolUseId) ?? 0) + 1,
         );
     }
-    const branchSeen = new Map<string | null | undefined, number>();
+    const branchSeen = new Map<string | null, number>();
     const laterInBranch = messages.map((m) => {
         const seen = branchSeen.get(m.parentToolUseId) ?? 0;
         branchSeen.set(m.parentToolUseId, seen + 1);
@@ -401,7 +390,7 @@ export function buildThinkingModel(
     // same-branch SUCCESSORS — the later calls that actually incur its content's
     // cache write (first successor) and re-reads (the rest). Drives per-message
     // incidence attribution: a cache delta is booked to the row that pays it.
-    const branchPositions = new Map<string | null | undefined, number[]>();
+    const branchPositions = new Map<string | null, number[]>();
     for (let j = 0; j < calls; j++) {
         const key = messages[j].parentToolUseId;
         const arr = branchPositions.get(key);

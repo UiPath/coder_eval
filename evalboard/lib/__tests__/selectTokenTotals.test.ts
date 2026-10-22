@@ -46,7 +46,7 @@ describe("selectTokenTotals", () => {
         const turns: TurnEntry[] = [
             {
                 token_usage: {
-                    input_tokens: 3,
+                    uncached_input_tokens: 3,
                     output_tokens: 240,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 60_000, // snapshot — far below the 120k sum
@@ -62,13 +62,13 @@ describe("selectTokenTotals", () => {
     });
 
     test("falls back to iteration token_usage when the stream has no token data", () => {
-        // Legacy runs predating per-message tokens: every MessageEvent token
-        // field is 0, so the stream total is 0 and we use the iteration aggregate.
+        // Every MessageEvent token field is 0, so the stream total is 0 and the
+        // iteration aggregate wins.
         const messages = [msg({}), msg({})];
         const turns: TurnEntry[] = [
             {
                 token_usage: {
-                    input_tokens: 1000,
+                    uncached_input_tokens: 1000,
                     output_tokens: 500,
                     cache_creation_input_tokens: 200,
                     cache_read_input_tokens: 100,
@@ -99,7 +99,7 @@ describe("selectTokenTotals", () => {
         const turns: TurnEntry[] = [
             {
                 token_usage: {
-                    input_tokens: 834,
+                    uncached_input_tokens: 834,
                     output_tokens: 1834,
                     cache_creation_input_tokens: 51339, // model_usage cumulative
                     cache_read_input_tokens: 41844,
@@ -123,7 +123,7 @@ describe("selectTokenTotals", () => {
         const turns: TurnEntry[] = [
             {
                 token_usage: {
-                    input_tokens: 999999, // deliberately wrong/divergent — must be ignored
+                    uncached_input_tokens: 999999, // deliberately wrong/divergent — must be ignored
                     output_tokens: 999999,
                     cache_creation_input_tokens: 999999,
                     cache_read_input_tokens: 999999,

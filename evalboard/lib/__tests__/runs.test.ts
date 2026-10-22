@@ -39,12 +39,16 @@ describe("parseCriterionResults", () => {
                 description: "artifact exists",
                 score: 1,
                 evaluation_status: "evaluated",
+                pass_threshold: 0.9,
+                gating: true,
             },
             {
                 criterion_type: "run_command",
                 description: "validator runs",
                 score: 0,
                 evaluation_status: "not_evaluated",
+                pass_threshold: 0.9,
+                gating: true,
             },
         ]);
 
@@ -52,15 +56,6 @@ describe("parseCriterionResults", () => {
             "evaluated",
             "not_evaluated",
         ]);
-    });
-
-    test("legacy results default to evaluated", () => {
-        const [result] = parseCriterionResults([
-            { criterion_type: "file_exists", score: 0 },
-        ]);
-        expect(result.evaluationStatus).toBe("evaluated");
-        expect(result.passThreshold).toBe(0.9);
-        expect(result.gating).toBe(true);
     });
 });
 
@@ -568,7 +563,7 @@ describe("toTaskRow grading split (#212)", () => {
 
 describe("extractComponentShas", () => {
     const baseEnv = {
-        git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        coder_eval: "0.12.14",
         skills_git_commit: "b2c3d4e",
         cli_version: "1.2.0-alpha.20260603.7393",
     };
@@ -595,7 +590,7 @@ describe("extractComponentShas", () => {
         );
     });
 
-    test("legacy runs without tool_plugins are unchanged", () => {
+    test("a run without tool_plugins gets only the core chips", () => {
         const out = extractComponentShas(baseEnv);
         expect(out.map((c) => c.name)).toEqual(["coder_eval", "skills", "cli"]);
     });
@@ -610,15 +605,16 @@ describe("extractComponentShas", () => {
 
     test("drops components whose value is 'unknown' (in-container git SHAs)", () => {
         // Per-task env_info captured in the sandbox can't `git rev-parse` the
-        // coder_eval / skills checkouts, so those come back "unknown"; only the
-        // npm-resolved cli + tool plugins survive.
+        // skills checkout, so it comes back "unknown".
         const out = extractComponentShas({
-            git_commit: "unknown",
             skills_git_commit: "unknown",
             cli_version: "1.2.0-alpha.20260604.7394",
             tool_plugins: { "maestro-tool": "1.2.0-alpha.20260604.7394" },
         });
         expect(out.map((c) => c.name)).toEqual(["cli", "maestro-tool"]);
+        expect(
+            extractComponentShas({ coder_eval: "unknown" }).map((c) => c.name),
+        ).toEqual([]);
     });
 
     // The framework is pinned and consumed by released version (env_info
@@ -633,37 +629,6 @@ describe("extractComponentShas", () => {
         expect(framework?.sha).toBe("0.9.1");
         expect(framework?.url).toBe(
             "https://github.com/UiPath/coder_eval/releases/tag/v0.9.1",
-        );
-    });
-
-    test("the version wins over a git_commit present in the same run", () => {
-        // Both keys are captured on every run; the SHA must not shadow the
-        // version just because it comes first in env_info.
-        const out = extractComponentShas({
-            git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            coder_eval: "0.10.0",
-        });
-        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe("0.10.0");
-    });
-
-    test("falls back to the git SHA when no version was captured", () => {
-        // Legacy runs, and editable checkouts between releases, have only the
-        // SHA — better a tree link than no chip at all.
-        const out = extractComponentShas(baseEnv);
-        const framework = out.find((c) => c.name === "coder_eval");
-        expect(framework?.sha).toBe(baseEnv.git_commit);
-        expect(framework?.url).toBe(
-            `https://github.com/UiPath/coder_eval/tree/${baseEnv.git_commit}`,
-        );
-    });
-
-    test("an 'unknown' version still falls through to the SHA", () => {
-        const out = extractComponentShas({
-            ...baseEnv,
-            coder_eval: "unknown",
-        });
-        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe(
-            baseEnv.git_commit,
         );
     });
 });

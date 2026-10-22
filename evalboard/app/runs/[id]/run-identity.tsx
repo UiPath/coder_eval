@@ -19,7 +19,8 @@ export function RunIdentity({
     model: string | null;
     modelCount: number;
 }) {
-    // Legacy runs identify neither; render nothing rather than an empty frame.
+    // A run with no executed rows identifies neither; render nothing rather
+    // than an empty frame.
     if (!harness && !model) return null;
     return (
         <div className="flex flex-wrap items-center gap-2 pt-1.5">
