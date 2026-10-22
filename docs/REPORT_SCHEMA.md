@@ -191,8 +191,7 @@ no longer `str | null`, so consumers must not string-handle it unconditionally.
 
 ### CriterionResult
 
-A discriminated union on `result_kind` (`basic` / `judge` / `classification`); legacy
-files without `result_kind` are inferred from `criterion_type`. Base fields
+A discriminated union on `result_kind` (`basic` / `judge` / `classification`). Base fields
 (`result_kind="basic"`):
 
 `criterion_type`, `description`, `score` (0.0–1.0), `details`, `error`,
@@ -333,8 +332,7 @@ Serialized fields: `uncached_input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `total_cost_usd`, plus a
 computed **`input_tokens`** (= sum of the three input buckets). Note: `total_tokens`
 is a plain property and is **not** serialized. Cost bills `uncached_input_tokens`,
-not `input_tokens`. Legacy files that only have `input_tokens` are adopted as
-`uncached_input_tokens` on read.
+not `input_tokens`.
 
 ## FinalStatus
 

@@ -167,8 +167,7 @@ render still sees it; the JSON dump excludes it.
 
 The sibling is YAML rather than JSON because the transcript carries multi-line text, which
 YAML's literal block scalar renders as readable paragraphs instead of one line full of `\n`
-escapes. Its consumers are humans. The reader accepts `.json` too, so previously-spilled runs
-keep rendering, and a row with no path at all is a no-op, so old inline records keep working.
+escapes. Its consumers are humans. A row with no path at all is a no-op.
 
 FILE ORDER IS LOAD-BEARING. Each filename is keyed off the criterion's position in its result
 list, and the reader resolves the stored path, so each list must retain its order through

@@ -536,7 +536,7 @@ describe("collectPipelineRuns", () => {
 });
 
 describe("normalizeHarness", () => {
-    test("null/undefined fold to claude-code (legacy pre-stamp runs)", () => {
+    test("null/undefined fold to claude-code", () => {
         expect(normalizeHarness(null)).toBe("claude-code");
         expect(normalizeHarness(undefined)).toBe("claude-code");
     });

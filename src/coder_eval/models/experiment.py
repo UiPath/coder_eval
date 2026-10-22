@@ -326,8 +326,7 @@ class ExperimentResult(BaseModel):  # noqa: CE009 -- persisted result model; rou
         default_factory=dict,
         description=(
             "Raw weighted_score per replicate, keyed variant_id → task_id → [scores]. "
-            "Always populated by aggregate_results; list length equals the replicate count. "
-            "Empty dict only on deserialized results from before this field existed."
+            "Always populated by aggregate_results; list length equals the replicate count."
         ),
     )
 

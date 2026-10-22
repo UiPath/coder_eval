@@ -4,6 +4,7 @@ import {
     DEFAULT_HARNESS,
     KNOWN_HARNESSES,
     harnessColor,
+    normalizeHarness,
     orderHarnesses,
     parseHarnessParam,
     parseHarnessScope,
@@ -98,6 +99,25 @@ describe("parseHarnessScope", () => {
     test("differs from parseHarnessParam exactly on the empty case", () => {
         expect(parseHarnessParam(undefined)).toBe(DEFAULT_HARNESS);
         expect(parseHarnessScope(undefined)).toBeNull();
+    });
+});
+
+describe("normalizeHarness", () => {
+    test("the retired delegate-sdk id folds into delegate", () => {
+        // One Delegate series across the 2026-10-07 switch, and old ?h= links
+        // still land on it.
+        expect(normalizeHarness("delegate-sdk")).toBe("delegate");
+        expect(parseHarnessParam("delegate-sdk")).toBe("delegate");
+        expect(parseHarnessScope("delegate-sdk")).toBe("delegate");
+    });
+
+    test("an Object.prototype key in ?h= stays a plain string", () => {
+        for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+            expect(normalizeHarness(key)).toBe(key);
+            expect(parseHarnessParam(key)).toBe(key);
+            expect(parseHarnessScope(key)).toBe(key);
+            expect(typeof harnessColor(key)).toBe("string");
+        }
     });
 });
 

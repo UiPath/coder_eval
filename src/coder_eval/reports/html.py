@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..analysis import calculate_command_statistics
 from ..durations import format_ms
-from ..models import JUDGE_CRITERION_TYPES, FinalStatus, eval_result_total_cost, sum_costs
+from ..models import FinalStatus, JudgeCriterionResult, eval_result_total_cost, sum_costs
 from ..result_metrics import agent_wall_ms, expected_turns_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         EvaluationResult,
         ExperimentDefinition,
         ExperimentResult,
+        JudgeTranscript,
         TurnRecord,
         VariantAggregate,
     )
@@ -438,16 +439,12 @@ def _render_judge_section(criteria: list[CriterionResult], heading: str = "Judge
     """
     cards: list[str] = []
     for cr in criteria:
-        # criterion_type identifies judges; details/findings/transcript may all
-        # be present (typed JudgeCriterionResult) or in model_extra (round-tripped).
-        if cr.criterion_type not in JUDGE_CRITERION_TYPES:
+        if not isinstance(cr, JudgeCriterionResult):
             continue
-        findings_raw = getattr(cr, "findings", []) or []
-        findings = [str(f).strip() for f in findings_raw if str(f).strip()]
-        transcript = getattr(cr, "transcript", None)
-        if not findings and transcript in (None, {}, []):
+        findings = [str(f).strip() for f in cr.findings if str(f).strip()]
+        if not findings and cr.transcript is None:
             continue
-        cards.append(_render_judge_card(cr, findings, transcript))
+        cards.append(_render_judge_card(cr, findings))
 
     if not cards:
         return ""
@@ -471,7 +468,7 @@ def _extract_rationale(details: str | None) -> str:
     return ""
 
 
-def _render_judge_card(cr: CriterionResult, findings: list[str], transcript: Any) -> str:
+def _render_judge_card(cr: JudgeCriterionResult, findings: list[str]) -> str:
     """Render one judge result as a card (type + score + rationale + findings + transcript)."""
     rationale = _extract_rationale(cr.details)
     rationale_html = f'<div class="judge-rationale">{_esc(rationale)}</div>' if rationale else ""
@@ -487,7 +484,7 @@ def _render_judge_card(cr: CriterionResult, findings: list[str], transcript: Any
             f"</details>"
         )
 
-    transcript_html = _render_judge_transcript(transcript)
+    transcript_html = _render_judge_transcript(cr.transcript)
 
     return (
         '<div class="card judge-card">'
@@ -503,17 +500,11 @@ def _render_judge_card(cr: CriterionResult, findings: list[str], transcript: Any
     )
 
 
-def _render_judge_transcript(transcript: Any) -> str:
-    """Render a JudgeTranscript (or its dict round-trip form) as a disclosure block."""
+def _render_judge_transcript(transcript: JudgeTranscript | None) -> str:
+    """Render a JudgeTranscript as a disclosure block."""
     if transcript is None:
         return ""
-    # Normalize to a plain dict so dict-form (round-tripped) and model-form work the same.
-    if hasattr(transcript, "model_dump"):
-        data = transcript.model_dump()
-    elif isinstance(transcript, dict):
-        data = transcript
-    else:
-        return ""
+    data = transcript.model_dump()
 
     tool_calls = data.get("tool_calls") or []
     raw_verdict = (data.get("raw_verdict") or "").strip()
@@ -526,16 +517,10 @@ def _render_judge_transcript(transcript: Any) -> str:
 
     rows: list[str] = []
     for tc in tool_calls:
-        if isinstance(tc, dict):
-            tool = _esc(str(tc.get("tool_name", "")))
-            detail = _esc(str(tc.get("detail", "")))
-            status = _esc(str(tc.get("status", "")))
-            preview = _esc(str(tc.get("result_preview", "")))
-        else:
-            tool = _esc(getattr(tc, "tool_name", ""))
-            detail = _esc(getattr(tc, "detail", ""))
-            status = _esc(getattr(tc, "status", ""))
-            preview = _esc(getattr(tc, "result_preview", ""))
+        tool = _esc(str(tc.get("tool_name", "")))
+        detail = _esc(str(tc.get("detail", "")))
+        status = _esc(str(tc.get("status", "")))
+        preview = _esc(str(tc.get("result_preview", "")))
         rows.append(
             f"<tr><td class='mono'>{tool}</td><td class='mono dim'>{status}</td>"
             + f"<td class='mono' style='white-space:pre-wrap'>{detail}</td>"

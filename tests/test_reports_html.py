@@ -160,38 +160,31 @@ def test_task_html_renders_judge_section():
     assert "Raw verdict" in html
 
 
-def test_task_html_judge_section_round_trips_from_extras():
-    """Reading task.json back into a base CriterionResult preserves judge fields
-    via ``extra='allow'`` — the Judge Verdicts section must surface them whether
-    they arrive as typed JudgeCriterionResult or as model_extra dicts."""
-    base = CriterionResult(
+def test_task_html_judge_section_survives_task_json_round_trip():
+    from coder_eval.models import JudgeCriterionResult, JudgeTranscript, JudgeTranscriptToolCall
+
+    judge = JudgeCriterionResult(
         criterion_type="agent_judge",
         description="grade project",
         score=0.6,
         details="score=0.600\nrationale: round-tripped",
-        # These come in as extras after a model_validate_json round-trip.
-        findings=["finding via extras"],  # type: ignore[call-arg]
-        transcript={
-            "tool_calls": [
-                {
-                    "tool_name": "Grep",
-                    "detail": "pattern=foo",
-                    "status": "success",
-                    "result_preview": "match",
-                }
+        findings=["finding after reload"],
+        transcript=JudgeTranscript(
+            tool_calls=[
+                JudgeTranscriptToolCall(
+                    tool_name="Grep", detail="pattern=foo", status="success", result_preview="match"
+                )
             ],
-            "duration_seconds": 1.0,
-            "raw_verdict": "raw",
-            "truncated": False,
-            "token_usage": None,
-        },  # type: ignore[call-arg]
+            duration_seconds=1.0,
+            raw_verdict="raw",
+        ),
     )
-    result = _make_result(criteria=[base])
-    html = HTMLReportGenerator.generate_task_html(result)
+    reloaded = EvaluationResult.model_validate_json(_make_result(criteria=[judge]).model_dump_json())
+    html = HTMLReportGenerator.generate_task_html(reloaded)
 
     assert "Judge Verdicts (1)" in html
     assert "round-tripped" in html
-    assert "finding via extras" in html
+    assert "finding after reload" in html
     assert "pattern=foo" in html
 
 
@@ -232,7 +225,7 @@ def test_task_html_minimal_success():
                 commands=[
                     _make_command("Write", 0, parameters={"file_path": "Main.cs"}, result_summary="File created"),
                 ],
-                token_usage=TokenUsage(input_tokens=150, output_tokens=80),
+                token_usage=TokenUsage(uncached_input_tokens=150, output_tokens=80),
             )
         ],
     )
@@ -631,7 +624,7 @@ def test_variant_html_loads_rich_sections_from_run_dir(tmp_path: Path):
     task_json_dir.mkdir(parents=True)
     eval_result = _make_result()
     eval_result.task_id = "t1"
-    eval_result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=0.02)
+    eval_result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=0.02)
     eval_result.sdk_options = {"permission_mode": "auto", "allowed_tools": ["Bash"], "model": "m"}
     eval_result.environment_info = {"framework_version": "0.1"}
     (task_json_dir / "task.json").write_text(eval_result.model_dump_json())
@@ -792,7 +785,7 @@ def test_write_task_html_returns_none_on_render_failure(tmp_path: Path, monkeypa
 def test_task_html_renders_token_usage():
     result = _make_result()
     result.total_token_usage = TokenUsage(
-        input_tokens=1000,
+        uncached_input_tokens=1000,
         output_tokens=500,
         cache_creation_input_tokens=200,
         cache_read_input_tokens=300,
@@ -800,7 +793,7 @@ def test_task_html_renders_token_usage():
     )
     html = HTMLReportGenerator.generate_task_html(result)
     assert "Token Usage" in html
-    assert "1,000" in html
+    assert '<div class="label">Input (uncached)</div><div class="value">1,000</div>' in html
     assert "500" in html
     assert "$0.0123" in html
 
@@ -885,7 +878,7 @@ def test_task_html_omits_commands_efficiency_when_absent():
 
 def test_task_html_renders_cost_badge_in_header():
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=0.5)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=0.5)
     html = HTMLReportGenerator.generate_task_html(result)
     # Header region ends at the </div> after ".header-bar"
     header = html[: html.index("<h2>") if "<h2>" in html else len(html)]
@@ -976,7 +969,7 @@ def test_task_html_no_expected_turns_badge_when_task_config_none():
 def test_task_html_omits_cost_badge_when_cost_is_none():
     """Cost badge is only rendered when total_cost_usd is populated."""
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=None)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=None)
     html = HTMLReportGenerator.generate_task_html(result)
     header = html[: html.index("<h2>")]
     assert "$" not in header
@@ -985,7 +978,7 @@ def test_task_html_omits_cost_badge_when_cost_is_none():
 def test_task_html_token_usage_cost_na_when_absent():
     """When tokens are recorded but cost is None, Token Usage cell renders N/A."""
     result = _make_result()
-    result.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50, total_cost_usd=None)
+    result.total_token_usage = TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=None)
     html = HTMLReportGenerator.generate_task_html(result)
     token_section = html[html.index("<h2>Token Usage</h2>") :]
     # Next heading demarcates this section

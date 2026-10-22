@@ -76,7 +76,7 @@ export interface RunSummary {
     componentShas: ComponentSha[];
     // What actually produced this run, for the run header. `harness` is the
     // coder-eval AgentKind from the RunConfig stamp (falling back to the per-task
-    // agent_config vote); null only on legacy runs that identify neither.
+    // agent_config vote); null only when no row names one.
     harness: string | null;
     // Dominant per-task `model_used`, with how many distinct models the run
     // touched. Normally 1 — a run is one model — but an A/B experiment fans
@@ -91,13 +91,14 @@ export interface TaskResultSummary {
     // Experiment arm this row belongs to. A run with variants writes one row per
     // (task, variant, replicate) and stores each arm's content under its own
     // <runId>/<variantId>/ subtree, so this — not taskId alone — is what tells
-    // two arms of the same task apart. Null on runs whose run.json predates the
-    // field; every reader falls back to DEFAULT_VARIANT_ID, which is the segment
-    // a single-arm run writes anyway.
+    // two arms of the same task apart. Null on a mature carry-forward row; every
+    // reader falls back to DEFAULT_VARIANT_ID, which is the segment a single-arm
+    // run writes anyway.
     variantId: string | null;
-    // Replicate index of this row, or null when repeats are disabled / on legacy
-    // runs. Repeated runs share taskId, so this disambiguates sibling rows and is
-    // carried in the per-task link (?r=NN) so each replicate opens its own detail.
+    // Replicate index of this row, or null when repeats are disabled or on a
+    // mature carry-forward row. Repeated runs share taskId, so this
+    // disambiguates sibling rows and is carried in the per-task link (?r=NN) so
+    // each replicate opens its own detail.
     replicateIndex: number | null;
     status: string | null;
     weightedScore: number | null;
@@ -119,10 +120,10 @@ export interface TaskResultSummary {
     expectedSeconds: number | null;
     // True when the agent's final iteration emitted a text reply
     // (i.e. ResultMessage.result was non-empty). Lets grid/trends
-    // Turns cells inflate by +1 on legacy runs that lack total_turns.
+    // Turns cells inflate by +1 on a row that lacks total_turns.
     hasFinalReply: boolean;
-    // Per-task token totals from run.json. Null on legacy runs that
-    // don't record per-task token counts. `inputTokens` is the disjoint
+    // Per-task token totals from run.json. Null on a row that records
+    // none (a mature carry-forward row). `inputTokens` is the disjoint
     // uncached slice (run.json `input_tokens` is serialized from
     // TokenUsage.uncached_input_tokens — see run_record.py), so it
     // sits alongside the cache columns without overlap.
@@ -131,11 +132,11 @@ export interface TaskResultSummary {
     cacheCreationTokens: number | null;
     cacheReadTokens: number | null;
     // Model the task ran on (run.json `model_used`). Used to price token
-    // buckets as USD for the Tokens↔USD column toggle. Null on legacy runs.
+    // buckets as USD for the Tokens↔USD column toggle. Null on a mature
+    // carry-forward row.
     model: string | null;
     tags: string[];
-    // Derived primary group. See deriveSkill below for the resolution chain
-    // (new runs use task_path; older runs fall back to a tag heuristic).
+    // Derived primary group. See deriveSkill below for the resolution chain.
     skill: string | null;
     // True when this row is a "mature" task the nightly skipped this run and
     // carried forward as a pass (run.json `mature_skipped`). The task wasn't
@@ -152,8 +153,7 @@ export interface CriterionResult {
     evaluationStatus: "evaluated" | "not_evaluated";
     // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0) means
     // the criterion is informational — measured, but excluded from the score and
-    // the pass/fail gate, so it must not render as PASS/FAIL. Both default the way
-    // pre-existing task.json files behave: gating, threshold 0.9.
+    // the pass/fail gate, so it must not render as PASS/FAIL.
     passThreshold: number;
     gating: boolean;
 }
@@ -246,17 +246,16 @@ export interface MessageEvent {
     // Per-message token usage from the Anthropic API. Summed across grouped
     // raws (one logical emission may span multiple MessageEntry rows when
     // the CLI splits content blocks). null when no raw in the group carried
-    // a usage figure — older runs predating per-message tokens.
+    // a usage figure.
     inputTokens: number | null;
     outputTokens: number | null;
     cacheWriteTokens: number | null;
     cacheReadTokens: number | null;
     // Branch identity for the prompt-cache cascade tree: the Task tool_use_id
-    // that spawned this message's sub-agent, null for the main thread, or
-    // `undefined` when the run never recorded it (legacy). Calls grouped by this
-    // value form a branch whose context is re-read only within itself — a
-    // sub-agent's tokens don't cascade into the main thread or siblings.
-    parentToolUseId: string | null | undefined;
+    // that spawned this message's sub-agent, null for the main thread. Calls
+    // grouped by this value form a branch whose context is re-read only within
+    // itself — a sub-agent's tokens don't cascade into the main thread or siblings.
+    parentToolUseId: string | null;
     // Anthropic's `reasoning_tokens`. ~Always 0 from the SDK, so it is NOT
     // used to attribute thinking output — see thinkingOutputTokens. Kept for
     // completeness. null when no raw in the group recorded it.
@@ -279,7 +278,7 @@ export interface MessageEvent {
     // is the rate-accurate per-message attribution. Actual per-call cost (LiteLLM
     // backend) is NOT distributed here — it lives in the separate providerCalls
     // per-call table. null when the model is unpriced or no token figure was
-    // recorded (older runs).
+    // recorded.
     costUsd: number | null;
     // Only set on a `reconciliation` row: the human-readable explanation of why
     // these tokens are unattributed (e.g. fixed prompt overhead + sub-agent
@@ -307,8 +306,8 @@ export interface MessageToolUse {
     // UNIONED rather than summed. `durationMs` alone cannot do that: two
     // concurrent 5s calls sum to 10s of wall clock that only took 5, and a
     // residual computed against the sum goes negative for a healthy run.
-    // Null on a call the harness never timed, or on a run predating the
-    // fields — such a call falls back to `durationMs` (see busyMs callers).
+    // Null on a call the harness never timed or never bounded (the retired
+    // `delegate-sdk` adapter recorded only `durationMs`).
     execStartMs: number | null;
     execEndMs: number | null;
     isError: boolean;
@@ -320,8 +319,7 @@ export interface MessageToolUse {
     outputTokens: number | null;
     // Approx token size of THIS tool's result content (measured from the
     // untruncated result, cache-independent). Drives the cost simulator's
-    // tool-output lever — works whether or not prompt caching was enabled. null
-    // on runs predating the field.
+    // tool-output lever — works whether or not prompt caching was enabled.
     resultTokens: number | null;
 }
 
@@ -339,8 +337,7 @@ export interface TaskDetail extends TaskResultSummary {
     // environment_info (cli + @uipath/*-tool plugins) — the versions that
     // actually ran for this task, which can diverge from the run-level
     // aggregate when tool resolution drifts mid-run (a task that invokes
-    // `uip <tool>` can pull a different alpha than its siblings). Empty for
-    // legacy task.json files captured before environment_info existed.
+    // `uip <tool>` can pull a different alpha than its siblings).
     componentShas: ComponentSha[];
     finalStatus: string | null;
     errorMessage: string | null;
@@ -354,12 +351,10 @@ export interface TaskDetail extends TaskResultSummary {
     // last turn's ResultMessage.result. Renders as the trailing entry in
     // the Turn timeline so the (5) header reconciles with the 4 tool calls.
     finalAssistantText: string | null;
-    // Per-assistant-message timeline data. Empty array for legacy task.json
-    // files that don't have iterations[].messages; the message-timeline
-    // section then doesn't render.
+    // Per-assistant-message timeline data. Empty when the task produced no
+    // messages; the message-timeline section then doesn't render.
     messages: MessageEvent[];
-    // Per-task token totals summed across iterations. All zeros for legacy
-    // runs that don't record per-iteration token_usage.
+    // Per-task token totals summed across iterations.
     tokens: TokenTotals;
     // Per-sub-agent token breakdown, derived by grouping the parsed messages on
     // `parentToolUseId` (the spawning Agent call's tool_use_id). Each sub-agent's
@@ -499,12 +494,12 @@ export function aggregateSubAgentUsage(
 export interface RawTaskResult {
     task_id?: string;
     // Experiment arm that produced this row (the <variant> sub-dir). Written by
-    // run_record.py on every run; absent on runs that predate it, which
-    // read as DEFAULT_VARIANT_ID.
+    // run_record.py on every executed row; absent on a mature carry-forward row,
+    // which reads as DEFAULT_VARIANT_ID.
     variant_id?: string | null;
     // Replicate index of this row (the <variant>/<task>/<NN> sub-dir). Repeated
     // runs of one task share a task_id; this is what tells the rows apart. Null
-    // on runs that didn't track replicates (repeats disabled / legacy run.json).
+    // when repeats are disabled.
     replicate_index?: number | null;
     status?: string;
     weighted_score?: number;
@@ -533,23 +528,22 @@ export interface RawTaskResult {
     expected_seconds?: number | null;
     // Documented visible-turn count (tool calls + final reply) — the canonical
     // metric the "within expected turns" chart compares against expected_turns.
-    // Absent on runs predating this field; visibleTurnsFromRaw() then reconstructs
-    // it from actual_commands + has_final_reply (the identical formula) so the
-    // metric still populates for historical runs.
+    // Absent on a salvaged run.json (eval_runner `salvage-run`);
+    // visibleTurnsFromRaw() then reconstructs it from actual_commands +
+    // has_final_reply (the identical formula).
     visible_turns?: number | null;
     // True iff the final iteration's ResultMessage.result was non-empty.
-    // Absent on legacy runs predating the field — treated as false.
+    // Absent on a salvaged run.json — treated as false.
     has_final_reply?: boolean;
     tags?: string[];
-    // Source YAML path. Persisted by coder-eval starting with the
-    // task_path PR; absent on older runs (deriveSkill falls back to tags).
+    // Source YAML path.
     task_path?: string | null;
     // Model the task ran on (e.g. "claude-sonnet-4-6"). Used to price token
-    // buckets as USD. Absent on legacy runs.
+    // buckets as USD.
     model_used?: string | null;
     // Per-task agent config; `type` is the harness (coder-eval AgentKind, e.g.
     // "claude-code" | "codex" | "antigravity"). Used to derive the run's harness
-    // when the run-level RunConfig stamp is absent (direct coder-eval / legacy runs).
+    // when the run-level RunConfig stamp is absent (a direct coder-eval run).
     agent_config?: { type?: string | null } | null;
     // Activation enrichment the dashboard folds onto each case row in the nested
     // activation run.json (see cli.py _finalize_activation_run). Absent on skills
@@ -679,13 +673,9 @@ function mapActivation(
     };
 }
 
-// Components captured in run env_info. Each entry may accept multiple keys —
-// the CLI shipped as `cli_git_commit` (when built from source) until
-// coder_eval #276 switched the runner to consume @uipath/cli@alpha from
-// GitHub Packages, after which it's `cli_version` (output of `uip --version`,
-// e.g. "0.1.21-alpha.234"). New keys come first so they win when both
-// happen to be present. `nonShaUrl` is the link target used when the env
-// value isn't a SHA (e.g. an npm package version) — null means no link.
+// Components captured in run env_info, one key each. `nonShaUrl` is the link
+// target used when the env value isn't a SHA (e.g. an npm package version) —
+// null means no link.
 const COMPONENTS: {
     display: string;
     repo: string | null;
@@ -694,39 +684,28 @@ const COMPONENTS: {
     // precedence over `nonShaUrl` when it returns a URL. This is how a released
     // component links at its own version rather than at a moving list page.
     versionUrl?: (version: string) => string | null;
-    keys: string[];
+    key: string;
 }[] = [
     {
         display: "coder_eval",
         repo: "UiPath/coder_eval",
         nonShaUrl: null,
-        // Releases are tagged `v<version>` by the Release workflow, so the
-        // version resolves to an exact release page. Runs from before tagging
-        // began (v0.8.2) recorded a hardcoded `0.1.0` that was never released;
-        // render those as plain text rather than a link that 404s.
-        versionUrl: (v) =>
-            v === "0.1.0"
-                ? null
-                : `https://github.com/UiPath/coder_eval/releases/tag/v${v}`,
-        // The framework identifies itself by the released package version
-        // (env_info `coder_eval`, e.g. "0.9.1"), which is what the suite
-        // actually pins — so that is the chip, and it links to the release.
-        // `git_commit` is a fallback for two cases the version can't cover: an
-        // editable checkout between releases, and legacy runs written before the
-        // version was captured. It is a SHA, so it links to the tree.
-        keys: ["coder_eval", "git_commit"],
+        // The released package version (e.g. "0.12.14"), which is what the
+        // suite pins. The Release workflow tags `v<version>`.
+        versionUrl: (v) => `https://github.com/UiPath/coder_eval/releases/tag/v${v}`,
+        key: "coder_eval",
     },
     {
         display: "skills",
         repo: "UiPath/skills",
         nonShaUrl: null,
-        keys: ["skills_git_commit"],
+        key: "skills_git_commit",
     },
     {
         display: "cli",
         repo: "UiPath/cli",
         nonShaUrl: "https://github.com/UiPath/cli/pkgs/npm/cli/versions",
-        keys: ["cli_version", "cli_git_commit"],
+        key: "cli_version",
     },
 ];
 
@@ -736,20 +715,12 @@ export function extractComponentShas(
     if (!env) return [];
     const out: ComponentSha[] = [];
     for (const comp of COMPONENTS) {
-        let value: string | null = null;
-        for (const k of comp.keys) {
-            const v = env[k];
-            // Skip "unknown": the git-SHA components (coder_eval / skills)
-            // resolve to that string when env_info is captured in-container
-            // (the task sandbox has no repo checkout to `git rev-parse`), and
-            // an unknown SHA is never worth a chip. npm-based versions
-            // (cli / *-tool) still resolve in-container, so those survive.
-            if (typeof v === "string" && v && v.toLowerCase() !== "unknown") {
-                value = v;
-                break;
-            }
+        const value = env[comp.key];
+        // Skip "unknown": what env_info records for a value it could not
+        // resolve (in-container there is no repo checkout to `git rev-parse`).
+        if (typeof value !== "string" || !value || value.toLowerCase() === "unknown") {
+            continue;
         }
-        if (value == null) continue;
         let url: string | null = null;
         if (comp.repo && SHA_RE.test(value)) {
             url = `https://github.com/${comp.repo}/tree/${value}`;
@@ -871,10 +842,10 @@ function taskContentBase(
 }
 
 // Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
-//   1. New runs: parse "tasks/<skill>/..." from task_path — the folder a task
-//      lives under in the skills repo is the authoritative skill name.
-//   2. Older runs (or any task without a recognisable task_path): pick the
-//      first skill-shaped tag. Convention in the skills repo: every task
+//   1. Parse "tasks/<skill>/..." from task_path — the folder a task lives
+//      under in the skills repo is the authoritative skill name.
+//   2. A task_path outside a tasks/<skill>/ folder: pick the first
+//      skill-shaped tag. Convention in the skills repo: every task
 //      lists its folder name as the first tag, and skill folders are
 //      either "activation" or "uipath-*". The prefix check filters out
 //      generic tags like "smoke"/"e2e" that may appear if a task is
@@ -1211,8 +1182,8 @@ export interface RunOverview {
 // present, else reconstructed as actual_commands + (1 if final reply). That
 // reconstruction is the documented turn rule (tool calls + final reply) and is
 // provably identical to the persisted field — so it backfills the "within
-// expected turns" metric for runs written before `visible_turns` existed. null
-// when neither signal is present.
+// expected turns" metric for a salvaged run.json. null when neither signal is
+// present.
 export function visibleTurnsFromRaw(t: {
     visible_turns?: number | null;
     actual_commands?: number | null;
@@ -1227,8 +1198,8 @@ export function visibleTurnsFromRaw(t: {
 
 // The run's harness + environment. Prefers the run-level RunConfig stamped by
 // eval_runner into environment_info.run_config; falls back to the most common
-// per-task agent_config.type (direct coder-eval / legacy runs carry no stamp).
-// Returns null harness when nothing identifies it (legacy pre-harness runs).
+// per-task agent_config.type (a direct coder-eval run carries no stamp).
+// Returns null harness when no row names one (nothing executed).
 export function extractRunConfig(data: RawRunJson): {
     harness: string | null;
     environment: string | null;
@@ -1585,20 +1556,14 @@ interface MessageEntry {
     completed_at?: string | null;
     generation_duration_ms?: number | null;
     content_blocks?: ContentBlockEntry[];
-    // Anthropic API message_id. The Claude Code CLI splits one API response
-    // into per-block-kind events that share this id; we collapse by id when
-    // present, falling back to a wall-clock gap heuristic for older runs that
-    // didn't record it.
+    // API message id. The CLI splits one API response into per-block-kind
+    // events that share this id, and parseMessages collapses by it.
     message_id?: string | null;
     // The Task tool_use_id that spawned this message's sub-agent, or null for
-    // the main thread. KEY ABSENT (undefined) on runs that predate branch
-    // capture — distinct from an explicit null. Used to model the cache cascade
-    // as a tree; its absence disables the cost simulator (we can't tell whether
-    // sub-agents ran, so a flat cascade would be wrong).
+    // the main thread. Used to model the cache cascade as a tree.
     parent_tool_use_id?: string | null;
-    // Per-message token usage (recorded since coder_eval #336). Absent on
-    // legacy runs. cache_* keys here are the message-record names, distinct
-    // from the iteration token_usage's cache_*_input_tokens.
+    // Per-message token usage. cache_* keys here are the message-record names,
+    // distinct from the iteration token_usage's cache_*_input_tokens.
     input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_tokens?: number | null;
@@ -1649,12 +1614,8 @@ export interface TurnEntry {
 }
 
 interface TokenUsageEntry {
-    // On current runs `input_tokens` is the TOTAL prompt input (uncached +
-    // cache-creation + cache-read); `uncached_input_tokens` is the disjoint
-    // fresh slice we actually want to display next to the cache columns. Legacy
-    // runs predate the split and carry only `input_tokens`, which back then
-    // meant the disjoint uncached slice — so it's the correct fallback.
-    input_tokens?: number | null;
+    // The disjoint fresh slice shown next to the cache columns. (`input_tokens`,
+    // also serialized, is the TOTAL prompt input and would double-count them.)
     uncached_input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
@@ -1662,8 +1623,7 @@ interface TokenUsageEntry {
     total_cost_usd?: number | null;
 }
 
-// Token counts summed across all iterations of a task. Optional so legacy
-// task.json files without per-iteration token_usage just expose zeros.
+// Token counts summed across all iterations of a task.
 export interface TokenTotals {
     input: number;
     output: number;
@@ -1757,22 +1717,6 @@ function previewString(value: unknown, cap: number): string | null {
     s = s.replace(/[\r]+/g, "");
     if (s.length > cap) s = s.slice(0, cap - 1) + "…";
     return s.length > 0 ? s : null;
-}
-
-// Gap between one assistant message's completed_at and the next message's
-// started_at that we treat as "same model emission". coder_eval records each
-// content-block kind (thinking / tool_use / text) as its own MessageEntry,
-// so a single conceptual turn often spans 2-3 entries with gap≈0. Tool
-// execution sits *between* turns and adds 100ms+, so 100ms is a safe split
-// threshold. Anything below is grouped into one logical turn; this is also
-// how parallel tool_use blocks (whether one MessageEntry with N tool_use
-// blocks, or N MessageEntries emitted instantaneously) get folded together.
-const SAME_EMISSION_GAP_MS = 100;
-
-function tsMs(s: string | null | undefined): number | null {
-    if (!s) return null;
-    const t = Date.parse(s);
-    return Number.isNaN(t) ? null : t;
 }
 
 // ~4 chars/token is the common rough estimate for English/code. The exact
@@ -1876,13 +1820,10 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
         type Raw = {
             startedAt: string | null;
             completedAt: string | null;
-            startMs: number | null;
-            endMs: number | null;
             generationMs: number | null;
             messageId: string | null;
-            // null = main thread, string = sub-agent branch, undefined = run
-            // didn't record branch info (legacy).
-            parentToolUseId: string | null | undefined;
+            // null = main thread, string = sub-agent branch.
+            parentToolUseId: string | null;
             blockTypes: ("thinking" | "tool_use" | "text")[];
             thinkingParts: string[];
             textParts: string[];
@@ -1906,21 +1847,15 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             const r: Raw = {
                 startedAt: msg.started_at ?? null,
                 completedAt: msg.completed_at ?? null,
-                startMs: tsMs(msg.started_at),
-                endMs: tsMs(msg.completed_at),
                 generationMs:
                     typeof msg.generation_duration_ms === "number"
                         ? msg.generation_duration_ms
                         : null,
                 messageId: typeof msg.message_id === "string" ? msg.message_id : null,
-                // Preserve the absent/null distinction: undefined when the run
-                // never wrote the key (legacy), null when explicitly main thread.
                 parentToolUseId:
-                    msg.parent_tool_use_id === undefined
-                        ? undefined
-                        : typeof msg.parent_tool_use_id === "string"
-                          ? msg.parent_tool_use_id
-                          : null,
+                    typeof msg.parent_tool_use_id === "string"
+                        ? msg.parent_tool_use_id
+                        : null,
                 blockTypes: [],
                 thinkingParts: [],
                 textParts: [],
@@ -2069,9 +2004,10 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             raws.push(r);
         }
 
-        // Second pass: collapse consecutive raws that share a model emission
-        // (tiny gap between prev.end and next.start). Parallel tool_use lives
-        // entirely inside one emission, so it ends up in one MessageEvent.
+        // Second pass: collapse consecutive raws that share a message_id. The
+        // CLI splits one API response into one entry per content-block kind,
+        // and parallel tool_use lives inside one response, so each response
+        // ends up as one MessageEvent.
         let group: Raw[] = [];
         const flush = () => {
             if (group.length === 0) return;
@@ -2083,9 +2019,8 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             const toolUses: MessageToolUse[] = [];
             let genSum = 0;
             let haveGen = false;
-            // Each raw is one content-block emission (see SAME_EMISSION_GAP_MS
-            // comment), so its generation_duration_ms attaches to whichever
-            // block kind it carries.
+            // Each raw is one content-block emission, so its
+            // generation_duration_ms attaches to whichever block kind it carries.
             let thinkSum = 0;
             let haveThink = false;
             let textSum = 0;
@@ -2277,21 +2212,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 continue;
             }
             const prev = group[group.length - 1];
-            // Prefer message_id when both raws have one — that's the
-            // authoritative signal that the CLI split a single API response.
-            // Fall back to the wall-clock gap heuristic for older runs that
-            // didn't record message_id.
-            let sameEmission: boolean;
-            if (prev.messageId != null && r.messageId != null) {
-                sameEmission = prev.messageId === r.messageId;
-            } else {
-                const gap =
-                    prev.endMs != null && r.startMs != null
-                        ? r.startMs - prev.endMs
-                        : Number.POSITIVE_INFINITY;
-                sameEmission = gap <= SAME_EMISSION_GAP_MS;
-            }
-            if (sameEmission) {
+            if (prev.messageId != null && prev.messageId === r.messageId) {
                 group.push(r);
             } else {
                 flush();
@@ -2464,22 +2385,8 @@ export function replicateDirName(replicate: number): string {
     return String(replicate).padStart(2, "0");
 }
 
-// Runs uploaded before the replicate-index layout (<taskDir>/task.json) and
-// after (<taskDir>/<NN>/task.json) coexist in the blob store. Prefer the
-// nested replicate shape; fall back to flat ONLY for replicate 0 (the implicit
-// single result a legacy run had) so legacy runs keep rendering. A missing
-// non-zero replicate resolves to its (absent) nested dir → read fails → 404.
-async function resolveTaskContentDir(
-    taskDir: string,
-    replicate: number,
-): Promise<string> {
-    const nested = path.join(taskDir, replicateDirName(replicate));
-    try {
-        await fs.access(path.join(nested, "task.json"));
-        return nested;
-    } catch {
-        return replicate === 0 ? taskDir : nested;
-    }
+function replicateContentDir(taskDir: string, replicate: number): string {
+    return path.join(taskDir, replicateDirName(replicate));
 }
 
 // Row matcher shared by every per-task reader: a row belongs to (taskId,
@@ -2526,9 +2433,9 @@ export async function resolveVariantId(
 }
 
 // Replicate indices present for a task in this run, ascending (e.g. [0, 1, 2]
-// for a task run 3×). Drives the task page's run selector. A non-repeated or
-// legacy run yields [0] (rows carry no replicate_index → treated as 0); an
-// unknown task yields []. Reads the same run.json readTaskDetail matches against.
+// for a task run 3×). Drives the task page's run selector. A non-repeated run
+// yields [0] (rows carry no replicate_index → treated as 0); an unknown task
+// yields []. Reads the same run.json readTaskDetail matches against.
 export async function readTaskReplicates(
     runId: string,
     taskId: string,
@@ -2562,20 +2469,17 @@ export async function readTaskDetail(
         : await readRunJson(runId, source);
     // A run with variants repeats a task_id once per arm and a repeated run
     // repeats it once per replicate, so the row is only identified by all three
-    // of (task_id, variant_id, replicate_index). Legacy rows carry neither
-    // variant_id nor replicate_index (null) → treated as the default arm at
-    // replicate 0, so an old single-result run still resolves.
+    // of (task_id, variant_id, replicate_index). A null replicate_index
+    // (repeats disabled) reads as replicate 0.
     const matches = (data?.task_results ?? []).filter((t) =>
         rowMatches(t, taskId, variantId),
     );
-    const rawTask =
-        matches.find((t) => (t.replicate_index ?? 0) === replicate) ??
-        (replicate === 0 ? matches[0] : undefined);
+    const rawTask = matches.find((t) => (t.replicate_index ?? 0) === replicate);
     if (!rawTask) return null;
     const row = toTaskRow(rawTask);
 
     const taskDir = taskContentBase(runId, taskId, variantId, source);
-    const contentDir = await resolveTaskContentDir(taskDir, replicate);
+    const contentDir = replicateContentDir(taskDir, replicate);
     const task = await readJson<{
         final_status?: string;
         error_message?: string;
@@ -2602,11 +2506,9 @@ export async function readTaskDetail(
     );
 
     const artifactRoot = path.join(contentDir, "artifacts");
-    // relPath is stored relative to the run root so the /api/file route can
-    // resolve it against the source's <cacheDir>/<runId> without needing to know the task
-    // subdir. New layout yields `default/<task_id>/00/artifacts/...`; flat
-    // layout yields `default/<task_id>/artifacts/...`. `resolveSafePath`
-    // validates parts[0] and parts[1], so both shapes pass the check.
+    // relPath is stored relative to the run root (`<variant>/<task_id>/<NN>/
+    // artifacts/...`) so the /api/file route can resolve it against the
+    // source's <cacheDir>/<runId> without needing to know the task subdir.
     const artifactPrefix = path.relative(
         path.join(dir, runId),
         artifactRoot,
@@ -2666,7 +2568,7 @@ export async function readTaskDetail(
     return {
         ...row,
         // task.json is the richer source: it carries the trailing text
-        // even on legacy run.json files that predate has_final_reply.
+        // even when the run.json row has no has_final_reply (a salvaged run).
         // Overriding row.hasFinalReply here keeps detail TURNS, Turn
         // timeline header, and the reply row in lockstep.
         hasFinalReply: finalAssistantText != null,
@@ -2693,19 +2595,13 @@ export async function readTaskDetail(
     };
 }
 
-// Pick the run's authoritative cumulative token totals. The per-message stream
-// run-level token totals, picking the more complete of two sources:
-//   - iteration token_usage: on current runs this is built from the SDK
-//     ResultMessage `model_usage` (cumulative per-model billing, reconciles to
-//     total_cost_usd, and INCLUDES sub-agent cache-creation/input). On legacy
-//     runs it is the old ResultMessage `usage` snapshot, which under-reports the
-//     cache-read cascade ~2-3x.
-//   - per-message stream sum: deduped per message_id; captures the cache-read
-//     cascade but UNDER-reports sub-agent tokens (those emissions aren't fully
-//     bubbled into the stream).
-// Neither dominates across both run vintages, so pick the larger total — the
-// more complete figure. New runs → iteration (model_usage) wins; legacy runs →
-// per-message wins over the stale snapshot.
+// Pick the run's authoritative cumulative token totals. When the harness writes a
+// reconciliation entry per turn (as claude-code does), the message stream sums
+// exactly to the billed total, so the stream wins outright. Otherwise pick the
+// more complete of two sources:
+//   - iteration token_usage: the harness's own cumulative per-turn figure.
+//   - per-message stream sum: deduped per message_id; can UNDER-report
+//     sub-agent tokens and fixed prompt overhead.
 export function selectTokenTotals(
     messages: MessageEvent[],
     turns: TurnEntry[],
@@ -2718,15 +2614,13 @@ export function selectTokenTotals(
     if (messages.some((m) => m.role === "reconciliation")) {
         return fromMessages;
     }
-    // Legacy / pre-reconciliation runs: the stream may under-report (sub-agent
-    // tokens, fixed prompt overhead). Fall back to the more-complete of the two
-    // sources, as before.
+    // No reconciliation entry: the stream may under-report (sub-agent tokens,
+    // fixed prompt overhead), so take the more complete of the two sources.
     const fromIterations = sumTokenTotals(turns);
     return fromIterations.total >= fromMessages.total ? fromIterations : fromMessages;
 }
 
-// Token totals from the iteration token_usage aggregate (model_usage-derived on
-// current runs; the ResultMessage snapshot on legacy runs).
+// Token totals from the iteration token_usage aggregate.
 function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     let input = 0;
     let output = 0;
@@ -2735,9 +2629,7 @@ function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     for (const t of turns) {
         const tu = t.token_usage;
         if (!tu) continue;
-        // Disjoint uncached slice: prefer the explicit field on current runs,
-        // fall back to legacy `input_tokens` (which meant uncached back then).
-        input += tu.uncached_input_tokens ?? tu.input_tokens ?? 0;
+        input += tu.uncached_input_tokens ?? 0;
         output += tu.output_tokens ?? 0;
         cacheCreation += tu.cache_creation_input_tokens ?? 0;
         cacheRead += tu.cache_read_input_tokens ?? 0;
@@ -2835,7 +2727,7 @@ export async function readLogTail(
         variantId,
     );
     const taskDir = taskContentBase(runId, taskId, variantId, source);
-    const contentDir = await resolveTaskContentDir(taskDir, replicate);
+    const contentDir = replicateContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
     if (raw.length <= maxBytes) return raw;
@@ -2868,7 +2760,7 @@ export async function readConversationLog(
         variantId,
     );
     const taskDir = taskContentBase(runId, taskId, variantId, source);
-    const contentDir = await resolveTaskContentDir(taskDir, replicate);
+    const contentDir = replicateContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "conversation.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
     if (raw.length <= maxBytes) return raw;

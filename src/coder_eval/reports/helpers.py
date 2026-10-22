@@ -164,7 +164,7 @@ def paired_comparison(result: ExperimentResult, confidence: float = 0.95) -> Pai
     per_rep_b = result.per_replicate_scores.get(vid_b, {})
     common_tasks = sorted(t for t in set(per_rep_a) & set(per_rep_b) if per_rep_a[t] and per_rep_b[t])
     if not common_tasks:
-        # No shared task, or per_replicate_scores absent (results from before it existed).
+        # No task scored on both sides.
         return None
 
     # Tasks seen for at least one variant but not paired (missing or empty on the

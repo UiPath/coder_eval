@@ -8,16 +8,14 @@ callers strip it via ``exclude={...}``.
 - ``spill_judge_transcripts``: called by the orchestrator just before it writes
   ``task.json``.
 - ``load_judge_transcripts``: called by re-render paths after
-  ``EvaluationResult.model_validate_json``. Accepts both ``.yaml`` (current) and
-  ``.json`` (previous), and treats ``transcript_path is None`` as a no-op, so old
-  inline records keep working.
+  ``EvaluationResult.model_validate_json``. Treats ``transcript_path is None`` as
+  a no-op.
 
 Rationale: .claude/notes/persistence.md § Judge persistence
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -157,10 +155,7 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
     and attaches the parsed dict on ``transcript`` so HTML / markdown renderers
     see the same shape they get during the original run.
 
-    Missing sibling files are skipped silently and logged at debug level —
-    runs predating this feature have no sibling files and render fine via
-    their inline transcript (preserved through ``CriterionResult``'s
-    ``extra="allow"`` round-trip).
+    Missing sibling files are skipped and logged at debug level.
 
     Returns the count of transcripts loaded.
     """
@@ -211,9 +206,7 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         sibling = resolved_sibling
         try:
             text = sibling.read_text(encoding="utf-8")
-            # JSON for legacy siblings; everything else through PyYAML, which
-            # accepts JSON as a subset anyway.
-            data = json.loads(text) if path.endswith(".json") else yaml.safe_load(text)
+            data = yaml.safe_load(text)
         except Exception as e:
             logger.warning("Failed to read judge transcript %s: %s", sibling, e)
             continue

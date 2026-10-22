@@ -241,7 +241,7 @@ class TestRowCostProjection:
         assert row["total_cost_usd"] == pytest.approx(0.12)
 
     @staticmethod
-    def _simulated(**env) -> EvaluationResult:
+    def _simulated(simulator_model: str | None) -> EvaluationResult:
         return _result(
             [_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))],
             simulation=SimulationTelemetry(
@@ -251,26 +251,18 @@ class TestRowCostProjection:
                 simulator_input_tokens=1_000_000,
                 simulator_output_tokens=100_000,
                 total_turns=3,
+                simulator_model=simulator_model,
             ),
-            environment_info=env,
         )
 
-    def test_simulator_prices_at_the_route_model_not_the_subject(self):
-        """UserSimulator pins model=None, so it bills at BEDROCK_MODEL.
-
-        A task that pins ``agent.model`` would otherwise mis-bill every simulated
-        row. Here the subject is sonnet-5 ($2/$10) while the route is haiku-4.5
-        ($1/$5), so the simulator must cost the haiku rate.
-        """
-        result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
+    def test_simulator_prices_at_its_own_model_not_the_subject(self):
+        """The subject is sonnet-5 ($2/$10); the simulator ran on haiku-4.5 ($1/$5)."""
+        result = self._simulated("claude-haiku-4-5-20251001")
         # 1M uncached input at $1/MTok + 100K output at $5/MTok.
         assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(1.00 + 0.50)
 
-    def test_simulator_falls_back_to_the_subject_model_off_bedrock(self):
-        """A non-Bedrock route names no model on the record; the subject's is the best available."""
-        result = self._simulated()
-        # sonnet-5 at $2/$10 per MTok: 1M uncached input + 100K output.
-        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(2.0 + 1.0)
+    def test_no_simulator_model_means_no_simulator_cost(self):
+        assert eval_result_to_task_dict(self._simulated(None))["simulator_cost_usd"] is None
 
     def test_single_shot_row_has_no_simulator_cost(self):
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
@@ -278,7 +270,7 @@ class TestRowCostProjection:
 
     def test_unpriced_simulator_route_is_skipped_not_fatal(self):
         """An unpriced simulator route leaves the rest of the row intact."""
-        result = self._simulated(bedrock_model="claude-sonnet-99")
+        result = self._simulated("claude-sonnet-99")
         result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)
         row = eval_result_to_task_dict(result)
         assert row["simulator_cost_usd"] is None
@@ -299,8 +291,8 @@ class TestTotalCost:
                 simulator_input_tokens=1_000_000,
                 simulator_output_tokens=0,
                 total_turns=2,
+                simulator_model="claude-haiku-4-5-20251001",
             ),
-            environment_info={"bedrock_model": "claude-haiku-4-5-20251001"},
         )
         result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=1.0)
         result.success_criteria_results = [

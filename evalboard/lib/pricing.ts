@@ -119,8 +119,8 @@ export function tokenBucketUsd(
 // SDK only reports a cumulative per-turn `total_cost_usd`, never per message.
 //
 // Returns null when the model isn't in the rate table (can't price it) or when
-// no token figure was recorded for the message (older runs predating
-// per-message tokens) — null renders as "—" rather than a misleading $0.00.
+// no token figure was recorded for the message — null renders as "—" rather
+// than a misleading $0.00.
 export function messageCostUsd(usage: {
     model: string | null;
     inputTokens: number | null;

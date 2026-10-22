@@ -58,10 +58,8 @@ class MessageIdDeclared(BaseRule):
                         "so every message it builds shares one empty identity. Pass the field "
                         "with a real value: the CLI's own "
                         "id where the stream carries one, else synthesize it the way Codex does "
-                        "(f'{turn_id}-msg-{gen_index}'). Antigravity shipped without it: the "
-                        "evalboard then falls back to its SAME_EMISSION_GAP_MS wall-clock gap to "
-                        "group emissions, and a harness whose generation windows are contiguous "
-                        "has every one of a turn's generations collapse into one row. See "
-                        "docs/agents/HARNESS_PARITY.md.",
+                        "(f'{turn_id}-msg-{gen_index}'). The evalboard joins a response's emissions "
+                        "by this id only, so without it every content block renders as its own "
+                        "timeline row. See docs/agents/HARNESS_PARITY.md.",
                     )
         self.generic_visit(node)

@@ -108,9 +108,8 @@ export function ThinkingSimulator({
             )}
             {noTools && (
                 <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded p-2">
-                    This run recorded no tool-result tokens (no tool calls, or a
-                    run predating per-tool result sizing), so the tool-output
-                    lever has nothing to scale.
+                    This run recorded no tool-result tokens (no tool calls), so
+                    the tool-output lever has nothing to scale.
                 </div>
             )}
 

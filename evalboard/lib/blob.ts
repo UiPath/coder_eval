@@ -327,11 +327,8 @@ export async function ensureTaskDir(
         else await ensureRunSummary(container, runId, destRoot);
         const c = await getContainer(container);
         const ops: Promise<void>[] = [];
-        // `listBlobsFlat` recurses, so both the flat legacy layout
-        // (`<variant>/<task>/task.json`) and the nested replicate layout
-        // (`<variant>/<task>/00/task.json`) download unchanged — the prefix
-        // scope is the task subtree either way. `resolveTaskContentDir` in
-        // runs.ts then picks the right shape at render time.
+        // `listBlobsFlat` recurses, so the prefix pulls every replicate
+        // (`<variant>/<task>/<NN>/`) of the task in one listing.
         //
         // The activation sub-run is single-variant by construction (it is a
         // nested run of its own), so it keeps the literal `default` segment.
