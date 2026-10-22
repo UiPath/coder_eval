@@ -415,18 +415,15 @@ its content blocks renders as its own row. Antigravity's `Step` stream carries
 no message id, so the harness synthesizes one. CE060 makes the kwarg mandatory
 in `src/coder_eval/agents/` for that reason.
 
-The collapse is a *display* defect, not an accounting one — the consumer SUMS a
-group's token buckets and durations, so every total, percentage and cost is
-identical either way, as is the reconciliation residual. But it is not
-cosmetic, and three displayed figures do move when a turn stops collapsing:
-the thinking-cost simulator's per-call cache cascade (`calls` in
-`evalboard/lib/thinkingSim.ts` is the number of grouped emissions, and the
-cascade is quadratic in it — on a single-shot run it was pinned at one call,
-so every coefficient was zero), the `Messages` count and timeline heading, and
-the "slow generation" count, whose 10 s bar was being applied to a whole turn's
-summed generation time. All three move toward the figure they were always
-meant to report, so the fix corrects them rather than breaking them — but a
-trend compared across this change is not comparing like with like.
+A missing `message_id` is a *display* defect, not an accounting one — the
+consumer SUMS a group's token buckets and durations, so every total, percentage
+and cost is identical however the blocks are grouped, as is the reconciliation
+residual. But it is not cosmetic: each split block counts as its own emission,
+which skews three displayed figures — the thinking-cost simulator's per-call
+cache cascade (`calls` in `evalboard/lib/thinkingSim.ts` is the number of
+grouped emissions, and the cascade is quadratic in it), the `Messages` count
+and timeline heading, and the "slow generation" count, whose 10 s bar applies
+per emission.
 
 The two synthetic schemes read differently on purpose: Codex deliberately REPEATS one
 id across the sub-messages of a single generation — that is exactly the "the

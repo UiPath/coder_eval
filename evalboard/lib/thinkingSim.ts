@@ -273,12 +273,6 @@ export function buildThinkingModel(
     const calls = messages.length;
     if (calls === 0) return null;
 
-    // The prompt-cache cascade is a TREE, not a flat list. Sub-agent (Task tool)
-    // calls bubble up into the same message stream, but each sub-agent has its
-    // own context that is re-read only within its own branch — never by the main
-    // thread or sibling sub-agents (you can see it as the per-call cache_read
-    // collapsing back to a small base each time a sub-agent spawns). Each call's
-    // branch id (parent_tool_use_id) is what models that tree.
     const perMessageOutputSum = messages.reduce(
         (s, m) => s + (m.outputTokens ?? 0),
         0,

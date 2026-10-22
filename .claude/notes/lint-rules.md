@@ -717,12 +717,12 @@ CE058/CE059, both of which are about timing. Antigravity omitted the kwarg, so t
 defaulted to `None` on every message it ever recorded, and the evalboard — which then
 grouped assistant emissions by `message_id`, else by a 100 ms wall-clock gap — collapsed a
 whole turn's generations into ONE timeline row as soon as the harness's generation windows
-became contiguous (the gap is then exactly 0 ms, always). Nothing failed: the consumer SUMS the group, so the totals and the
-reconciliation invariant stayed right, and the golden snapshots had ratified the `null` on
-the day they were written — a snapshot is regenerated from whatever the code currently
-does, so it catches a later change and never an initial omission. The damage was not
-confined to the timeline, which is why "only granularity is lost" was the wrong way to
-describe it: a grouped emission is one API call to the evalboard's thinking-cost
+became contiguous (the gap is then exactly 0 ms, always). Nothing failed: the consumer
+SUMS the group, so the totals and the reconciliation invariant stayed right, and the
+golden snapshots had ratified the `null` on the day they were written — a snapshot is
+regenerated from whatever the code currently does, so it catches a later change and never
+an initial omission. The damage was not confined to the timeline, which is why "only
+granularity is lost" was the wrong way to describe it: a grouped emission is one API call to the evalboard's thinking-cost
 simulator, whose prompt-cache cascade is quadratic in that count, so a single-shot
 Antigravity run had every cascade coefficient pinned at zero; the `Messages` count and the
 10 s slow-generation bar were per-turn too. Deriving the constructor set from each
