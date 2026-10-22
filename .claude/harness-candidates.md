@@ -545,8 +545,9 @@ divergences, so the deferred-work record is one place. Measurements in
   as tool execution. Pinned by `unbounded_cases` in
   `tests/_fixtures/timing_union_cases.json`, which both suites replay.
 
-- [ ] **Pre-existing, surfaced by this work's final review: `TokenUsage._adopt_legacy_input_tokens`
-  double-counts the cache buckets.** The validator copies a legacy record's
+- [x] ~~**Pre-existing, surfaced by this work's final review: `TokenUsage._adopt_legacy_input_tokens`
+  double-counts the cache buckets.**~~ **DONE.** The validator is gone: every run uploaded
+  in the last 30 days stores `uncached_input_tokens`, so no pre-split record is read. The validator copies a legacy record's
   full-prompt `input_tokens` straight into `uncached_input_tokens`, and the
   computed `input_tokens` then adds `cache_creation` + `cache_read` again. A
   legacy record with `input_tokens=1000`, `cache_creation=200`, `cache_read=150`

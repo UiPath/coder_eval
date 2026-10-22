@@ -75,7 +75,7 @@ def eval_result_to_task_dict(
             sub-dir). Repeated runs of the same task share a ``task_id``, so
             without this the row is indistinguishable from its siblings and
             downstream consumers (evalboard) collapse them to one. ``None`` when
-            the caller doesn't track replicates (repeats disabled / legacy).
+            the caller doesn't track replicates (repeats disabled).
     """
 
     ref_similarity: float | None = None

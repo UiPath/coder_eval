@@ -115,8 +115,8 @@ def test_unknown_criterion_type_falls_to_basic() -> None:
     assert cr.model_extra.get("unknown_field") == 42
 
 
-def test_explicit_result_kind_overrides_inference() -> None:
-    """Explicit ``result_kind`` wins over ``criterion_type`` inference."""
+def test_result_kind_alone_picks_the_class() -> None:
+    """``result_kind`` picks the class; a judge ``criterion_type`` does not."""
     payload = {
         "task_id": "t",
         "task_description": "d",

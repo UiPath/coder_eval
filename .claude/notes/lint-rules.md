@@ -714,11 +714,10 @@ None else self.open_start_ms)` collapse to one instant whenever `open_end_ms` is
 
 An identity invariant, which is why it is its own id rather than a second arm of
 CE058/CE059, both of which are about timing. Antigravity omitted the kwarg, so the field
-defaulted to `None` on every message it ever recorded, and the evalboard — which groups
-assistant emissions by `message_id` and falls back to a `SAME_EMISSION_GAP_MS` wall-clock
-gap when either side lacks one — collapsed a whole turn's generations into ONE timeline
-row as soon as the harness's generation windows became contiguous (the gap is then exactly
-0 ms, always). Nothing failed: the consumer SUMS the group, so the totals and the
+defaulted to `None` on every message it ever recorded, and the evalboard — which then
+grouped assistant emissions by `message_id`, else by a 100 ms wall-clock gap — collapsed a
+whole turn's generations into ONE timeline row as soon as the harness's generation windows
+became contiguous (the gap is then exactly 0 ms, always). Nothing failed: the consumer SUMS the group, so the totals and the
 reconciliation invariant stayed right, and the golden snapshots had ratified the `null` on
 the day they were written — a snapshot is regenerated from whatever the code currently
 does, so it catches a later change and never an initial omission. The damage was not

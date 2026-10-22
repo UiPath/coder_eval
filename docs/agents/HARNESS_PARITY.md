@@ -408,15 +408,12 @@ generic tool items now carry a duration where they previously carried none, so
 `avg_command_time_ms` and `total_command_time_ms` for a Codex run describe every
 tool call rather than shell commands alone.
 
-**`message_id` is what splits the timeline.** The evalboard groups assistant
-emissions by `message_id`, and falls back to a wall-clock gap threshold
-(`SAME_EMISSION_GAP_MS`, 100 ms, in `evalboard/lib/runs.ts`) when either side
-lacks one. Antigravity's `Step` stream carries no message id, so the harness
-synthesizes one — and it must, because this harness's generation windows are
-*contiguous* by construction: each opens exactly where the previous one closed,
-so the gap between two of them is always 0 ms and the fallback would fold a
-whole turn's generations into a single row. CE060 makes the kwarg mandatory in
-`src/coder_eval/agents/` for that reason.
+**`message_id` is what splits the timeline.** The evalboard joins assistant
+emissions into one row only when they share a `message_id`
+(`evalboard/lib/runs.ts`); an emission without one is never joined, so each of
+its content blocks renders as its own row. Antigravity's `Step` stream carries
+no message id, so the harness synthesizes one. CE060 makes the kwarg mandatory
+in `src/coder_eval/agents/` for that reason.
 
 The collapse is a *display* defect, not an accounting one — the consumer SUMS a
 group's token buckets and durations, so every total, percentage and cost is

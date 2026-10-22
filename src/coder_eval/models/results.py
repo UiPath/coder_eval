@@ -87,9 +87,7 @@ class CriterionResult(BaseModel):
         default="evaluated",
         description=(
             "Whether the criterion ran. ``not_evaluated`` is distinct from an evaluated "
-            "criterion whose score is 0.0 or whose checker returned an error. Defaults to "
-            "``evaluated`` so task.json files written before this field existed retain their "
-            "original meaning."
+            "criterion whose score is 0.0 or whose checker returned an error."
         ),
     )
     pass_threshold: float = Field(
@@ -105,8 +103,8 @@ class CriterionResult(BaseModel):
             "BaseSuccessCriterion.is_gating, i.e. weight > 0). False marks an informational "
             "criterion: it is measured and reported but excluded from the score and the "
             "pass/fail gate, so every display surface must render it as informational rather "
-            "than failed. Defaults True so results persisted before this field existed — and "
-            "any result built without a source criterion — read back as gating."
+            "than failed. Defaults True so a result built without a source criterion reads "
+            "back as gating."
         ),
     )
 
@@ -597,8 +595,7 @@ class EvaluationResult(BaseModel):
             "Results of all success criteria checks. Typed as the ``CriterionResultUnion`` "
             "discriminated union so subclass-specific fields (``JudgeCriterionResult.findings`` / "
             "``transcript``, ``ClassificationCriterionResult.observed_label``) round-trip "
-            "concretely through ``model_dump_json`` → ``model_validate_json``. Legacy task.json "
-            "files without ``result_kind`` are inferred from ``criterion_type``."
+            "concretely through ``model_dump_json`` → ``model_validate_json``."
         ),
     )
     post_failure_criteria_results: list[CriterionResultUnion] = Field(
@@ -1016,9 +1013,9 @@ class SkippedTask(BaseModel):
 def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
     """True when a task row's recorded spend is missing money.
 
-    Reads the row's own ``cost_complete`` flag. Absent means complete: rows written
-    before the field existed are read as priced rather than inferred from their
-    token counts, which would be a second definition of the same predicate.
+    Reads the row's own ``cost_complete`` flag. Absent means complete: a row without
+    the flag is read as priced rather than inferred from its token counts, which
+    would be a second definition of the same predicate.
 
     Defined here, on the row schema, so the reports and ``RunSummary`` cannot
     disagree about which rows lost money.

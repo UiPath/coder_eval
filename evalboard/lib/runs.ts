@@ -120,10 +120,10 @@ export interface TaskResultSummary {
     expectedSeconds: number | null;
     // True when the agent's final iteration emitted a text reply
     // (i.e. ResultMessage.result was non-empty). Lets grid/trends
-    // Turns cells inflate by +1 on legacy runs that lack total_turns.
+    // Turns cells inflate by +1 on a row that lacks total_turns.
     hasFinalReply: boolean;
-    // Per-task token totals from run.json. Null on legacy runs that
-    // don't record per-task token counts. `inputTokens` is the disjoint
+    // Per-task token totals from run.json. Null on a row that records
+    // none (a mature carry-forward row). `inputTokens` is the disjoint
     // uncached slice (run.json `input_tokens` is serialized from
     // TokenUsage.uncached_input_tokens — see run_record.py), so it
     // sits alongside the cache columns without overlap.
@@ -2595,19 +2595,13 @@ export async function readTaskDetail(
     };
 }
 
-// Pick the run's authoritative cumulative token totals. The per-message stream
-// run-level token totals, picking the more complete of two sources:
-//   - iteration token_usage: on current runs this is built from the SDK
-//     ResultMessage `model_usage` (cumulative per-model billing, reconciles to
-//     total_cost_usd, and INCLUDES sub-agent cache-creation/input). On legacy
-//     runs it is the old ResultMessage `usage` snapshot, which under-reports the
-//     cache-read cascade ~2-3x.
-//   - per-message stream sum: deduped per message_id; captures the cache-read
-//     cascade but UNDER-reports sub-agent tokens (those emissions aren't fully
-//     bubbled into the stream).
-// Neither dominates across both run vintages, so pick the larger total — the
-// more complete figure. New runs → iteration (model_usage) wins; legacy runs →
-// per-message wins over the stale snapshot.
+// Pick the run's authoritative cumulative token totals. When the harness writes a
+// reconciliation entry per turn (as claude-code does), the message stream sums
+// exactly to the billed total, so the stream wins outright. Otherwise pick the
+// more complete of two sources:
+//   - iteration token_usage: the harness's own cumulative per-turn figure.
+//   - per-message stream sum: deduped per message_id; can UNDER-report
+//     sub-agent tokens and fixed prompt overhead.
 export function selectTokenTotals(
     messages: MessageEvent[],
     turns: TurnEntry[],
@@ -2620,15 +2614,13 @@ export function selectTokenTotals(
     if (messages.some((m) => m.role === "reconciliation")) {
         return fromMessages;
     }
-    // Legacy / pre-reconciliation runs: the stream may under-report (sub-agent
-    // tokens, fixed prompt overhead). Fall back to the more-complete of the two
-    // sources, as before.
+    // No reconciliation entry: the stream may under-report (sub-agent tokens,
+    // fixed prompt overhead), so take the more complete of the two sources.
     const fromIterations = sumTokenTotals(turns);
     return fromIterations.total >= fromMessages.total ? fromIterations : fromMessages;
 }
 
-// Token totals from the iteration token_usage aggregate (model_usage-derived on
-// current runs; the ResultMessage snapshot on legacy runs).
+// Token totals from the iteration token_usage aggregate.
 function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     let input = 0;
     let output = 0;
