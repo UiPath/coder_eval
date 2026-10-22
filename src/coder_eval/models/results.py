@@ -233,11 +233,6 @@ class JudgeCriterionResult(CriterionResult):
     )
 
 
-JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge", "system_one_judge"})
-"""Criterion types whose rows are ``JudgeCriterionResult``; the rendering gate in
-``reports/html.py``."""
-
-
 def _criterion_result_discriminator(v: Any) -> str:
     """Dispatch ``CriterionResult`` subclasses on ``result_kind`` for serialization and validation."""
     if isinstance(v, dict):

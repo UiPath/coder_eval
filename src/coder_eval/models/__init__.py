@@ -135,7 +135,6 @@ from coder_eval.models.mutations import (
 
 # Results
 from coder_eval.models.results import (
-    JUDGE_CRITERION_TYPES,
     ClassificationCriterionResult,
     ClassLabelStats,
     ConfigLineageEntry,
@@ -369,7 +368,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CriterionStats",
     "FailedRowSummary",
     "ThresholdCheck",
-    "JUDGE_CRITERION_TYPES",
     "JudgeCriterionResult",
     "JudgeTranscript",
     "JudgeTranscriptToolCall",
