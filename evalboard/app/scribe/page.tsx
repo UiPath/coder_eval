@@ -40,7 +40,7 @@ export default async function ScribePage({
 
     // Everything on this page reads SCRIBE_SOURCE's container (aria-runs), not
     // the skills nightly's. No harness selector: the aria suite runs on a single
-    // harness (delegate-sdk), so a scope control would only ever have one entry.
+    // harness (delegate), so a scope control would only ever have one entry.
     const [overview, listing, adhoc] = await Promise.all([
         getOverview(WINDOW, null, null, null, SCRIBE_SOURCE),
         getRunListing(null, null, limit, null, SCRIBE_SOURCE),

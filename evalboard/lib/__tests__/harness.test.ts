@@ -4,6 +4,7 @@ import {
     DEFAULT_HARNESS,
     KNOWN_HARNESSES,
     harnessColor,
+    normalizeHarness,
     orderHarnesses,
     parseHarnessParam,
     parseHarnessScope,
@@ -98,6 +99,16 @@ describe("parseHarnessScope", () => {
     test("differs from parseHarnessParam exactly on the empty case", () => {
         expect(parseHarnessParam(undefined)).toBe(DEFAULT_HARNESS);
         expect(parseHarnessScope(undefined)).toBeNull();
+    });
+});
+
+describe("normalizeHarness", () => {
+    test("the retired delegate-sdk id folds into delegate", () => {
+        // One Delegate series across the 2026-10-07 switch, and old ?h= links
+        // still land on it.
+        expect(normalizeHarness("delegate-sdk")).toBe("delegate");
+        expect(parseHarnessParam("delegate-sdk")).toBe("delegate");
+        expect(parseHarnessScope("delegate-sdk")).toBe("delegate");
     });
 });
 
