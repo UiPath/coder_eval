@@ -164,9 +164,9 @@ interface RawCriterionResult {
     score?: number;
     details?: string;
     error?: string | null;
-    evaluation_status: "evaluated" | "not_evaluated";
-    pass_threshold: number;
-    gating: boolean;
+    evaluation_status?: "evaluated" | "not_evaluated";
+    pass_threshold?: number;
+    gating?: boolean;
 }
 
 export function parseCriterionResults(
@@ -178,9 +178,9 @@ export function parseCriterionResults(
         score: criterion.score ?? null,
         details: criterion.details ?? null,
         error: criterion.error ?? null,
-        evaluationStatus: criterion.evaluation_status,
-        passThreshold: criterion.pass_threshold,
-        gating: criterion.gating,
+        evaluationStatus: criterion.evaluation_status ?? "evaluated",
+        passThreshold: criterion.pass_threshold ?? 0.9,
+        gating: criterion.gating ?? true,
     }));
 }
 

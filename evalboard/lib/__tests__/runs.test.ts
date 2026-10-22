@@ -57,6 +57,15 @@ describe("parseCriterionResults", () => {
             "not_evaluated",
         ]);
     });
+
+    test("a row without the fields keeps the Python model defaults", () => {
+        const [result] = parseCriterionResults([
+            { criterion_type: "file_exists", score: 0 },
+        ]);
+        expect(result.evaluationStatus).toBe("evaluated");
+        expect(result.passThreshold).toBe(0.9);
+        expect(result.gating).toBe(true);
+    });
 });
 
 describe("toTaskRow", () => {
