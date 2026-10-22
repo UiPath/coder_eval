@@ -25,7 +25,7 @@ const HARNESS_ALIASES: Record<string, string> = { "delegate-sdk": "delegate" };
 
 export function normalizeHarness(harness: string | null | undefined): string {
     const h = harness ?? DEFAULT_HARNESS;
-    return HARNESS_ALIASES[h] ?? h;
+    return Object.hasOwn(HARNESS_ALIASES, h) ? HARNESS_ALIASES[h] : h;
 }
 
 // Accept any syntactically-plausible harness id, defaulting to claude-code when
@@ -98,7 +98,9 @@ const HARNESS_COLORS: Record<string, string> = {
 const HARNESS_COLOR_FALLBACK = "#6b7280";
 
 export function harnessColor(harness: string): string {
-    return HARNESS_COLORS[harness] ?? HARNESS_COLOR_FALLBACK;
+    return Object.hasOwn(HARNESS_COLORS, harness)
+        ? HARNESS_COLORS[harness]
+        : HARNESS_COLOR_FALLBACK;
 }
 
 // Stable series order for charts and legends: known harnesses in display order,

@@ -110,6 +110,15 @@ describe("normalizeHarness", () => {
         expect(parseHarnessParam("delegate-sdk")).toBe("delegate");
         expect(parseHarnessScope("delegate-sdk")).toBe("delegate");
     });
+
+    test("an Object.prototype key in ?h= stays a plain string", () => {
+        for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+            expect(normalizeHarness(key)).toBe(key);
+            expect(parseHarnessParam(key)).toBe(key);
+            expect(parseHarnessScope(key)).toBe(key);
+            expect(typeof harnessColor(key)).toBe("string");
+        }
+    });
 });
 
 // Color is bound to the harness, never to its index in the series list — a
