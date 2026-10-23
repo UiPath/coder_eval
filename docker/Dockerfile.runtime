@@ -10,7 +10,7 @@
 #
 # Contract (must match convert_skillsbench_task.py's inject block + the host):
 #   /opt/coder-eval/venv/bin/coder-eval          the CLI (its own Python)
-#   /opt/coder-eval/node/bin/{node,claude}       Node + the Claude Code CLI
+#   /opt/coder-eval/node/bin/{node,claude,pi}    Node + the Claude Code and Pi CLIs
 #   /usr/local/bin/coder_eval_entrypoint.sh      entrypoint (host pins --entrypoint here)
 #   LABEL org.coder-eval.version=<ver>           for `docker inspect` / parity
 #
@@ -83,6 +83,17 @@ RUN mkdir -p /opt/coder-eval/node \
     && PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --prefix /opt/coder-eval/node \
        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# --- 4. The Pi CLI, under the kit dir. --------------------------------------
+# Same package and pin as docker/Dockerfile, so `--driver docker --type pi` runs
+# in an injected task image as it does in a rebased one; a parity test
+# (tests/test_image_from_dockerfiles.py) keeps the two PI_VERSION pins equal.
+# `pi --version` fails the build here if the package's bin did not land on the
+# kit's PATH, instead of every pi task failing later with "pi CLI not found".
+ARG PI_VERSION=0.87.1
+RUN PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --prefix /opt/coder-eval/node \
+       @earendil-works/pi-coding-agent@${PI_VERSION} \
+    && PATH="/opt/coder-eval/node/bin:${PATH}" pi --version
+
 # Sanity: the CLI runs from the kit (no reliance on a system Python). Run it in
 # the builder, where the kit lives; the final stage is a bare carrier.
 RUN /opt/coder-eval/venv/bin/coder-eval _run-task-internal --help > /dev/null
@@ -99,7 +110,7 @@ COPY --from=builder /opt/coder-eval /opt/coder-eval
 # Entrypoint: puts the kit's bins on PATH, then runs the orchestrator. Same
 # filename + location as the framework image, so the host's fixed
 # `--entrypoint /usr/local/bin/coder_eval_entrypoint.sh` works for injected
-# images too — coder-eval/claude/node all resolve from the kit regardless of what
+# images too — coder-eval/claude/pi/node all resolve from the kit regardless of what
 # the task's base image provides.
 COPY docker/coder_eval_runtime_entrypoint.sh /usr/local/bin/coder_eval_entrypoint.sh
 RUN chmod +x /usr/local/bin/coder_eval_entrypoint.sh

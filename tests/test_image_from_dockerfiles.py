@@ -485,6 +485,33 @@ def test_claude_code_version_pin_matches_framework() -> None:
     )
 
 
+def test_pi_version_pin_matches_framework() -> None:
+    """The runtime kit must install Pi at the framework image's PI_VERSION —
+    else `--type pi` would find no CLI in an injected task image, or run a
+    different Pi than a rebased one."""
+    root = Path(__file__).resolve().parents[1]
+    runtime_df = _runtime_dockerfile()
+    if runtime_df is None:
+        pytest.skip("docker/Dockerfile.runtime not present")
+
+    def _pin(df: Path) -> str | None:
+        for ln in df.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*ARG PI_VERSION=(\S+)", ln)
+            if m:
+                return m.group(1)
+        return None
+
+    fw, kit = _pin(root / "docker" / "Dockerfile"), _pin(runtime_df)
+    assert fw and kit, f"PI_VERSION ARG missing (framework={fw!r}, kit={kit!r})"
+    assert fw == kit, (
+        f"PI_VERSION drift: docker/Dockerfile pins {fw!r} but docker/Dockerfile.runtime pins {kit!r} — "
+        "inject and rebase tasks would run different Pi versions."
+    )
+    assert "@earendil-works/pi-coding-agent@${PI_VERSION}" in runtime_df.read_text(encoding="utf-8"), (
+        "docker/Dockerfile.runtime must install @earendil-works/pi-coding-agent at ${PI_VERSION}."
+    )
+
+
 def test_uv_pinned_in_agent_image() -> None:
     """docker/Dockerfile must install a PINNED uv through the versioned
     installer URL. Agents run `uv` themselves, so its install speed is part of
