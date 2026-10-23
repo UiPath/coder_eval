@@ -145,7 +145,7 @@ LABEL org.coder-eval.version="<ver>"
 ```
 
 `make coder-eval-runtime` builds the kit (`docker/Dockerfile.runtime`): a
-standalone CPython + Node + the `coder-eval` CLI + Claude Code, all under
+standalone CPython + Node + the `coder-eval` CLI + Claude Code + Pi, all under
 `/opt/coder-eval`, plus the entrypoint at the **same** `/usr/local/bin/...` path
 the host pins. The kit is **glibc-only** — it runs on debian/ubuntu/fedora/rhel/…
 but not musl/Alpine.
