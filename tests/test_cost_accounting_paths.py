@@ -16,10 +16,12 @@ import pytest
 
 from coder_eval.models import (
     ClaudeCodeAgentConfig,
+    DelegateAgentConfig,
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
     ResolvedTask,
+    SimulationConfig,
     SimulationTelemetry,
     TaskDefinition,
     TokenUsage,
@@ -89,6 +91,13 @@ class TestPricingPreflight:
         """A task deferring its model to the route can't be pre-flighted from here."""
         assert check_pricing_coverage([_resolved(None, tmp_path)]) == []
 
+    def test_delegate_backend_id_is_priced_under_its_rate_card_key(self, tmp_path, caplog):
+        resolved = _resolved(None, tmp_path)
+        resolved.task.agent = DelegateAgentConfig(type="delegate", model="gpt_5_6_luna")
+        with caplog.at_level(logging.WARNING):
+            assert check_pricing_coverage([resolved]) == []
+        assert "No pricing rate" not in caplog.text
+
     def test_judge_criterion_model_is_pre_flighted(self, tmp_path):
         """A judge call is ALWAYS priced from the rate card, so its model matters most.
 
@@ -102,6 +111,19 @@ class TestPricingPreflight:
         """The out-of-the-box judge must not warn on a stock task."""
         judge = {"type": "llm_judge", "description": "d", "prompt": "grade it"}
         assert check_pricing_coverage([_resolved("claude-sonnet-5", tmp_path, [judge])]) == []
+
+    def test_simulator_model_is_pre_flighted(self, tmp_path):
+        """``simulator_cost_usd`` always prices from the rate card, so an unpriced simulator books no cost."""
+        resolved = _resolved("claude-sonnet-5", tmp_path)
+        resolved.task.simulation = SimulationConfig(
+            enabled=True, model="us.anthropic.claude-sonnet-99", persona="p", goal="g"
+        )
+        assert check_pricing_coverage([resolved]) == ["us.anthropic.claude-sonnet-99"]
+
+    def test_disabled_simulation_is_not_pre_flighted(self, tmp_path):
+        resolved = _resolved("claude-sonnet-5", tmp_path)
+        resolved.task.simulation = SimulationConfig(model="us.anthropic.claude-sonnet-99", persona="p", goal="g")
+        assert check_pricing_coverage([resolved]) == []
 
 
 class TestRowCostProjection:
@@ -239,6 +261,7 @@ class TestRowCostProjection:
         row = eval_result_to_task_dict(result)
         assert row["judge_cost_usd"] == pytest.approx(0.02)
         assert row["total_cost_usd"] == pytest.approx(0.12)
+        assert row["cost_complete"] is False
 
     @staticmethod
     def _simulated(simulator_model: str | None) -> EvaluationResult:
@@ -276,6 +299,11 @@ class TestRowCostProjection:
         assert row["simulator_cost_usd"] is None
         # The agent's own spend still lands; only the simulator slice is missing.
         assert row["total_cost_usd"] == pytest.approx(0.1)
+        assert row["cost_complete"] is False
+
+    def test_cost_complete_true_when_the_simulator_is_priced(self):
+        result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
+        assert eval_result_to_task_dict(result)["cost_complete"] is True
 
 
 class TestTotalCost:

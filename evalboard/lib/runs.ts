@@ -17,7 +17,7 @@ import {
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
-import { messageCostUsd, normalizeModel } from "./pricing";
+import { messageCostUsd, rateKey } from "./pricing";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -972,11 +972,12 @@ export async function readRunSummary(
 // but also reports the spread so the run header can say when there was more than
 // one instead of silently picking a winner.
 //
-// The vote groups on the NORMALIZED id (same key pricing resolves on) because
-// the recorded string varies by code path: a row that errored before the model
+// The vote groups on the rate key (same key pricing resolves on) because the
+// recorded string varies by code path: a row that errored before the model
 // resolved keeps the qualified id it was configured with
-// ("eu.anthropic.claude-sonnet-5") while completed rows record the bare one, so
-// counting raw strings let one errored row read as a second model.
+// ("eu.anthropic.claude-sonnet-5") while completed rows record the bare one, and
+// a Delegate row records the backend's "gpt_5_6_luna" for a "gpt-5-6-luna"
+// config, so counting raw strings let one row read as a second model.
 //
 // Display stays the most common RAW string inside the winning group, so the chip
 // shows what the run recorded rather than a derived value.
@@ -988,7 +989,7 @@ export function tallyModels(rows: RawTaskResult[]): {
     for (const r of rows) {
         const m = r.model_used;
         if (typeof m !== "string" || !m) continue;
-        const key = normalizeModel(m);
+        const key = rateKey(m);
         let raw = groups.get(key);
         if (!raw) {
             raw = new Map<string, number>();
