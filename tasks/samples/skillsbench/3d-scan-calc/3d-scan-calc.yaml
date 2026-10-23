@@ -58,7 +58,7 @@ run_limits:
   turn_timeout: 300
 
 success_criteria:
-  # Run the skillsbench verifier verbatim: copy it from the task dir into a
+  # Run the skillsbench verifier (patched locally to grade against fixed expected values): copy it from the task dir into a
   # writable /verifier, run its test.sh (writes /logs/verifier/reward.txt), and
   # emit that reward (0.0-1.0) as the criterion score.
   - type: run_command
