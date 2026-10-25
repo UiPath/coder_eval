@@ -218,9 +218,10 @@ success — the error names the unrecognized event types it saw. Intentional cut
 Pi **is supported under `--driver docker`.** The pinned Pi CLI is baked into
 `docker/Dockerfile` (`ARG PI_VERSION`, alongside the claude-code CLI) and, at the
 same pin, into the runtime kit (`docker/Dockerfile.runtime`), so a task that
-brings its own base image runs Pi too. `OPENROUTER_API_KEY` is forwarded into the container by the docker driver's
-default `env_passthrough` allowlist — so `--driver docker --type pi` runs
-end-to-end with no per-task `env_passthrough_extra`:
+brings its own base image runs Pi too. `OPENROUTER_API_KEY` is forwarded into
+the container by the docker driver's default `env_passthrough` allowlist — so
+`--driver docker --type pi` runs end-to-end with no per-task
+`env_passthrough_extra`:
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."

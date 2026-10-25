@@ -65,7 +65,14 @@ RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKA
     uv pip install --python /opt/coder-eval/venv/bin/python --no-deps /src
 
 # --- 3. Node LTS + the Claude Code CLI, under the kit dir. -------------------
-ARG NODE_VERSION=22.14.0
+# NODE_VERSION tracks the newest Node 22 LTS, which is what the framework image
+# gets from nodesource's setup_22.x — so an injected task runs the CLIs on the
+# same Node as a rebased one. Every `npm install -g` below passes
+# --engine-strict: a CLI whose `engines.node` floor is above NODE_VERSION then
+# fails the build, instead of npm printing EBADENGINE and installing anyway
+# (Pi 0.87.1 needs >=22.19.0; on the previous 22.14.0 pin it installed, ran
+# `pi --version` fine and would only have misbehaved mid-task).
+ARG NODE_VERSION=22.23.4
 ARG CLAUDE_CODE_VERSION=2.1.281
 # Download to a file first so a bad URL fails the build loudly (a piped
 # `curl | tar` would mask a 404 and only surface later as a missing npm), and
@@ -80,7 +87,7 @@ RUN mkdir -p /opt/coder-eval/node \
     && grep " ${NODE_TARBALL}\$" /tmp/node.shasums | sed 's#  .*#  /tmp/node.tar.xz#' | sha256sum -c - \
     && tar -xJf /tmp/node.tar.xz -C /opt/coder-eval/node --strip-components=1 \
     && rm /tmp/node.tar.xz /tmp/node.shasums \
-    && PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --prefix /opt/coder-eval/node \
+    && PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --engine-strict --prefix /opt/coder-eval/node \
        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # --- 4. The Pi CLI, under the kit dir. --------------------------------------
@@ -90,7 +97,7 @@ RUN mkdir -p /opt/coder-eval/node \
 # `pi --version` fails the build here if the package's bin did not land on the
 # kit's PATH, instead of every pi task failing later with "pi CLI not found".
 ARG PI_VERSION=0.87.1
-RUN PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --prefix /opt/coder-eval/node \
+RUN PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --engine-strict --prefix /opt/coder-eval/node \
        @earendil-works/pi-coding-agent@${PI_VERSION} \
     && PATH="/opt/coder-eval/node/bin:${PATH}" pi --version
 

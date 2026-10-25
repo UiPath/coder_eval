@@ -418,6 +418,19 @@ def _runtime_dockerfile() -> Path | None:
     return df if df.is_file() else None
 
 
+def _framework_dockerfile_text() -> str:
+    return (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+
+def _arg_pin(df_text: str, name: str) -> str | None:
+    """The value of the first `ARG <name>=<value>` line in a Dockerfile's text, or None."""
+    for ln in df_text.splitlines():
+        m = re.match(rf"\s*ARG {re.escape(name)}=(\S+)", ln)
+        if m:
+            return m.group(1)
+    return None
+
+
 def test_runtime_kit_stamps_version_label() -> None:
     """The kit Dockerfile must stamp `org.coder-eval.version`.
 
@@ -460,56 +473,46 @@ def test_runtime_kit_path_matches_install_dirs() -> None:
         )
 
 
-def test_claude_code_version_pin_matches_framework() -> None:
-    """The Claude Code pin must be identical in the framework and runtime-kit
-    Dockerfiles — else inject-mode tasks run a different agent version than
-    rebase-mode tasks (a reproducibility/fairness drift, since the agent binary
-    is a dominant non-model driver of results)."""
-    root = Path(__file__).resolve().parents[1]
+@pytest.mark.parametrize("arg", ["CLAUDE_CODE_VERSION", "PI_VERSION"])
+def test_cli_version_pin_matches_framework(arg: str) -> None:
+    """Each baked agent CLI's pin must be identical in the framework and
+    runtime-kit Dockerfiles — else inject-mode tasks run a different agent
+    version than rebase-mode tasks (a reproducibility/fairness drift, since the
+    agent binary is a dominant non-model driver of results), or no agent at all
+    when the kit lacks the CLI."""
     runtime_df = _runtime_dockerfile()
     if runtime_df is None:
         pytest.skip("docker/Dockerfile.runtime not present")
 
-    def _pin(df: Path) -> str | None:
-        for ln in df.read_text(encoding="utf-8").splitlines():
-            m = re.match(r"\s*ARG CLAUDE_CODE_VERSION=(\S+)", ln)
-            if m:
-                return m.group(1)
-        return None
-
-    fw, kit = _pin(root / "docker" / "Dockerfile"), _pin(runtime_df)
-    assert fw and kit, f"CLAUDE_CODE_VERSION ARG missing (framework={fw!r}, kit={kit!r})"
+    fw = _arg_pin(_framework_dockerfile_text(), arg)
+    kit = _arg_pin(runtime_df.read_text(encoding="utf-8"), arg)
+    assert fw and kit, f"{arg} ARG missing (framework={fw!r}, kit={kit!r})"
     assert fw == kit, (
-        f"CLAUDE_CODE_VERSION drift: docker/Dockerfile pins {fw!r} but docker/Dockerfile.runtime pins {kit!r} — "
-        "inject and rebase tasks would run different Claude Code versions."
+        f"{arg} drift: docker/Dockerfile pins {fw!r} but docker/Dockerfile.runtime pins {kit!r} — "
+        "inject and rebase tasks would run different CLI versions."
     )
 
 
-def test_pi_version_pin_matches_framework() -> None:
-    """The runtime kit must install Pi at the framework image's PI_VERSION —
-    else `--type pi` would find no CLI in an injected task image, or run a
-    different Pi than a rebased one."""
-    root = Path(__file__).resolve().parents[1]
+def test_npm_global_installs_are_engine_strict() -> None:
+    """Every `npm install -g` in both Dockerfiles must pass --engine-strict.
+    Without it npm only warns (EBADENGINE) when a CLI's `engines.node` floor is
+    above the image's Node and installs anyway, so the build — and the kit's
+    `pi --version` gate — stays green while the agent runs on a Node it does not
+    support (Pi 0.87.1 needs >=22.19.0; the kit pinned 22.14.0)."""
+    sources = {"docker/Dockerfile": _framework_dockerfile_text()}
     runtime_df = _runtime_dockerfile()
-    if runtime_df is None:
-        pytest.skip("docker/Dockerfile.runtime not present")
-
-    def _pin(df: Path) -> str | None:
-        for ln in df.read_text(encoding="utf-8").splitlines():
-            m = re.match(r"\s*ARG PI_VERSION=(\S+)", ln)
-            if m:
-                return m.group(1)
-        return None
-
-    fw, kit = _pin(root / "docker" / "Dockerfile"), _pin(runtime_df)
-    assert fw and kit, f"PI_VERSION ARG missing (framework={fw!r}, kit={kit!r})"
-    assert fw == kit, (
-        f"PI_VERSION drift: docker/Dockerfile pins {fw!r} but docker/Dockerfile.runtime pins {kit!r} — "
-        "inject and rebase tasks would run different Pi versions."
-    )
-    assert "@earendil-works/pi-coding-agent@${PI_VERSION}" in runtime_df.read_text(encoding="utf-8"), (
-        "docker/Dockerfile.runtime must install @earendil-works/pi-coding-agent at ${PI_VERSION}."
-    )
+    if runtime_df is not None:
+        sources["docker/Dockerfile.runtime"] = runtime_df.read_text(encoding="utf-8")
+    for label, text in sources.items():
+        installs = [
+            ln.strip() for ln in text.splitlines() if "npm install -g" in ln and not ln.lstrip().startswith("#")
+        ]
+        assert installs, f"{label}: no `npm install -g` found — did the CLI installs move?"
+        for install in installs:
+            assert "--engine-strict" in install, (
+                f"{label}: `{install}` lacks --engine-strict, so an unsupported Node would install the CLI "
+                "with only a warning instead of failing the build."
+            )
 
 
 def test_uv_pinned_in_agent_image() -> None:
@@ -519,14 +522,9 @@ def test_uv_pinned_in_agent_image() -> None:
     0.12.12 on a rebuild, and 0.12.11+ copies cross-filesystem (cache in the
     image, venv on the bind-mounted workspace) ~40x slower. Fails on an
     unversioned installer URL or a missing/`latest` pin."""
-    df_text = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    df_text = _framework_dockerfile_text()
 
-    pin: str | None = None
-    for ln in df_text.splitlines():
-        m = re.match(r"\s*ARG UV_VERSION=(\S+)", ln)
-        if m:
-            pin = m.group(1)
-            break
+    pin = _arg_pin(df_text, "UV_VERSION")
     assert pin, "ARG UV_VERSION=<version> missing from docker/Dockerfile — uv is not pinned."
     assert re.fullmatch(r"\d+\.\d+\.\d+", pin), f"UV_VERSION must be an exact x.y.z version, got {pin!r}."
 
@@ -540,31 +538,24 @@ def test_uv_pinned_in_agent_image() -> None:
 
 
 def test_pi_cli_baked_and_pinned() -> None:
-    """docker/Dockerfile must ship a PINNED Pi CLI, and its install line must
-    reference the ARG (not a hardcoded literal) so a bump is one edit and the
-    pin can't drift from the install. Mirrors the claude-code pinned-CLI guard
-    above — Pi's presence is a positive, mechanically-checkable invariant
-    (`--driver docker --type pi` depends on it). Fails on @latest or removal.
-    Scope: main docker/Dockerfile only — Dockerfile.runtime deliberately does
-    NOT bake Pi (inject-mode is out of scope), so it is not asserted here."""
-    df_text = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text(encoding="utf-8")
-
-    pin: str | None = None
-    for ln in df_text.splitlines():
-        m = re.match(r"\s*ARG PI_VERSION=(\S+)", ln)
-        if m:
-            pin = m.group(1)
-            break
-    assert pin, "ARG PI_VERSION=<version> missing from docker/Dockerfile — the Pi CLI is not pinned."
-    assert pin.lower() != "latest", (
-        f"PI_VERSION is pinned to {pin!r} — the Pi CLI must be an exact version, not `latest`, so layer "
-        "caching cannot freeze it nondeterministically across rebuilds."
-    )
-
-    assert re.search(
-        r"npm install -g @earendil-works/pi-coding-agent@\$\{PI_VERSION\}",
-        df_text,
-    ), (
-        "docker/Dockerfile must `npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}` — the install "
-        "must reference the PI_VERSION ARG so the pin and the install cannot drift."
-    )
+    """Both images must ship a PINNED Pi CLI, and the install must reference
+    the ARG (not a hardcoded literal) so a bump is one edit and the pin can't
+    drift from the install. Pi's presence is a positive, mechanically-checkable
+    invariant (`--driver docker --type pi` depends on it, in a rebased and in an
+    injected task image alike). Fails on @latest, a literal, or removal; the
+    pin-parity test above keeps the two ARGs equal."""
+    sources = {"docker/Dockerfile": _framework_dockerfile_text()}
+    runtime_df = _runtime_dockerfile()
+    if runtime_df is not None:
+        sources["docker/Dockerfile.runtime"] = runtime_df.read_text(encoding="utf-8")
+    for label, df_text in sources.items():
+        pin = _arg_pin(df_text, "PI_VERSION")
+        assert pin, f"ARG PI_VERSION=<version> missing from {label} — the Pi CLI is not pinned."
+        assert pin.lower() != "latest", (
+            f"{label}: PI_VERSION is pinned to {pin!r} — the Pi CLI must be an exact version, not `latest`, so "
+            "layer caching cannot freeze it nondeterministically across rebuilds."
+        )
+        assert re.findall(r"@earendil-works/pi-coding-agent@(\S+)", df_text) == ["${PI_VERSION}"], (
+            f"{label} must install @earendil-works/pi-coding-agent@${{PI_VERSION}} exactly once — the install "
+            "must reference the PI_VERSION ARG so the pin and the install cannot drift."
+        )

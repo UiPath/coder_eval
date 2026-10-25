@@ -158,6 +158,9 @@ individual targets when you only need one.
 > The kit installs the **no-credential** set only (core + codex), like `make docker-image` —
 > it never installs the `[uipath]` extra, so there is no `make docker-images-full`. An
 > inject-mode task that needs the LLMGW/`uipath` judge isn't supported by the kit as built.
+> Agents under inject mode: `claude-code`, `codex` and `pi` run from the kit; `antigravity`
+> and the `litellm` judge route are in the framework image only, so a task that needs them
+> must rebase onto `coder-eval-agent`.
 
 ```dockerfile
 # environment/Dockerfile
