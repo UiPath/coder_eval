@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -29,6 +30,7 @@ from coder_eval.isolation.egress import (
     build_network_create_argv,
     build_sidecar_create_argv,
     egress_scope,
+    grading_denials,
 )
 from coder_eval.isolation.errors import EgressSetupError
 from coder_eval.models import (
@@ -50,7 +52,16 @@ from coder_eval.path_utils import TASK_JSON_FILENAME
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="docker driver is POSIX-only")
 
-SETUP = ["image inspect", "network create", "create --name", "network connect", "start c-egress", "exec c-egress"]
+SETUP = [
+    "image inspect",
+    "container prune",
+    "network prune",
+    "network create",
+    "create --name",
+    "network connect",
+    "start c-egress",
+    "exec c-egress",
+]
 TEARDOWN = ["logs c-egress", "rm -f", "network rm"]
 
 
@@ -384,7 +395,7 @@ async def test_llm_only_runs_the_container_inside_the_scope(
     with pytest.raises(FileNotFoundError):
         await _rt_runner(tmp_path, "llm_only").run()
     assert seen == {
-        "plan": EgressPlan(("api.anthropic.com:443", "platform.claude.com:443")),
+        "plan": EgressPlan(("api.anthropic.com:443", "platform.claude.com:443"), grading_phase=True),
         "staged": True,
         "heartbeat": True,
         "exited": True,
@@ -449,11 +460,11 @@ def _graded_runner(tmp_path: Path, *, grade: bool = True, detached: bool = False
 @pytest.mark.parametrize(
     ("docker", "kind", "plan"),
     [
-        ({"grading_network": "bridge"}, "run", EgressPlan(("api.anthropic.com:443",), (), True)),
+        ({"grading_network": "bridge"}, "run", EgressPlan(("api.anthropic.com:443",), (), True, grading_phase=True)),
         (
             {"grading_egress_allowlist": ["pypi.org", "api.anthropic.com"]},
             "run",
-            EgressPlan(("api.anthropic.com:443",), ("pypi.org:443",)),
+            EgressPlan(("api.anthropic.com:443",), ("pypi.org:443",), grading_phase=True),
         ),
         ({"grading_network": "bridge"}, "execute", EgressPlan(("api.anthropic.com:443",))),
         (
@@ -462,7 +473,7 @@ def _graded_runner(tmp_path: Path, *, grade: bool = True, detached: bool = False
             EgressPlan(("api.anthropic.com:443", "pypi.org:443")),
         ),
         ({"grading_network": "bridge"}, "detached", None),
-        ({}, "run", EgressPlan(("api.anthropic.com:443",))),
+        ({}, "run", EgressPlan(("api.anthropic.com:443",), grading_phase=True)),
     ],
     ids=["run-any", "run-extra", "execute", "detached-extra", "detached-bridge", "no-grading-policy"],
 )
@@ -485,7 +496,12 @@ def test_a_detached_grade_with_grading_network_bridge_joins_the_bridge(
 
 @pytest.mark.parametrize(
     "plan",
-    [EgressPlan(("a.example:443",), ("b.example:443", "c.example:80")), EgressPlan(("a.example:443",), (), True)],
+    [
+        EgressPlan(("a.example:443",), ("b.example:443", "c.example:80"), grading_phase=True),
+        EgressPlan(("a.example:443",), (), True, grading_phase=True),
+        EgressPlan(("a.example:443",), grading_phase=True),
+    ],
+    ids=["extra", "any", "phase-only"],
 )
 def test_sidecar_grading_argv_parses_with_the_proxy_cli(tmp_path: Path, plan: EgressPlan) -> None:
     from coder_eval import egress_proxy
@@ -515,7 +531,7 @@ def test_sidecar_grading_argv_parses_with_the_proxy_cli(tmp_path: Path, plan: Eg
 async def test_scope_dials_the_grading_hosts_directly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeDocker()
     monkeypatch.setattr(egress_mod, "_docker", fake)
-    plan = EgressPlan(("api.anthropic.com:443",), ("pypi.org:443",))
+    plan = EgressPlan(("api.anthropic.com:443",), ("pypi.org:443",), grading_phase=True)
     scope = egress_scope(
         container_name="c",
         image="img",
@@ -549,7 +565,7 @@ async def test_the_host_answers_the_grading_request(
     fake = _FakeDocker({"exec c-egress": [answer]})
     monkeypatch.setattr(egress_mod, "_docker", fake)
     monkeypatch.setattr(dr, "_GRADING_REQUEST_POLL_SECONDS", 0.01)
-    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan((), (), True))
+    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan((), (), True, grading_phase=True))
     watch = asyncio.create_task(dr._serve_grading_request(tmp_path, handle))
     await asyncio.sleep(0.05)
     assert fake.calls == []
@@ -561,9 +577,11 @@ async def test_the_host_answers_the_grading_request(
     assert list(tmp_path.iterdir()) == []
 
 
-async def test_enter_grading_refuses_a_plan_without_a_grading_allowlist() -> None:
-    with pytest.raises(EgressSetupError, match="no grading allowlist"):
+async def test_enter_grading_refuses_a_plan_without_a_grading_phase() -> None:
+    with pytest.raises(EgressSetupError, match="no grading phase"):
         await egress_mod.enter_grading(EgressHandle(network="n", sidecar="s", plan=EgressPlan(("a.example:443",))))
+    with pytest.raises(ValueError, match="needs a grading phase"):
+        EgressPlan(("a.example:443",), ("b.example:443",))
 
 
 def test_detached_grading_disclosure_names_the_grading_allowlist() -> None:
@@ -572,3 +590,86 @@ def test_detached_grading_disclosure_names_the_grading_allowlist() -> None:
     assert "(egress allowed to: pypi.org:443, a.io:443 plus the derived model-API hosts)" in text
     [bridge] = _container_dispatch_commands(_task(image="img:1", network="llm_only", grading_network="bridge"), None)
     assert "--network llm_only" not in bridge
+
+
+async def test_setup_reclaims_leaked_egress_and_goes_on_when_the_daemon_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(
+        {"container prune": [_failed("a prune operation is already running")], "network prune": [OSError("gone")]}
+    )
+    await _enter_scope(tmp_path, fake, monkeypatch)
+    prunes = [call for call in fake.calls if call[1:2] == ("prune",)]
+    assert prunes == [
+        (kind, "prune", "--force", "--filter", f"label={EGRESS_LABEL}", "--filter", "until=10m")
+        for kind in ("container", "network")
+    ]
+    assert fake.verbs() == [*SETUP, *TEARDOWN]
+
+
+PROXY_LOG = """READY 0.0.0.0:3128 allow=api.anthropic.com:443 grading=unchanged
+DENY example.com:443 CONNECT
+PHASE grading allow=unchanged
+ALLOW bedrock-runtime.us-east-2.amazonaws.com:443 CONNECT
+DENY pypi.org:443 CONNECT
+DENY http-intake.logs.us5.datadoghq.com:443 CONNECT
+DENY pypi.org:443 CONNECT
+BAD GET unparseable request line (12 bytes)
+DENY deb.debian.org:80 GET
+"""
+
+
+@pytest.mark.parametrize(
+    ("log", "whole_log", "denied"),
+    [
+        (PROXY_LOG, False, ["deb.debian.org:80", "pypi.org:443"]),
+        (PROXY_LOG, True, ["deb.debian.org:80", "example.com:443", "pypi.org:443"]),
+        ("READY x allow=\nDENY pypi.org:443 CONNECT\n", False, []),
+    ],
+    ids=["after-the-phase-line", "grading-only-container", "no-phase-line"],
+)
+def test_grading_denials_skip_the_agent_phase_and_judge_noise(log: str, whole_log: bool, denied: list[str]) -> None:
+    assert grading_denials(log, whole_log=whole_log) == denied
+
+
+def _result(status: FinalStatus) -> EvaluationResult:
+    return EvaluationResult(
+        task_id="t",
+        task_description="d",
+        agent_type="claude-code",
+        started_at=datetime.now(UTC),
+        final_status=status,
+        iteration_count=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "log", "after"),
+    [
+        (FinalStatus.FAILURE, PROXY_LOG, FinalStatus.ERROR),
+        (FinalStatus.SUCCESS, PROXY_LOG, FinalStatus.SUCCESS),
+        (FinalStatus.FAILURE, "PHASE grading allow=unchanged\nDENY api.anthropic.com:443 CONNECT\n", None),
+    ],
+    ids=["failure-becomes-error", "success-is-kept", "only-noise"],
+)
+async def test_a_refused_grading_host_is_recorded_and_a_failure_becomes_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: FinalStatus, log: str, after: FinalStatus | None
+) -> None:
+    monkeypatch.setattr(
+        egress_mod, "_docker", _FakeDocker({"logs c-egress": [subprocess.CompletedProcess([], 0, log, "")]})
+    )
+    task_json = tmp_path / TASK_JSON_FILENAME
+    task_json.symlink_to(tmp_path / "victim")
+    result = _result(status)
+    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan(("a.example:443",), grading_phase=True))
+    await _graded_runner(tmp_path)._record_grading_denials(result, handle, task_json)
+    if after is None:
+        assert (result.final_status, result.environment_info) == (status, {})
+        assert task_json.is_symlink()
+        return
+    assert result.final_status == after
+    assert result.environment_info["egress_denied_in_grading"] == ["deb.debian.org:80", "pypi.org:443"]
+    assert ("deb.debian.org:80, pypi.org:443" in (result.error_message or "")) is (after == FinalStatus.ERROR)
+    assert not task_json.is_symlink()
+    assert not (tmp_path / "victim").exists()
+    assert EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")).final_status == after

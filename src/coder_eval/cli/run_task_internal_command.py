@@ -57,23 +57,33 @@ EGRESS_GRADING_TIMEOUT_SECONDS = 120.0
 _EGRESS_GRADING_POLL_SECONDS = 0.1
 
 
-async def request_grading_egress(output_dir: Path, timeout: float = EGRESS_GRADING_TIMEOUT_SECONDS) -> None:
-    """Ask the host to switch the egress sidecar to its grading allowlist, and wait for its answer.
+async def request_grading_egress(
+    output_dir: Path, timeout: float = EGRESS_GRADING_TIMEOUT_SECONDS, *, widens: bool = True
+) -> None:
+    """Ask the host to switch the egress sidecar to its grading phase, and wait for its answer.
+
+    A switch that does not ``widen`` egress only marks the phase in the proxy log, so its
+    failure is a warning rather than a reason to stop grading.
 
     Raises:
-        RuntimeError: The host refused, or did not answer within ``timeout`` seconds.
+        RuntimeError: The host refused a widening switch, or did not answer within ``timeout`` seconds.
     """
     ack = output_dir / EGRESS_GRADING_ACK_FILENAME
     await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_REQUEST_FILENAME, "grading")
     deadline = time.monotonic() + timeout
-    while not await asyncio.to_thread(ack.is_file):
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"The host did not switch the egress sidecar to the grading allowlist in {timeout:g}s.")
+    while not (answered := await asyncio.to_thread(ack.is_file)) and time.monotonic() <= deadline:
         await asyncio.sleep(_EGRESS_GRADING_POLL_SECONDS)
-    reply = (await asyncio.to_thread(ack.read_text, encoding="utf-8")).strip()
-    if reply != EGRESS_GRADING_ACK_OK:
-        raise RuntimeError(f"The host could not switch the egress sidecar to the grading allowlist: {reply}")
-    logger.info("Egress switched to the grading allowlist.")
+    if not answered:
+        failure: str | None = f"The host did not switch the egress sidecar in {timeout:g}s."
+    else:
+        reply = (await asyncio.to_thread(ack.read_text, encoding="utf-8")).strip()
+        failure = None if reply == EGRESS_GRADING_ACK_OK else f"The host could not switch the egress sidecar: {reply}"
+    if failure is None:
+        logger.info("Egress switched to its grading phase.")
+    elif widens:
+        raise RuntimeError(failure)
+    else:
+        logger.warning("%s Refused grading hosts will not be reported.", failure)
 
 
 def _scrub_staged_inputs(task_yaml: Path, context_json: Path) -> None:
@@ -267,8 +277,11 @@ def run_task_internal_command(
     from coder_eval.streaming.wire import StdoutNDJsonCallback
 
     orchestrator.stream_callback = StdoutNDJsonCallback()
-    if ctx.grade and ctx.authored_sandbox.docker.grading_widens_egress:
-        orchestrator.before_grading = functools.partial(request_grading_egress, output_dir)
+    docker = ctx.authored_sandbox.docker
+    if ctx.grade and docker.network == "llm_only":
+        orchestrator.before_grading = functools.partial(
+            request_grading_egress, output_dir, widens=docker.grading_widens_egress
+        )
 
     asyncio.run(orchestrator.run())
     # Orchestrator.run() writes task.json to run_dir (== output_dir). Done.

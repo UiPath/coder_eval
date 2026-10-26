@@ -46,6 +46,15 @@ async def test_request_raises_on_a_refusal_or_no_answer(tmp_path: Path) -> None:
         await request_grading_egress(tmp_path, timeout=0.2)
 
 
+async def test_a_switch_that_only_marks_the_phase_does_not_stop_grading(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    await asyncio.gather(request_grading_egress(tmp_path, timeout=5, widens=False), _answer(tmp_path, "error: x"))
+    (tmp_path / EGRESS_GRADING_ACK_FILENAME).unlink()
+    await request_grading_egress(tmp_path, timeout=0.2, widens=False)
+    assert caplog.text.count("Refused grading hosts will not be reported") == 2
+
+
 def test_a_simulated_task_cannot_widen_grading() -> None:
     with pytest.raises(ValidationError, match="between dialog turns"):
         TaskDefinition(

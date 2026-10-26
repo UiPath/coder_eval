@@ -4,8 +4,8 @@
 allowlisted ``host:port`` and never originates TLS. Every decision is one stdout line
 (``ALLOW``, ``DENY``, ``FAIL``, ``BAD``, ``STALE``, ``PHASE``) after one ``READY`` line.
 ``--heartbeat`` stops it when the host heartbeat goes stale. ``--control`` listens on
-loopback for one ``GRADING`` line that adds ``--grading-allow`` (or any host, with
-``--grading-allow-any``); the switch is one-way.
+loopback for one ``GRADING`` line that logs ``PHASE grading`` and adds ``--grading-allow``
+(or any host, with ``--grading-allow-any``); the switch is one-way.
 
 ``probe`` checks each target through a running proxy (or, with ``--direct``, by a
 TCP connection) and exits 0 only when every target is OK. ``grading`` sends the
@@ -62,7 +62,9 @@ class Policy:
         return self.grading and (self.grading_any or destination in self.grading_allow)
 
     def describe_grading(self) -> str:
-        return "*" if self.grading_any else "+" + ",".join(sorted(self.grading_allow))
+        if self.grading_any:
+            return "*"
+        return "+" + ",".join(sorted(self.grading_allow)) if self.grading_allow else "unchanged"
 
 
 def _redacted(request_line: bytes) -> str:

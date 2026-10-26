@@ -1112,13 +1112,38 @@ imports, guarded by a test): the image only supplies `python3`.
 
 ### Why the sidecar watches the heartbeat
 
-A host SIGKILL skips every `finally`. The task container already exits on a stale host heartbeat;
+A host SIGKILL skips every `finally`, and so does a SIGTERM (a CI cancel, `timeout`, systemd):
+coder-eval has no SIGTERM-to-cancel bridge, and `fs_permissions` re-kills with the default action.
+The task container already exits on a stale host heartbeat;
 the sidecar reads the same file through a single-file `:ro` bind (Docker Desktop VirtioFS saw
 every in-place counter write) and stops itself with the same counter-or-mtime rule as
 `heartbeat_is_alive`. It has no `--rm`, so a crashed or stale-stopped sidecar keeps its log until
 teardown reads it; `docker network rm` works with a stopped container still attached, so a later
 prune needs no ordering. The watchdog returns from `serve` instead of calling `os._exit`, because
 CE052 gates process-lethal calls on `IN_CONTAINER_ENV`, which a stdlib-only module cannot import.
+
+The heartbeat stops the sidecar but cannot remove it or its network, and each leaked network holds
+one of the daemon's address pools (about 29 on a default Docker Desktop). A few cancelled parallel
+runs then fail every `network create`, for coder-eval and for anything else on that daemon. So every
+egress setup first prunes egress-labelled stopped containers and unused networks older than
+`RECLAIM_MIN_AGE`. Prune never removes a running container or a network in use, and the age spares a
+concurrent setup between `network create` and `start`. A SIGTERM-to-cancel bridge was not added: the
+prune also covers SIGKILL, and a process-wide handler would change shutdown for every driver.
+
+### Why a refused grading host makes the row ERROR
+
+A grader that cannot reach a host it needs (an `apt-get` mirror, PyPI) fails its criterion, and
+the row reads as an ordinary FAILURE: an agent miss that is really the grader's. Only `egress.log`
+showed it. So after a graded run the host reads the sidecar log from Docker (not the run
+directory's copy, which the container can write), takes the `DENY` lines after `PHASE grading` (or
+all of them for a container that only grades), and records the hosts in
+`environment_info["egress_denied_in_grading"]`. A FAILURE becomes ERROR with the hosts named. A
+SUCCESS stays, because the grader passed without them.
+
+`GRADING_DENIAL_NOISE` drops the hosts the judge CLIs call and do not need (§ Expected DENY lines
+in docs/DOCKER_ISOLATION.md), or every `agent_judge` FAILURE on the direct or litellm route would
+become ERROR. A process the agent left running is refused under the same rule, so its row also
+becomes ERROR; that misnames an agent miss as an error, but errors count as misses in the pass rate.
 
 ### Why every docker call runs to completion
 
@@ -1171,6 +1196,10 @@ This is not a boundary against an agent that targets it. The agent is root in th
 container, so it can write the request file early, and a background process it started keeps
 running into grading. Both are the same class as the deliberate re-chmod the anti-cheat window
 leaves open. The `PHASE grading` line in `egress.log` separates the two phases' traffic.
+
+Every graded `llm_only` run switches, including one with no grading allowlist: there the switch
+adds nothing and only writes the `PHASE grading` line that § Why a refused grading host makes the
+row ERROR reads. Such a switch is best-effort, because a failure only loses that report.
 
 Grading-only hosts are checked at setup with `probe --direct` (a TCP connection from the sidecar),
 not through the proxy, because the proxy does not allow them yet.

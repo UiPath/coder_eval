@@ -172,6 +172,19 @@ switch is one-way and adds a `PHASE grading` line to `egress.log`. If it fails, 
 from the sidecar to each `grading_egress_allowlist` host, so a host this machine cannot reach
 fails the row before any agent run is paid for.
 
+Every graded `llm_only` run marks the phase, also with neither field set (then the switch adds
+no host, and a failed switch is only a warning). After the run, the host checks which hosts the
+sidecar refused during grading:
+
+| Row status | Grading was refused a host |
+|---|---|
+| `FAILURE` | becomes `ERROR`, with `error_message` naming the hosts to add to `grading_egress_allowlist` |
+| any other | kept |
+
+Either way the hosts are in `environment_info.egress_denied_in_grading`, for example
+`["deb.debian.org:80", "pypi.org:443"]`. The judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
+(`http-intake.logs.us5.datadoghq.com:443`, `api.anthropic.com:443`) do not count.
+
 `coder-eval execute` keeps the agent's allowlist. A detached grade (`coder-eval evaluate`,
 `run --resume`) runs no agent, so its container gets the grading network from the start; with
 `grading_network: bridge` it joins the plain `bridge` network.
@@ -225,6 +238,9 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
   pools for about 29 user networks, so keep `--max-parallel` under that. When the pools are
   exhausted, the row error names `--max-parallel`, the prune command and the daemon's
   `default-address-pools` setting.
+- **A killed run leaks until the next one.** A SIGTERM or SIGKILL of coder-eval leaves the
+  task's sidecar (stopped) and network behind. Each `llm_only` setup first removes egress
+  sidecars that stopped and egress networks that no container uses, once they are 10 minutes old.
 - **No upstream proxy.** The sidecar connects directly. A host that can reach the internet only
   through a corporate proxy cannot use `llm_only`.
 - **Not exfiltration-proof.** The agent can still send data to an allowlisted host.
@@ -244,7 +260,8 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
   container, so an agent that knows the request file can ask for it before its turn ends. A
   process the agent leaves running in the background also keeps running during grading, with the
   grading network. Use the grading fields for test dependencies, not to hide hosts from an agent
-  that is trying to defeat the boundary.
+  that is trying to defeat the boundary. A host such a process is refused during grading also
+  makes a failed row `ERROR`.
 - **The sidecar is also on the default `bridge`.** A `bridge` container of another task can reach
   it. It gets no extra reach, because the allowlist is a subset of what `bridge` already reaches,
   and the sidecar serves at most 256 connections at once (one more gets `503`).
@@ -291,8 +308,8 @@ grading's (and any process the agent left running). To see which hosts a task ne
 grep -rhE "^(ALLOW|DENY|FAIL)" --include=egress.log runs/latest | sort | uniq -c
 ```
 
-Add each needed `DENY` host to `egress_allowlist`. If the host process was killed, remove the
-leaked sidecars and networks:
+Add each needed `DENY` host to `egress_allowlist`. The next `llm_only` task removes what a killed
+run leaked once it is 10 minutes old. To remove it now:
 
 ```bash
 docker rm -f $(docker ps -aq --filter label=org.coder-eval.egress)

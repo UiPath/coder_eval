@@ -208,6 +208,11 @@ PRUNE_HINT = (
     + f"docker network prune -f --filter label={EGRESS_LABEL}"
 )
 
+# Old enough that no live setup is still between `network create` and `start`.
+RECLAIM_MIN_AGE = "10m"
+# Hosts the judge CLIs call and do not need (docs/DOCKER_ISOLATION.md § Expected DENY lines).
+GRADING_DENIAL_NOISE = frozenset({"http-intake.logs.us5.datadoghq.com:443", "api.anthropic.com:443"})
+
 _POOL_EXHAUSTED = "all predefined address pools have been fully subnetted"
 _DOCKER_TIMEOUT_SECONDS = 30.0
 _PROBE_TIMEOUT_SECONDS = 5
@@ -219,12 +224,19 @@ _NETWORK_RM_RETRY_SECONDS = 1.0
 class EgressPlan:
     """What one container's sidecar allows: ``targets`` from the start, and what grading adds.
 
-    ``grading_targets`` are the hosts grading adds; ``grading_any`` lets grading reach any host.
+    ``grading_phase`` means the container announces when grading starts, so the sidecar
+    marks it in its log; ``grading_targets`` are the hosts grading adds, and
+    ``grading_any`` lets grading reach any host.
     """
 
     targets: tuple[str, ...]
     grading_targets: tuple[str, ...] = ()
     grading_any: bool = False
+    grading_phase: bool = False
+
+    def __post_init__(self) -> None:
+        if self.switches_for_grading and not self.grading_phase:
+            raise ValueError("A grading allowlist needs a grading phase to switch at.")
 
     @property
     def switches_for_grading(self) -> bool:
@@ -326,7 +338,7 @@ def build_sidecar_create_argv(
     ]
     for target in plan.targets:
         argv += ["--allow", target]
-    if plan.switches_for_grading:
+    if plan.grading_phase:
         argv += ["--control", EGRESS_CONTROL]
         if plan.grading_any:
             argv.append("--grading-allow-any")
@@ -431,13 +443,13 @@ async def _probe(sidecar: str, targets: Sequence[str], *, direct: bool = False) 
 
 
 async def enter_grading(handle: EgressHandle) -> None:
-    """Switch the sidecar to its grading allowlist; returns once the proxy confirms.
+    """Switch the sidecar to its grading phase; returns once the proxy confirms.
 
     Raises:
-        EgressSetupError: The sidecar has no grading allowlist, or did not confirm the switch.
+        EgressSetupError: The sidecar has no grading phase, or did not confirm the switch.
     """
-    if not handle.plan.switches_for_grading:
-        raise EgressSetupError("network: llm_only has no grading allowlist to switch to.")
+    if not handle.plan.grading_phase:
+        raise EgressSetupError("network: llm_only has no grading phase to switch to.")
     try:
         result = await _docker(*build_grading_argv(handle.sidecar))
     except (OSError, subprocess.SubprocessError) as exc:
@@ -447,12 +459,53 @@ async def enter_grading(handle: EgressHandle) -> None:
         raise EgressSetupError(f"network: llm_only could not switch to the grading allowlist: {detail}")
 
 
-async def _best_effort(*args: str) -> subprocess.CompletedProcess[str] | None:
+async def read_proxy_log(handle: EgressHandle) -> str | None:
+    """The sidecar's log so far, from Docker: the run directory's copy is one the container could write."""
+    result = await _best_effort("logs", handle.sidecar)
+    return result.stdout if result is not None and result.returncode == 0 else None
+
+
+def grading_denials(proxy_log: str, *, whole_log: bool) -> list[str]:
+    """The ``host:port`` targets the proxy refused once grading started, less ``GRADING_DENIAL_NOISE``.
+
+    ``whole_log`` is for a container that only grades; otherwise grading starts at the
+    ``PHASE grading`` line, and a log without one has no grading part.
+    """
+    lines = proxy_log.splitlines()
+    if not whole_log:
+        start = next((i for i, line in enumerate(lines) if line.startswith("PHASE grading")), None)
+        if start is None:
+            return []
+        lines = lines[start + 1 :]
+    denied = {line.split(" ")[1] for line in lines if line.startswith("DENY ") and line.count(" ") >= 2}
+    return sorted(denied - GRADING_DENIAL_NOISE)
+
+
+async def _best_effort(*args: str, during: str = "teardown") -> subprocess.CompletedProcess[str] | None:
     try:
         return await _docker(*args)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("docker %s failed during egress teardown: %s", " ".join(args[:2]), exc)
+        logger.warning("docker %s failed during egress %s: %s", " ".join(args[:2]), during, exc)
         return None
+
+
+async def _reclaim_leaked() -> None:
+    """Remove the stopped sidecars and unused networks that a killed coder-eval left behind.
+
+    Prune never removes a running container or a network a container still uses, so a
+    concurrent run keeps its own; a daemon busy with another prune just skips this one.
+    """
+    for kind in ("container", "network"):
+        await _best_effort(
+            kind,
+            "prune",
+            "--force",
+            "--filter",
+            f"label={EGRESS_LABEL}",
+            "--filter",
+            f"until={RECLAIM_MIN_AGE}",
+            during="reclaim",
+        )
 
 
 async def _teardown(*, network: str | None, sidecar: str | None, log_path: Path) -> None:
@@ -505,8 +558,11 @@ async def egress_scope(
     """Create the internal network and proxy sidecar, probe every target, yield, then tear both down.
 
     ``egress_dir`` holds the proxy module and ``heartbeat`` must already exist on the
-    host. Teardown runs on every exit path and writes the sidecar log to ``log_path``
-    (atomically, so a symlink planted at that path is replaced, never followed).
+    host. Setup first reclaims what a killed run leaked. Teardown runs on every exit path
+    and writes the sidecar log to ``log_path`` (atomically, so a symlink planted at that
+    path is replaced, never followed).
+
+    Rationale: .claude/notes/isolation.md § Why the sidecar watches the heartbeat
 
     Raises:
         EgressSetupError: Any setup step (image, network, sidecar, probe) failed.
@@ -524,6 +580,7 @@ async def egress_scope(
             "{{.Id}}",
             image,
         )
+        await _reclaim_leaked()
         created_network = network
         await _checked("create its per-task network", *build_network_create_argv(network))
         created_sidecar = sidecar
