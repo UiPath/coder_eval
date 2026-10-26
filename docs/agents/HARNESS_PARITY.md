@@ -785,6 +785,7 @@ full network, `none` gives it no network, and `llm_only` lets it reach only the 
 | `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
 | `llm_only` honours the proxy | yes | yes | yes | yes (custom image with the CLI) | yes | CLI not in the framework image; untested | no egress needed |
 | Verified by | runs R2, R11, R12 (Bedrock); spike S3 (direct) | run R3 (Luna on Azure `CODEX_BASE_URL`) | run R4 | Bedrock and Azure `gpt-5.6-luna` runs (custom image; hosts in `egress_allowlist`) | Bedrock and Azure `gpt-5.6-luna` runs | spike S8 (absent) | — |
+| `docker_egress_probe` 9 of 9 | Sonnet 5 on Bedrock | `gpt-5.6-terra` on Azure | `gemini-3.5-flash` | Sonnet 5 on Bedrock (custom image) | Sonnet 5 on Bedrock | not run (no login) | — |
 
 The hosts each harness gets by default, and the harmless `DENY` lines it produces, are in
 [Docker Isolation § The derived allowlist](../DOCKER_ISOLATION.md#the-derived-allowlist) and

@@ -282,8 +282,9 @@ coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml \
   -D sandbox.docker.network=bridge                                          # control: expect a FAILURE
 ```
 
-Run the probes alone in any `llm_only` container with
-`python3 egress_probe.py all`.
+The task pins Claude Code. To check another harness, replace its `agent:` block (without the
+Claude-only `setting_sources`). The model-host check accepts the model host of any built-in
+harness. Run the probes alone in any `llm_only` container with `python3 egress_probe.py all`.
 
 `docker_egress_grading.yaml` in the same directory checks the grading network without an agent or
 a model API: `pre_run` records that `pypi.org` is blocked, and the criteria then reach it during

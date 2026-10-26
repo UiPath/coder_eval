@@ -42,16 +42,39 @@ def _raw_status(request: bytes) -> str:
         return sock.recv(256).split(b"\r\n", 1)[0].decode("latin-1")
 
 
-def _model_target() -> tuple[str, int] | None:
-    """The ``(host, port)`` the agent's model calls go to, or None when the backend is not known here."""
+def _url_target(url: str) -> tuple[str, int] | None:
+    parts = urlsplit(url)
+    if not parts.hostname:
+        return None
+    return parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def _model_candidates() -> list[tuple[str, int]]:
+    """Every ``(host, port)`` a built-in harness may call for its model, from the variables this container got."""
     backend = os.environ.get("API_BACKEND", "direct")
+    candidates: list[tuple[str, int] | None] = []
     if backend == "bedrock" and os.environ.get("AWS_REGION"):
-        return f"bedrock-runtime.{os.environ['AWS_REGION'].lower()}.amazonaws.com", 443
+        candidates.append((f"bedrock-runtime.{os.environ['AWS_REGION'].lower()}.amazonaws.com", 443))
     if backend == "direct":
-        return "api.anthropic.com", 443
-    parts = urlsplit(os.environ.get("LITELLM_BASE_URL", ""))
-    if backend == "litellm" and parts.hostname:
-        return parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+        candidates.append(("api.anthropic.com", 443))
+    if backend == "litellm":
+        candidates.append(_url_target(os.environ.get("LITELLM_BASE_URL", "")))
+    if os.environ.get("CODEX_BASE_URL"):
+        candidates.append(_url_target(os.environ["CODEX_BASE_URL"]))
+    elif os.environ.get("CODEX_API_KEY"):
+        candidates.append(("api.openai.com", 443))
+    if os.environ.get("GEMINI_API_KEY"):
+        candidates.append(("generativelanguage.googleapis.com", 443))
+    if os.environ.get("OPENROUTER_API_KEY"):
+        candidates.append(("openrouter.ai", 443))
+    return [c for c in candidates if c is not None]
+
+
+def _model_target() -> tuple[str, int] | None:
+    """The first model host the proxy lets through, or None when it allows none of them."""
+    for host, port in _model_candidates():
+        if " 200 " in f"{_connect_status(f'{host}:{port}')} ":
+            return host, port
     return None
 
 
@@ -199,17 +222,16 @@ def blocked_npm_view() -> str | None:
 
 
 def model_host_reachable() -> str | None:
-    target = _model_target()
-    if target is None:
-        return "the model backend is not known to this probe"
-    status = _connect_status(f"{target[0]}:{target[1]}")
-    return None if " 200 " in f"{status} " else f"proxy answered {status!r} for the model host {target[0]}:{target[1]}"
+    if _model_target() is not None:
+        return None
+    tried = ", ".join(f"{host}:{port}" for host, port in _model_candidates()) or "none known to this probe"
+    return f"the proxy allows none of the model hosts ({tried})"
 
 
 def model_host_other_port_blocked() -> str | None:
     target = _model_target()
     if target is None:
-        return "the model backend is not known to this probe"
+        return "the proxy allows no model host"
     host, port = target
     other = 8 if port != 8 else 9
     status = _connect_status(f"{host}:{other}")
