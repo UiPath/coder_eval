@@ -39,12 +39,16 @@ describe("parseCriterionResults", () => {
                 description: "artifact exists",
                 score: 1,
                 evaluation_status: "evaluated",
+                pass_threshold: 0.9,
+                gating: true,
             },
             {
                 criterion_type: "run_command",
                 description: "validator runs",
                 score: 0,
                 evaluation_status: "not_evaluated",
+                pass_threshold: 0.9,
+                gating: true,
             },
         ]);
 
@@ -54,7 +58,7 @@ describe("parseCriterionResults", () => {
         ]);
     });
 
-    test("legacy results default to evaluated", () => {
+    test("a row without the fields keeps the Python model defaults", () => {
         const [result] = parseCriterionResults([
             { criterion_type: "file_exists", score: 0 },
         ]);
@@ -379,6 +383,19 @@ describe("sortArtifacts", () => {
         ]);
     });
 
+    test("a .dmn rule ranks with the deliverables", () => {
+        const input = [
+            ref("d/artifacts/RiskRules/bindings_v2.json", "json"),
+            ref("d/artifacts/RiskRules/Business rule.dmn", "dmn"),
+            ref("d/artifacts/RiskRules/project.uiproj", "uiproj"),
+        ];
+        expect(sortArtifacts(input).map((a) => a.relPath)).toEqual([
+            "d/artifacts/RiskRules/Business rule.dmn",
+            "d/artifacts/RiskRules/project.uiproj",
+            "d/artifacts/RiskRules/bindings_v2.json",
+        ]);
+    });
+
     test("does not mutate the input array", () => {
         const input = [ref("b.txt", "txt"), ref("a.flow", "flow")];
         sortArtifacts(input);
@@ -517,11 +534,45 @@ describe("agentSecondsFromRaw", () => {
             agentSecondsFromRaw({ iterations: [{ duration_seconds: null }] }),
         ).toBeNull();
     });
+
+    test("prefers the stored agent_wall_ms over the iterations sum (#212)", () => {
+        expect(
+            agentSecondsFromRaw({
+                duration: 101.25,
+                agent_wall_ms: 55657,
+                iterations: [{ duration_seconds: 1 }],
+            }),
+        ).toBeCloseTo(55.657, 6);
+    });
+
+    test("a stored null stays null rather than falling back", () => {
+        expect(
+            agentSecondsFromRaw({
+                agent_wall_ms: null,
+                iterations: [{ duration_seconds: 5 }],
+            }),
+        ).toBeNull();
+    });
+});
+
+describe("toTaskRow grading split (#212)", () => {
+    test("carries grading_ms as seconds", () => {
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: 27657 }).gradingSeconds,
+        ).toBeCloseTo(27.657, 6);
+    });
+
+    test("null on a run.json that predates the key, never 0", () => {
+        expect(toTaskRow({ task_id: "x" }).gradingSeconds).toBeNull();
+        expect(
+            toTaskRow({ task_id: "x", grading_ms: null }).gradingSeconds,
+        ).toBeNull();
+    });
 });
 
 describe("extractComponentShas", () => {
     const baseEnv = {
-        git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        coder_eval: "0.12.14",
         skills_git_commit: "b2c3d4e",
         cli_version: "1.2.0-alpha.20260603.7393",
     };
@@ -548,7 +599,7 @@ describe("extractComponentShas", () => {
         );
     });
 
-    test("legacy runs without tool_plugins are unchanged", () => {
+    test("a run without tool_plugins gets only the core chips", () => {
         const out = extractComponentShas(baseEnv);
         expect(out.map((c) => c.name)).toEqual(["coder_eval", "skills", "cli"]);
     });
@@ -563,15 +614,16 @@ describe("extractComponentShas", () => {
 
     test("drops components whose value is 'unknown' (in-container git SHAs)", () => {
         // Per-task env_info captured in the sandbox can't `git rev-parse` the
-        // coder_eval / skills checkouts, so those come back "unknown"; only the
-        // npm-resolved cli + tool plugins survive.
+        // skills checkout, so it comes back "unknown".
         const out = extractComponentShas({
-            git_commit: "unknown",
             skills_git_commit: "unknown",
             cli_version: "1.2.0-alpha.20260604.7394",
             tool_plugins: { "maestro-tool": "1.2.0-alpha.20260604.7394" },
         });
         expect(out.map((c) => c.name)).toEqual(["cli", "maestro-tool"]);
+        expect(
+            extractComponentShas({ coder_eval: "unknown" }).map((c) => c.name),
+        ).toEqual([]);
     });
 
     // The framework is pinned and consumed by released version (env_info
@@ -586,37 +638,6 @@ describe("extractComponentShas", () => {
         expect(framework?.sha).toBe("0.9.1");
         expect(framework?.url).toBe(
             "https://github.com/UiPath/coder_eval/releases/tag/v0.9.1",
-        );
-    });
-
-    test("the version wins over a git_commit present in the same run", () => {
-        // Both keys are captured on every run; the SHA must not shadow the
-        // version just because it comes first in env_info.
-        const out = extractComponentShas({
-            git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            coder_eval: "0.10.0",
-        });
-        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe("0.10.0");
-    });
-
-    test("falls back to the git SHA when no version was captured", () => {
-        // Legacy runs, and editable checkouts between releases, have only the
-        // SHA — better a tree link than no chip at all.
-        const out = extractComponentShas(baseEnv);
-        const framework = out.find((c) => c.name === "coder_eval");
-        expect(framework?.sha).toBe(baseEnv.git_commit);
-        expect(framework?.url).toBe(
-            `https://github.com/UiPath/coder_eval/tree/${baseEnv.git_commit}`,
-        );
-    });
-
-    test("an 'unknown' version still falls through to the SHA", () => {
-        const out = extractComponentShas({
-            ...baseEnv,
-            coder_eval: "unknown",
-        });
-        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe(
-            baseEnv.git_commit,
         );
     });
 });

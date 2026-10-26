@@ -25,7 +25,7 @@ import type { Window } from "./reviews-types";
 export interface RunPoint {
     runId: string;
     timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
-    // The harness this run ran on, normalized (legacy runs fold to claude-code).
+    // The harness this run ran on, normalized (see normalizeHarness).
     // Every run belongs to exactly one harness, so the charts split the points
     // into one series per harness and color each by identity.
     harness: string;
@@ -196,8 +196,8 @@ export interface RunListingRow {
     taskDurationSeconds: number | null;
     // Optional so existing test factories stay valid.
     agentSeconds?: number | null;
-    // Run-level harness (coder-eval AgentKind) for the Harness column; null on
-    // legacy runs that predate the RunConfig stamp / carry no agent_config.type.
+    // Run-level harness (coder-eval AgentKind) for the Harness column; null when
+    // no row names one.
     // Optional so existing test factories stay valid.
     harness?: string | null;
 }

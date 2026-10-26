@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { normalizeHarness } from "@/lib/harness";
 
 // Canonical harness constants live in the leaf lib/harness module (shared by
 // the server data layer); re-exported here so existing badge importers are
@@ -23,20 +24,8 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         label: "Antigravity · Google Gemini",
         short: "Antigravity",
     },
-    // The Delegate harness is UiPath's own (the coder_eval_uipath plugin), so
-    // its vendor mark is the UiPath logo already served for the site header
-    // rather than a per-harness file under /harness. The key stays `delegate-sdk`
-    // because that is the `agent.type` the plugin registers and therefore what
-    // run.json carries; only the label people read is shortened.
-    "delegate-sdk": {
-        src: "/uipath.png",
-        label: "Delegate · UiPath",
-        short: "Delegate",
-    },
-    // coder_eval's own built-in Delegate agent (`agent.type: delegate`) — a
-    // distinct `AgentKind` from the coder_eval_uipath plugin's `delegate-sdk`
-    // above, so it needs its own key or it falls through to raw gray text
-    // (same fallback treatment pi gets below, matching that precedent).
+    // UiPath's own harness has no file under /harness; it uses the UiPath logo
+    // already served for the site header.
     delegate: {
         src: "/uipath.png",
         label: "Delegate · UiPath",
@@ -47,7 +36,7 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
 // Short human label for a harness id ("Claude Code"), for selectors and prose.
 // Unknown ids fall through to the raw id.
 export function harnessShortLabel(harness: string): string {
-    return HARNESS_LOGO[harness]?.short ?? harness;
+    return HARNESS_LOGO[normalizeHarness(harness)]?.short ?? harness;
 }
 
 export function HarnessBadge({
@@ -59,7 +48,7 @@ export function HarnessBadge({
     harness?: string | null;
     size?: number;
 }) {
-    const key = harness ?? "claude-code";
+    const key = normalizeHarness(harness);
     const logo = HARNESS_LOGO[key];
     // Unknown harness: show the raw id rather than a misleading logo.
     if (!logo) {

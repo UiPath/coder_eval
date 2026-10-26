@@ -485,6 +485,33 @@ def test_claude_code_version_pin_matches_framework() -> None:
     )
 
 
+def test_uv_pinned_in_agent_image() -> None:
+    """docker/Dockerfile must install a PINNED uv through the versioned
+    installer URL. Agents run `uv` themselves, so its install speed is part of
+    task wall clock: the unpinned `install.sh` moved the image from uv 0.12.9 to
+    0.12.12 on a rebuild, and 0.12.11+ copies cross-filesystem (cache in the
+    image, venv on the bind-mounted workspace) ~40x slower. Fails on an
+    unversioned installer URL or a missing/`latest` pin."""
+    df_text = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    pin: str | None = None
+    for ln in df_text.splitlines():
+        m = re.match(r"\s*ARG UV_VERSION=(\S+)", ln)
+        if m:
+            pin = m.group(1)
+            break
+    assert pin, "ARG UV_VERSION=<version> missing from docker/Dockerfile — uv is not pinned."
+    assert re.fullmatch(r"\d+\.\d+\.\d+", pin), f"UV_VERSION must be an exact x.y.z version, got {pin!r}."
+
+    assert "https://astral.sh/uv/${UV_VERSION}/install.sh" in df_text, (
+        "docker/Dockerfile must install uv from https://astral.sh/uv/${UV_VERSION}/install.sh so the pin and "
+        "the install cannot drift."
+    )
+    assert "https://astral.sh/uv/install.sh" not in df_text, (
+        "docker/Dockerfile still has an unversioned uv installer URL, which installs whatever uv is latest."
+    )
+
+
 def test_pi_cli_baked_and_pinned() -> None:
     """docker/Dockerfile must ship a PINNED Pi CLI, and its install line must
     reference the ARG (not a hardcoded literal) so a bump is one edit and the

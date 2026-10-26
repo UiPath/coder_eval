@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 | Limit | claude-code | codex | antigravity | opencode | pi | delegate |
 |---|---|---|---|---|---|---|
-| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens when the previous call's tools have all returned |
+| `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens on its first streamed text, or on its `usage` frame when it streams none; a tool-only call N+1's first tool can start before the kill |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
@@ -34,8 +34,8 @@ wall clock its numbers account for.
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` | set |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent | synthetic `<turn_id>-msg-0` (exactly one per turn) |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes, trivially — one window IS the turn |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn | raw `datetime.now()` (no `TurnClock` — CE064 does not require one, since there is only one window and no inter-window drift it could correct) |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its own single-window bounds |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn | one `TurnClock` per turn (its raw `datetime.now()` bounds drifted from the monotonic `duration_seconds` on Windows and put the tail past the whole turn) |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) | the same `TurnClock` (**CE064**) |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
@@ -126,8 +126,8 @@ Two consequences worth stating, because both are behaviour changes:
   (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
   subtracts the overlap once, and re-apportions so the parts still sum.
 
-**Two clock bases remain, and the row above says which.** Antigravity, Pi and
-claude-code derive every recorded wall stamp from one `TurnClock` per turn, so
+**Two clock bases remain, and the row above says which.** Antigravity, Pi,
+claude-code and Delegate derive every recorded wall stamp from one `TurnClock` per turn, so
 a turn's bounds and the tool spans subtracted from them cannot disagree, and
 neither can be moved by a DST transition or an NTP step inside the turn.
 Antigravity needed it first: its span was monotonic while its tool intervals
@@ -408,28 +408,22 @@ generic tool items now carry a duration where they previously carried none, so
 `avg_command_time_ms` and `total_command_time_ms` for a Codex run describe every
 tool call rather than shell commands alone.
 
-**`message_id` is what splits the timeline.** The evalboard groups assistant
-emissions by `message_id`, and falls back to a wall-clock gap threshold
-(`SAME_EMISSION_GAP_MS`, 100 ms, in `evalboard/lib/runs.ts`) when either side
-lacks one. Antigravity's `Step` stream carries no message id, so the harness
-synthesizes one — and it must, because this harness's generation windows are
-*contiguous* by construction: each opens exactly where the previous one closed,
-so the gap between two of them is always 0 ms and the fallback would fold a
-whole turn's generations into a single row. CE060 makes the kwarg mandatory in
-`src/coder_eval/agents/` for that reason.
+**`message_id` is what splits the timeline.** The evalboard joins assistant
+emissions into one row only when they share a `message_id`
+(`evalboard/lib/runs.ts`); an emission without one is never joined, so each of
+its content blocks renders as its own row. Antigravity's `Step` stream carries
+no message id, so the harness synthesizes one. CE060 makes the kwarg mandatory
+in `src/coder_eval/agents/` for that reason.
 
-The collapse is a *display* defect, not an accounting one — the consumer SUMS a
-group's token buckets and durations, so every total, percentage and cost is
-identical either way, as is the reconciliation residual. But it is not
-cosmetic, and three displayed figures do move when a turn stops collapsing:
-the thinking-cost simulator's per-call cache cascade (`calls` in
-`evalboard/lib/thinkingSim.ts` is the number of grouped emissions, and the
-cascade is quadratic in it — on a single-shot run it was pinned at one call,
-so every coefficient was zero), the `Messages` count and timeline heading, and
-the "slow generation" count, whose 10 s bar was being applied to a whole turn's
-summed generation time. All three move toward the figure they were always
-meant to report, so the fix corrects them rather than breaking them — but a
-trend compared across this change is not comparing like with like.
+A missing `message_id` is a *display* defect, not an accounting one — the
+consumer SUMS a group's token buckets and durations, so every total, percentage
+and cost is identical however the blocks are grouped, as is the reconciliation
+residual. But it is not cosmetic: each split block counts as its own emission,
+which skews three displayed figures — the thinking-cost simulator's per-call
+cache cascade (`calls` in `evalboard/lib/thinkingSim.ts` is the number of
+grouped emissions, and the cascade is quadratic in it), the `Messages` count
+and timeline heading, and the "slow generation" count, whose 10 s bar applies
+per emission.
 
 The two synthetic schemes read differently on purpose: Codex deliberately REPEATS one
 id across the sub-messages of a single generation — that is exactly the "the
@@ -498,27 +492,6 @@ needed to drive it.
 
 ### Known divergences
 
-- **This page's `delegate` column is a DIFFERENT agent** from the one described
-  in the bullet immediately below. `delegate` (this repo, `AgentKind.DELEGATE`)
-  drives the now-public `@uipath/delegate-sdk` through a first-party Node host;
-  `delegate-sdk` (the bullet below) is an older, UiPath-internal-only agent in
-  the separate `coder_eval_uipath` plugin, driving the non-public
-  `@uipath/delegate-stdio` package. They are not the same code and this page
-  does not claim their timing behavior matches.
-- **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
-  execution bounds, so its tool calls cannot be placed on a timeline. Its
-  coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
-  (audit P3-1). **The consequence is now the same on both surfaces:** such a
-  call contributes to NO bucket. Python has always dropped it
-  (`timing.main_thread_tool_spans` filters on `is not None`), and
-  `evalboard/lib/timing.ts::toolExecutionMs` no longer folds the bare duration
-  into its union — a duration with no bounds cannot be placed on the timeline,
-  so unioning it double-books whatever it overlapped and can drive the
-  four-bucket residual negative. Its time reads as **Unaccounted**, which is
-  what that cell means: measured, but not placeable. Codex was in the same
-  state until `_item_timing` landed on 2026-09-10 (0% bounded before, 100%
-  after), so on historical codex runs ~8 h in aggregate moves out of Tool exec
-  and into Unaccounted; that population is closed and no new record joins it.
 - **Antigravity books orphan-poll waiting as agent duration.** A task can spend
   `0.8 × turn_timeout` waiting on a tool call that never reaches DONE — 14 tasks
   and 9.6h of one 83h run. Only CLOSED tool intervals are subtracted, so that
@@ -536,8 +509,33 @@ needed to drive it.
   cost of normalizing it is that the event drives the live renderers, so moving
   it changes the turn boundaries users watch during a run.
 
-All three are deliberately deferred; see `c/time-bugs-audit.md` for the
+Both are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
+
+**Older records can have a tool `duration_ms` with no execution bounds.** Codex
+records from before `_item_timing` landed on 2026-09-10 have this shape, and so do
+records from `delegate-sdk`, the out-of-tree agent in `coder_eval_uipath` that the
+built-in `delegate` replaced. Such a tool call cannot be placed on a timeline, so it
+contributes to NO bucket on either surface. Python drops it
+(`timing.main_thread_tool_spans` filters on `is not None`), and
+`evalboard/lib/timing.ts::toolExecutionMs` does not fold the bare duration into its
+union: a duration with no bounds would double-book whatever it overlapped and could
+make the four-bucket residual negative. Its time reads as **Unaccounted**, which is
+what that cell means: measured, but not placeable. On historical codex runs, this
+moves ~8 h in aggregate out of Tool exec and into Unaccounted. No built-in agent
+writes this shape now.
+
+## Sub-agent tool calls
+
+Only claude-code and codex nest a sub-agent's work under its spawn row
+(`parent_tool_use_id`); the other harnesses record no sub-agent path.
+
+| | claude-code | codex |
+|---|---|---|
+| spawn row | `Agent`, with the brief in `description` / `prompt` | `Agent` (`operation: spawnagent`), from a v1 `collabAgentToolCall` or a v2 `subAgentActivity` `started` item; on v2, no prompt (the spawn message is encrypted) and no model |
+| the child's generations | nested live, with the child's real model | nested after the turn, rebuilt from the child's rollout under `$CODEX_HOME/sessions`, priced at the parent's model on v2 |
+| the child's shell commands | one `Bash` row per call, status and `duration_ms` measured live | one `Bash` row per command, with its exit code, rebuilt from the child's rollout (CLI 0.156.1 and later); no `duration_ms`. See [Codex § Sub-agents](CODEX.md#sub-agents) |
+| when the rows exist | during the turn, so live criteria see them | after the turn, so live criteria and `stop_early` do not see them |
 
 ## `max_turns` counts model API calls on every harness
 
@@ -563,12 +561,18 @@ Each harness finds the call boundary in its own stream (the table above):
   step, so a rise in that total closes the call, and the next call opens with a MODEL
   step at a new `step_index`.
 - **OpenCode** and **Pi** stream one `step_start` or `turn_start` per call.
-- **Delegate**'s SDK has no round-trip marker, and a tool-only reply streams only
-  its tool call, with no text before it. So the next call opens when every tool the
-  previous call announced has returned, since those results go back to the model,
-  and the cap fires before call N+1 can run anything. A reply that announces
-  several tools before their results counts once. If a tool never returns, the
-  next call opens at the model's next text or new tool call instead.
+- **Delegate** streams a call's text, then writes the call's `usage` frame, then
+  runs the call's tools. It runs a batched reply's tools one at a time, so one call
+  streams `tool_call`, `tool_result`, `tool_call`, `tool_result`, and a tool event
+  cannot mark a call boundary. A call therefore opens on its first `thinking` or
+  `message` event. A tool-only reply streams no text, so it opens on its `usage`
+  frame. A call N+1 that streams text is cut at that text, before any of its tools.
+  A tool-only call N+1 is cut at its `usage` frame, and its first tool can start
+  before the kill: the host starts a call's tools right after the frame, and the
+  stream gives no earlier boundary. The host's own `maxSteps` option does not stop
+  the turn, so the adapter does not send it and enforces the cap itself. A host that
+  sends no `usage` frames counts only the calls that stream text. The calls under
+  the cap keep their tokens and cost.
 
 Every harness enforces the cap on the same loop boundary as the
 cooperative early stop, then kills or cancels the in-flight turn so the cap stops
@@ -641,6 +645,38 @@ A timeout is a *failure* (partial turn captured, error status); the turn cap is 
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task
 whose cap fires should not look like a task whose harness hung.
 
+## The context window cap per harness
+
+`agent.context_window` is not a run limit, but the same promise applies: one value
+must mean the same cap on every harness that accepts it. It is the context window, in
+tokens, that the harness compacts the conversation within. A harness that cannot apply
+it rejects it when the config loads. It is never ignored, because a variant that runs
+uncapped under a "capped" label is a wrong measurement.
+
+| | claude-code | codex | antigravity | opencode | pi | delegate |
+|---|---|---|---|---|---|---|
+| mechanism | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the CLI environment | thread config `model_context_window` | rejected | rejected | rejected | rejected |
+| accepted range | 100000-1000000 | 32768 and up | | | | |
+| when compaction starts | when the context approaches the window | at 90% of the window (Codex's default auto-compact limit) | | | | |
+| above the model's own window | capped to the model's window by the CLI | capped to the model's catalog maximum by Codex | | | | |
+| unset | the model's full window: a host `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is blanked | the host's Codex config: a `model_context_window` in `$CODEX_HOME/config.toml` still applies | | | | |
+
+- **claude-code**: the environment variable outranks `--autocompact` and every settings
+  scope, so a host or project `autoCompactWindow` cannot change the cap. Setting
+  `claude_settings.autoCompactWindow` together with `context_window` fails at load when
+  `claude_settings` is an inline dict; a settings file's `autoCompactWindow` is not read,
+  and is overridden the same way. When `context_window` is unset, a host-set
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is blanked, so a run recorded as uncapped is never
+  capped by the host. This applies to every claude-code run, capped or not.
+- **codex**: the value replaces the model's context window, so the hard-cap
+  compaction at the usable window (a per-model share of it, 95% for Codex's fallback
+  model metadata) also moves. The floor of 32768 rejects a window too small to work in,
+  such as a dropped `000` or a YAML `yes`, which would load as 1. When `context_window`
+  is unset, coder_eval sets nothing, so a host `model_context_window` in
+  `$CODEX_HOME/config.toml` still applies.
+- Neither harness reports when the model's own window has lowered the cap. A cap
+  above the model's window runs at the model's window.
+
 ## `agent.plugins[].path` accepts different depths per harness
 
 Not a run limit, but the same promise: one task file, three harnesses, same meaning.
@@ -654,7 +690,7 @@ This field breaks it silently.
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
 parents the skill directories and no skill loads. Codex
-(`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
+(`codex_agent._collect_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
 both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
 
 † Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a
@@ -718,9 +754,10 @@ both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
   lowercase (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`), but the shared config
   default (`experiments/default.yaml`) sets Claude-namespaced names
   (`Bash`/`Read`/`Write`/…). Forwarding those to `--tools` would allowlist tools that
-  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them),
-  Codex (forwards `disallowed_tools` without SDK enforcement), and Antigravity (does not
-  read them), Pi ignores them and runs with its full native toolset. A task that needs a
+  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them)
+  and Codex (forwards `disallowed_tools` without SDK enforcement), Pi ignores them and
+  runs with its full native toolset. (Antigravity maps them onto its builtin tools; see
+  [Antigravity](ANTIGRAVITY.md).) A task that needs a
   restricted Pi toolset would have to name Pi's lowercase tools — a documented follow-up.
 - **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
   exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval

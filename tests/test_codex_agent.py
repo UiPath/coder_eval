@@ -500,10 +500,22 @@ import tempfile  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
+from typing import Any  # noqa: E402
 
-from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
+from openai_codex.generated.v2_all import (  # noqa: E402
+    SubAgentActivityThreadItem,
+    Turn,
+    TurnCompletedNotification,
+)
 
 from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
+from tests._fixtures.codex_rollouts import (  # noqa: E402
+    command_record,
+    exec_call,
+    exec_output,
+    token_count_event,
+    write_child_rollout,
+)
 
 
 def _item_notification(
@@ -1047,13 +1059,14 @@ def _collab_call(
     prompt: str | None = None,
     result: str | None = None,
     status: str = "completed",
-    child_thread: str = "thread_child",
+    child_thread: str | None = "thread_child",
 ) -> SimpleNamespace:
     """A collabAgentToolCall item root (Codex's native multi-agent tool).
 
     ``tool`` is the collab operation value ("spawnAgent" or "wait"); ``result``
     becomes a spawned agent's returned message (under agents_states). The spawn
-    and the wait share ``child_thread`` so the result nests under the spawn."""
+    and the wait share ``child_thread`` so the result nests under the spawn; a
+    multi-agent v2 wait names no child (``child_thread=None``)."""
     states = {}
     if result is not None:
         states[child_thread] = SimpleNamespace(message=result, status="completed")
@@ -1064,9 +1077,37 @@ def _collab_call(
         model=model,
         prompt=prompt,
         status=status,
-        receiver_thread_ids=[child_thread],
+        receiver_thread_ids=[child_thread] if child_thread else [],
         agents_states=states,
     )
+
+
+def _sub_agent_activity(
+    kind: str,
+    *,
+    item_id: str,
+    child_thread: str,
+    agent_path: str = "/root/run_tests",
+) -> SubAgentActivityThreadItem:
+    """A subAgentActivity item root (Codex multi-agent v2's sub-agent lifecycle item).
+
+    ``kind`` is "started" (the spawn itself: ``item_id`` is the spawn_agent call id)
+    or a lifecycle notice ("completed", "interrupted", "interacted"). Built as the
+    SDK model, so a renamed field fails here and not silently in the agent."""
+    return SubAgentActivityThreadItem(
+        type="subAgentActivity",
+        id=item_id,
+        kind=kind,
+        agent_thread_id=child_thread,
+        agent_path=agent_path,
+    )
+
+
+def _spawn(shape: str, child: str, *, call_id: str = "call_spawn") -> Any:
+    """The spawn of ``child``: a v1 collab call or a multi-agent v2 ``started`` item."""
+    if shape == "v1":
+        return _collab_call("spawnAgent", call_id=call_id, model="gpt-5.5", child_thread=child)
+    return _sub_agent_activity("started", item_id=call_id, child_thread=child)
 
 
 class TestCodexCollabSubAgent:
@@ -1153,44 +1194,6 @@ class TestCodexCollabSubAgent:
         assert "call_orphan" in block_ids
 
 
-def _write_child_rollout(home, thread_id: str, items: list[dict]) -> None:
-    """Write a minimal child-thread rollout JSONL under <home>/sessions.
-
-    The thread id is embedded in the filename verbatim (that's how the agent
-    locates it). Each entry is either a raw ResponseItem payload (function_call,
-    function_call_output, …) — wrapped as a ``response_item`` line — or, if it
-    already carries a top-level ``"type"`` (e.g. an ``event_msg`` token_count),
-    written verbatim so generations can be interleaved with token boundaries."""
-    import json as _json
-
-    sessions = home / "sessions" / "2026" / "06" / "05"
-    sessions.mkdir(parents=True, exist_ok=True)
-    path = sessions / f"rollout-2026-06-05T14-22-36-{thread_id}.jsonl"
-    _line_types = {"response_item", "event_msg", "session_meta", "turn_context"}
-    lines = [
-        _json.dumps(it if it.get("type") in _line_types else {"type": "response_item", "payload": it}) for it in items
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _token_count_event(*, inp: int, cached: int, out: int, tot_in: int, tot_cached: int, tot_out: int) -> dict:
-    """A child-rollout ``token_count`` event_msg (a generation boundary)."""
-    return {
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {
-                "last_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "output_tokens": out},
-                "total_token_usage": {
-                    "input_tokens": tot_in,
-                    "cached_input_tokens": tot_cached,
-                    "output_tokens": tot_out,
-                },
-            },
-        },
-    }
-
-
 class TestCodexSubAgentToolRecovery:
     """A Codex sub-agent runs on a child thread whose tool calls never reach the
     parent stream and are dropped from `thread.read` (Limited persistence). But
@@ -1201,7 +1204,7 @@ class TestCodexSubAgentToolRecovery:
     async def test_inner_shell_command_recovered_and_nested(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-aaaa-7000-8000-000000000001"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
@@ -1240,6 +1243,171 @@ class TestCodexSubAgentToolRecovery:
         # Both the returned text ("5050") and the recovered tool-call message nest.
         assert any(sub_tool_id in m.tool_use_ids for m in nested)
 
+    async def test_v2_started_activity_is_the_spawn_and_feeds_recovery(self, monkeypatch, tmp_path):
+        # The wait names no child: only the `started` item can register it.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-dddd-7000-8000-000000000004"
+        script = (
+            'await Promise.all([tools.exec_command({cmd:"pytest tests/test_api.py -q"}),'
+            ' tools.exec_command({cmd:"ruff check ."})]);'
+        )
+        write_child_rollout(
+            tmp_path,
+            child,
+            [
+                exec_call("c_1", script),
+                command_record("pytest tests/test_api.py -q", exit_code=0, item_id="exec-1", output="1 passed\n"),
+                command_record("ruff check .", exit_code=1, item_id="exec-2", output="E501 line too long\n"),
+                exec_output("c_1", '[{"exit_code":0},{"exit_code":1}]'),
+            ],
+        )
+        started = _sub_agent_activity("started", item_id="call_spawn", child_thread=child)
+        wait = _collab_call("wait", call_id="call_wait", child_thread=None)
+        completed = _sub_agent_activity("completed", item_id="subagent-completed-turn_c1", child_thread=child)
+        notifications = [
+            _item_notification("item/started", started),
+            _item_notification("item/completed", started),
+            _item_notification("item/started", wait),
+            _item_notification("item/completed", wait),
+            _item_notification("item/started", completed),
+            _item_notification("item/completed", completed),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX, model="parent-model"), notifications)
+
+        record = await agent.communicate("delegate it")
+
+        # The spawn and the wait are the only Agent rows: the `completed` notice
+        # is neither an Agent row nor a raw "subAgentActivity" stub.
+        agent_rows = {c.tool_id: c for c in record.commands if c.tool_name == "Agent"}
+        assert set(agent_rows) == {"call_spawn", "call_wait"}
+        assert not [c for c in record.commands if c.tool_name == "subAgentActivity"]
+        assert not [c for c in record.commands if c.tool_id.startswith("subagent-completed")]
+        spawn_row = agent_rows["call_spawn"]
+        assert spawn_row.parameters == {"operation": "spawnagent", "agent_path": "/root/run_tests"}
+        assert spawn_row.result_status == "success"
+
+        # Each command the child's script ran is a row with its own exit code, under the spawn.
+        bash = [c for c in record.commands if c.tool_name == "Bash"]
+        assert [(c.parameters["command"], c.result_status) for c in bash] == [
+            ("pytest tests/test_api.py -q", "success"),
+            ("ruff check .", "error"),
+        ]
+        assert "1 passed" in (bash[0].result_summary or "")
+        nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
+        blocks = {b.tool_use_id: b for m in nested for b in m.content_blocks if b.block_type == "tool_use"}
+        assert [blocks[c.tool_id].is_error for c in bash] == [False, True]
+        assert all(m.model == "parent-model" for m in nested)
+
+    @pytest.mark.parametrize("delta", [True, False], ids=["with-text", "notices-only"])
+    async def test_v2_lifecycle_notices_without_a_spawn_record_nothing(self, monkeypatch, tmp_path, delta):
+        # `completed` / `interrupted` / `interacted` without a `started` are notices
+        # about a child this turn did not spawn: no tool rows, no sub-agent, and no
+        # model call of their own.
+        from coder_eval.models import AssistantMessage
+
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-eeee-7000-8000-000000000005"
+        notifications = []
+        for kind in ("completed", "interrupted", "interacted"):
+            notice = _sub_agent_activity(kind, item_id=f"subagent-{kind}-turn_x", child_thread=child)
+            notifications += [_item_notification("item/started", notice), _item_notification("item/completed", notice)]
+        notifications += [_delta("done"), _turn_completed()] if delta else [_turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        assert record.commands == []
+        assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
+        if not delta:
+            assert not [m for m in record.messages if isinstance(m, AssistantMessage)]
+
+    @pytest.mark.parametrize("first", ["v1", "v2"])
+    async def test_a_second_spawn_of_one_child_does_not_register_it_again(self, monkeypatch, tmp_path, first):
+        # A repeated `started` item, or a v1 and a v2 spawn of one child, would mine its
+        # rollout twice and double the child's rows and tokens.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-abab-7000-8000-00000000000b"
+        write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": "c_1", "arguments": '{"cmd":"echo one"}'},
+                {"type": "function_call_output", "call_id": "c_1", "output": "one\n"},
+            ],
+        )
+        notifications = []
+        for spawn in (_spawn(first, child, call_id="call_1"), _spawn("v2", child, call_id="call_2")):
+            notifications += [_item_notification("item/started", spawn), _item_notification("item/completed", spawn)]
+        notifications += [_delta("done"), _turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        assert len([c for c in record.commands if c.tool_name == "Bash"]) == 1
+        assert {m.parent_tool_use_id for m in record.messages if getattr(m, "parent_tool_use_id", None)} == {"call_1"}
+
+    async def test_a_failed_or_cut_off_child_call_is_not_recovered_as_a_success(self, monkeypatch, tmp_path):
+        # A require_success criterion reads result_status: a failed or cut-off call must not reach it as a success.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-cdcd-7000-8000-00000000000c"
+        write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "c_1",
+                    "arguments": '{"command":"pytest"}',
+                },
+                {"type": "function_call_output", "call_id": "c_1", "output": "Exit code: 1\nOutput:\n1 failed\n"},
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "c_2",
+                    "arguments": '{"cmd":"make build"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "c_2",
+                    "output": "Chunk ID: ab12\nWall time: 0.4 seconds\nProcess exited with code 2\nOutput:\nboom\n",
+                },
+                exec_call("c_3", "await tools.view_image({path: 'missing.png'});"),
+                exec_output("c_3", "Error: no such file", head="Script failed"),
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "c_4",
+                    "arguments": '{"cmd":"sleep 60"}',
+                },
+                {"type": "function_call_output", "call_id": "c_4", "output": "Wall time: 3.2 seconds\naborted by user"},
+            ],
+        )
+        spawn = _collab_call("spawnAgent", call_id="call_spawn", child_thread=child)
+        notifications = [
+            _item_notification("item/started", spawn),
+            _item_notification("item/completed", spawn),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go")
+
+        recovered = [c for c in record.commands if c.tool_id.startswith("sub:")]
+        assert [(c.tool_name, c.result_status) for c in recovered] == [
+            ("Bash", "error"),
+            ("Bash", "error"),
+            ("exec", "error"),
+            ("Bash", "unknown"),
+        ]
+        blocks = [
+            b for m in record.messages for b in m.content_blocks if b.tool_use_id in {c.tool_id for c in recovered}
+        ]
+        assert [b.is_error for b in blocks] == [True, True, True, False]
+
     async def test_missing_rollout_is_silently_skipped(self, monkeypatch, tmp_path):
         # No rollout written for the child → recovery finds nothing and the turn
         # still completes with just the returned result nested (no crash).
@@ -1269,7 +1437,7 @@ class TestCodexSubAgentToolRecovery:
         # output tokens must be 90, not 0).
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-cccc-7000-8000-000000000003"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
@@ -1281,10 +1449,10 @@ class TestCodexSubAgentToolRecovery:
                 },
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050\n"},
                 # gen1 boundary: the tool-call generation (90 output tokens).
-                _token_count_event(inp=11860, cached=3456, out=90, tot_in=11860, tot_cached=3456, tot_out=90),
+                token_count_event(inp=11860, cached=3456, out=90, tot_in=11860, tot_cached=3456, tot_out=90),
                 {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "5050"}]},
                 # gen2 boundary: the final reply (6 output tokens). Totals cumulative.
-                _token_count_event(inp=11999, cached=11648, out=6, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=11999, cached=11648, out=6, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
@@ -1328,13 +1496,13 @@ class TestCodexSubAgentToolRecovery:
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-dddd-7000-8000-000000000004"
         # Child cumulative: cache_read 15104, fresh 8755 (23859-15104), output 96.
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
@@ -2127,7 +2295,8 @@ class TestMaxTurnsApiCallCap:
         assert record.max_turns_exhausted is False
         assert len(record.commands) == 1
 
-    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("shape", ["v1", "v2"])
+    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path, shape):
         """A capped turn must not lose the child threads' spend.
 
         Codex bills sub-agents on separate threads the parent total never sees, and
@@ -2139,16 +2308,16 @@ class TestMaxTurnsApiCallCap:
         """
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-eeee-7000-8000-000000000005"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
-        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        spawn = _spawn(shape, child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
         # The cap fires once the second call's tools finish, before turn/completed is dispatched.
         notifications = [
@@ -2174,20 +2343,21 @@ class TestMaxTurnsApiCallCap:
         assert record.token_usage.output_tokens >= 96
         assert record.token_usage.cache_read_input_tokens >= 15104
 
-    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("shape", ["v1", "v2"])
+    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path, shape):
         """The early-stop path keeps its pre-existing skip: an armed gate already decided."""
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-ffff-7000-8000-000000000006"
-        _write_child_rollout(
+        write_child_rollout(
             tmp_path,
             child,
             [
                 {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
                 {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+                token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
             ],
         )
-        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        spawn = _spawn(shape, child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
         notifications = [
             _item_notification("item/started", spawn),
@@ -2815,3 +2985,125 @@ class TestProviderErrorNotifications:
         st, collector = self._state()
         st.finalize(AgentEndStatus.COMPLETED)
         assert collector.build_turn_record().provider_errors == []
+
+
+# The provider message codex reported in adhoc-2026-10-21_16-16-27
+# (v2/skill-case-diagnose-formal-arg-slot-ids): five retried stream disconnects,
+# then a rate limit it would not retry, then a `failed` turn/completed.
+_RATE_LIMIT_MESSAGE = (
+    "rate limit exceeded: Your requests to gpt-5.6-luna for gpt-5.6-luna in eastus2 have exceeded token rate limit."
+)
+
+
+def _error_notification(error: dict, *, will_retry: bool) -> SimpleNamespace:
+    from openai_codex.generated.v2_all import ErrorNotification
+
+    payload = ErrorNotification.model_validate(
+        {"error": error, "threadId": "t1", "turnId": "u1", "willRetry": will_retry}
+    )
+    return SimpleNamespace(method="error", payload=payload)
+
+
+def _turn_failed(error: dict | None) -> SimpleNamespace:
+    turn = Turn.model_validate(
+        {
+            "id": "turn_1",
+            "status": "failed",
+            "durationMs": 21847,
+            "error": error,
+            "items": [],
+            "itemsView": "notLoaded",
+        }
+    )
+    return SimpleNamespace(method="turn/completed", payload=TurnCompletedNotification(thread_id="th_1", turn=turn))
+
+
+def _rate_limited_turn(*, commands: int) -> list[SimpleNamespace]:
+    notes: list[SimpleNamespace] = []
+    for i in range(commands):
+        root = SimpleNamespace(
+            type="commandExecution",
+            id=f"cmd_{i}",
+            command=f"uip maestro case validate {i}",
+            exit_code=0,
+            aggregated_output="ok\n",
+            duration_ms=5,
+        )
+        notes += [_item_notification("item/started", root), _item_notification("item/completed", root)]
+    notes.append(_delta("I'm using the Maestro Case skill to repair the plan."))
+    for attempt in range(1, 6):
+        notes.append(
+            _error_notification(
+                {
+                    "message": f"Reconnecting... {attempt}/5",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+                    "additionalDetails": _RATE_LIMIT_MESSAGE,
+                },
+                will_retry=True,
+            )
+        )
+    notes.append(
+        _error_notification({"message": _RATE_LIMIT_MESSAGE, "codexErrorInfo": "rateLimitExceeded"}, will_retry=False)
+    )
+    notes.append(_turn_failed({"message": _RATE_LIMIT_MESSAGE, "codexErrorInfo": "rateLimitExceeded"}))
+    return notes
+
+
+class TestFailedTurnIsACrash:
+    """A `turn/completed` whose turn is `failed` is a crash, never a COMPLETED turn.
+
+    Before this, codex's terminal rate limit booked as COMPLETED and the row was
+    graded FAILURE: 27 of 114 rows in adhoc-2026-10-21_16-16-27 (codex,
+    gpt-5.6-luna) were scored on a turn the provider cut off.
+    """
+
+    @pytest.mark.parametrize("commands", [0, 4])
+    async def test_rate_limited_turn_raises_crash_and_keeps_the_partial(self, commands):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), _rate_limited_turn(commands=commands))
+
+        with pytest.raises(AgentCrashError) as excinfo:
+            await agent.communicate("repair the case")
+
+        assert _RATE_LIMIT_MESSAGE in str(excinfo.value)
+        assert "codexErrorInfo=rateLimitExceeded" in str(excinfo.value)
+        assert agent.get_state() == AgentState.ERROR
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert partial.crash_reason is not None and "rate limit exceeded" in partial.crash_reason
+        # The work done before the cut and the provider evidence both survive.
+        assert len(partial.commands) == commands
+        assert [(e.kind, e.will_retry) for e in partial.provider_errors] == [
+            *[("responseStreamDisconnected", True)] * 5,
+            ("rateLimitExceeded", False),
+        ]
+
+    async def test_rate_limit_crash_is_categorized_as_a_rate_limit(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), _rate_limited_turn(commands=0))
+        with pytest.raises(AgentCrashError) as excinfo:
+            await agent.communicate("repair the case")
+
+        assert categorize_error(excinfo.value, {"component": "agent"}) is ErrorCategory.AGENT_RATE_LIMIT
+
+    async def test_failed_turn_without_error_details_still_crashes(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), [_delta("hi"), _turn_failed(None)])
+
+        with pytest.raises(AgentCrashError, match="no error message"):
+            await agent.communicate("go")
+
+    async def test_completed_turn_with_a_retried_provider_error_is_not_a_crash(self):
+        notes = [
+            _error_notification({"message": "Reconnecting... 1/5"}, will_retry=True),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notes)
+
+        record = await agent.communicate("go")
+
+        assert record.crashed is False
+        assert agent.pending_turn is None

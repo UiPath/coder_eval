@@ -298,7 +298,7 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         const parent = makeMessage({
             index: 1,
             text: "PARENT_THREAD",
-            blockTypes: ["tool_use"],
+            blockTypes: ["text", "tool_use"],
             toolUses: [agentTool("T1")],
         });
         const child = makeMessage({
@@ -319,31 +319,6 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         expect(screen.getByText("PARENT_THREAD")).toBeInTheDocument();
         // The Agent call's result is rendered too (after the nested rows).
         expect(screen.getByText(/\[1, 2\]/)).toBeInTheDocument();
-    });
-
-    test("legacy run without branch info renders every message at top level", () => {
-        // No parent_tool_use_id recorded → both messages are top-level rows, and
-        // a message with an Agent tool call has no children to nest.
-        const a = makeMessage({
-            index: 1,
-            text: "ROW_A",
-            blockTypes: ["tool_use"],
-            toolUses: [agentTool("T1")],
-            parentToolUseId: undefined,
-        });
-        const b = makeMessage({
-            index: 2,
-            text: "ROW_B",
-            parentToolUseId: undefined,
-        });
-        const { container } = render(
-            <MessageTimelineSection messages={[a, b]} />,
-        );
-        // Two top-level rows in the table body.
-        const topRows = container.querySelectorAll("ol > li");
-        expect(topRows).toHaveLength(2);
-        expect(screen.getByText("ROW_A")).toBeInTheDocument();
-        expect(screen.getByText("ROW_B")).toBeInTheDocument();
     });
 
     test("shows each sub-agent call's token buckets on its per-call CallTokensRow", () => {

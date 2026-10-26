@@ -14,8 +14,8 @@
 
 ## Task Details
 
-| Task ID | Status | Reliability Score | Latency |
-|---------|--------|-------------------|---------|
+| Task ID | Status | Reliability Score | Latency (end-to-end) | Agent Wall | Grading |
+|---------|--------|-------------------|----------------------|------------|---------|
 
 ## Environment
 

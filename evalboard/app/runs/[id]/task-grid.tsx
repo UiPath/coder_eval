@@ -41,6 +41,8 @@ type SortKey =
     | "status"
     | "score"
     | "duration"
+    | "agent"
+    | "grading"
     | "vsExp"
     | "cost"
     | "turns"
@@ -54,7 +56,10 @@ type SortKey =
 const COLUMN_HELP: Partial<Record<SortKey, string>> = {
     ...TOKEN_COLUMN_HELP,
     turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_turns budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
-    vsExp: "Duration ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
+    vsExp: "End-to-end ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
+    duration: "End-to-end wall clock for this task: sandbox setup + the agent's turns + grading. A checker that runs a live command can add tens of seconds here, so this is not the agent's time — see Agent.",
+    agent: "Agent wall clock: the agent's turns, summed. Excludes sandbox setup, pre_run and grading.",
+    grading: "Time spent checking success criteria (run.json grading_ms). — when the run did not record it.",
     cost: "Total billed cost for this task, reported by the SDK (summed across turns).",
     variant: "Experiment arm this row was produced by. A run declaring `variants:` executes every task once per arm and keeps each arm's output in its own subtree, so the same task appears once per arm and the two rows are separate measurements — never collapsed together.",
 };
@@ -302,6 +307,8 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     status: "asc",
     score: "desc",
     duration: "desc",
+    agent: "desc",
+    grading: "desc",
     vsExp: "desc",
     cost: "desc",
     turns: "desc",
@@ -347,6 +354,15 @@ function compare(
                 (a.durationSeconds ?? -Infinity) -
                 (b.durationSeconds ?? -Infinity)
             );
+        case "agent":
+            return (
+                (a.agentSeconds ?? -Infinity) - (b.agentSeconds ?? -Infinity)
+            );
+        case "grading":
+            return (
+                (a.gradingSeconds ?? -Infinity) -
+                (b.gradingSeconds ?? -Infinity)
+            );
         case "vsExp":
             return (
                 (timeRatio(a.durationSeconds, a.expectedSeconds) ?? -Infinity) -
@@ -390,7 +406,9 @@ const COLUMNS: Array<{
     { key: "variant", header: "Variant" },
     { key: "status", header: "Status" },
     { key: "score", header: "Score", align: "right" },
-    { key: "duration", header: "Duration", align: "right" },
+    { key: "duration", header: "End-to-end", align: "right" },
+    { key: "agent", header: "Agent", align: "right" },
+    { key: "grading", header: "Grading", align: "right" },
     { key: "vsExp", header: "vs Expected", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "turns", header: "Turns", align: "right" },
@@ -804,6 +822,12 @@ export function TaskGrid({
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtTableDuration(t.durationSeconds)}
                             </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {fmtTableDuration(t.agentSeconds ?? null)}
+                            </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {fmtTableDuration(t.gradingSeconds ?? null)}
+                            </td>
                             <td
                                 className={`py-3 px-4 text-right tabular-nums font-medium ${timeCellClasses(timeTint)}`}
                                 title={expectedTimeTitle(t.expectedSeconds)}
@@ -958,7 +982,7 @@ export function TaskGrid({
                                 reviewSelectedSet={reviewSelectedSet}
                                 onToggleReviewTag={onToggleReviewTag}
                             />
-                            <dl className="grid grid-cols-4 gap-2 pt-1 text-xs">
+                            <dl className="grid grid-cols-3 gap-2 pt-1 text-xs">
                                 <Stat
                                     label="Score"
                                     value={
@@ -968,7 +992,7 @@ export function TaskGrid({
                                     }
                                 />
                                 <Stat
-                                    label="Duration"
+                                    label="End-to-end"
                                     value={fmtTableDuration(t.durationSeconds)}
                                     sub={
                                         timeRatioValue != null
@@ -977,6 +1001,14 @@ export function TaskGrid({
                                     }
                                     subClass={timeCellClasses(timeTint)}
                                     title={expectedTimeTitle(t.expectedSeconds)}
+                                />
+                                <Stat
+                                    label="Agent"
+                                    value={fmtTableDuration(t.agentSeconds ?? null)}
+                                />
+                                <Stat
+                                    label="Grading"
+                                    value={fmtTableDuration(t.gradingSeconds ?? null)}
                                 />
                                 <Stat
                                     label="Cost"

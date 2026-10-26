@@ -485,8 +485,6 @@ export function MessageTimelineSection({
     // flat stream tagged with the spawning tool_use_id (parent_tool_use_id).
     // We key children by that id and render only the main thread at top level;
     // each sub-agent's invocations nest, expandable, under its Agent call.
-    // Legacy runs (parentToolUseId undefined) have no string parents → the map
-    // stays empty and every message renders flat, exactly as before.
     const childrenByParent = new Map<string, MessageEvent[]>();
     for (const m of messages) {
         const p = m.parentToolUseId;
@@ -496,9 +494,8 @@ export function MessageTimelineSection({
             childrenByParent.set(p, arr);
         }
     }
-    // == null matches both null (main thread) and undefined (legacy, no branch
-    // info) → both render at the top level. Sub-agent emissions render nested
-    // inside the message that spawned them (see MessageRow).
+    // Sub-agent emissions render nested inside the message that spawned them
+    // (see MessageRow).
     const topLevelMessages = messages.filter((m) => m.parentToolUseId == null);
     // Count real generations only — the synthetic reconciliation row is a meta
     // entry, not a message.
@@ -978,9 +975,8 @@ export function CostExplorerSection({
         });
     };
 
-    // No model → the run can't be projected (unpriced model, or it predates
-    // per-call branch capture so the cache cascade can't be modeled as a tree).
-    // The timeline still renders; the simulator + inline deltas are hidden.
+    // No model → the run can't be projected (unpriced model). The timeline
+    // still renders; the simulator + inline deltas are hidden.
     const model = buildThinkingModel(messages, tokens, recordedCostUsd);
     const leversActive =
         model != null &&
@@ -1452,36 +1448,23 @@ function MessageBody({
     };
     // Render blocks in their actual emission order (content_blocks sequence),
     // interleaving text and tool calls instead of forcing thinking→tools→text.
-    // `blockTypes` preserves order for both agents; thinking/text are aggregated
-    // per message, so each renders once at its first occurrence while tool_use
-    // blocks consume `toolUses` in order. Falls back to the legacy grouping when
-    // a (legacy) run recorded no blockTypes.
+    // thinking/text are aggregated per message, so each renders once at its
+    // first occurrence while tool_use blocks consume `toolUses` in order.
     const ordered: ReactNode[] = [];
-    if (m.blockTypes.length === 0) {
-        if (thinkingRow) ordered.push(thinkingRow);
-        m.toolUses.forEach((t, i) => ordered.push(renderTool(t, i)));
-        if (textRow) ordered.push(textRow);
-    } else {
-        let toolIdx = 0;
-        let thinkingDone = false;
-        let textDone = false;
-        for (const bt of m.blockTypes) {
-            if (bt === "thinking") {
-                if (!thinkingDone && thinkingRow) ordered.push(thinkingRow);
-                thinkingDone = true;
-            } else if (bt === "text") {
-                if (!textDone && textRow) ordered.push(textRow);
-                textDone = true;
-            } else if (bt === "tool_use") {
-                const t = m.toolUses[toolIdx++];
-                if (t) ordered.push(renderTool(t, toolIdx - 1));
-            }
+    let toolIdx = 0;
+    let thinkingDone = false;
+    let textDone = false;
+    for (const bt of m.blockTypes) {
+        if (bt === "thinking") {
+            if (!thinkingDone && thinkingRow) ordered.push(thinkingRow);
+            thinkingDone = true;
+        } else if (bt === "text") {
+            if (!textDone && textRow) ordered.push(textRow);
+            textDone = true;
+        } else if (bt === "tool_use") {
+            const t = m.toolUses[toolIdx++];
+            if (t) ordered.push(renderTool(t, toolIdx - 1));
         }
-        // Defensive: if blockTypes didn't list thinking/text but the aggregated
-        // field is present, still render it (thinking first, text last — the
-        // legacy positions) so content is never dropped.
-        if (!thinkingDone && thinkingRow) ordered.unshift(thinkingRow);
-        if (!textDone && textRow) ordered.push(textRow);
     }
     return <>{ordered}</>;
 }
@@ -1620,7 +1603,7 @@ function MessageRow({
     unit: Unit;
     // Maps a sub-agent-spawn tool_use_id → the emissions that ran inside that
     // sub-agent. Lets a message render its sub-agents' rows nested between the
-    // spawning Agent call and that call's result. Empty for legacy runs.
+    // spawning Agent call and that call's result. Empty when no sub-agent ran.
     childrenByParent: Map<string, MessageEvent[]>;
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
     // cache-read), keyed by tool_use_id. Shown on the Agent call's result row.

@@ -54,8 +54,7 @@ function call(opts: {
     thinkingOutputTokens?: number | null;
     model?: string;
     toolUses?: MessageToolUse[];
-    // null = main thread (default), string = sub-agent branch, undefined =
-    // run didn't record branch info (legacy → simulator disabled).
+    // null = main thread (default), string = sub-agent branch.
     parentToolUseId?: string | null;
 }): MessageEvent {
     return {
@@ -77,8 +76,7 @@ function call(opts: {
         cacheWriteTokens:
             opts.cacheWriteTokens === undefined ? 0 : opts.cacheWriteTokens,
         cacheReadTokens: 0,
-        parentToolUseId:
-            "parentToolUseId" in opts ? opts.parentToolUseId : null,
+        parentToolUseId: opts.parentToolUseId ?? null,
         reasoningTokens: null,
         thinkingOutputTokens:
             opts.thinkingOutputTokens === undefined
@@ -500,22 +498,6 @@ describe("buildThinkingModel — tree-structured (sub-agent) cascade", () => {
         if (!m) return;
         expect(m.toolResultTokens).toBe(0);
         expect(m.coeffToolWrite).toBe(0);
-    });
-
-    test("legacy run without branch info → no model (simulator hidden)", () => {
-        const m = buildThinkingModel(
-            [
-                call({
-                    generationMs: 10,
-                    thinkingMs: 10,
-                    outputTokens: 100,
-                    parentToolUseId: undefined, // run never recorded the field
-                }),
-            ],
-            TOTALS,
-            0.5,
-        );
-        expect(m).toBeNull();
     });
 });
 

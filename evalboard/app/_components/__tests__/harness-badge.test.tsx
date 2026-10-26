@@ -6,15 +6,14 @@ import { HarnessBadge, harnessShortLabel } from "../harness-badge";
 describe("harnessShortLabel", () => {
     test("every known harness has a human label", () => {
         // A missing entry falls through to the raw id, which would put
-        // "delegate-sdk" in a legend next to "Codex" and "Antigravity".
+        // "delegate" in a legend next to "Codex" and "Antigravity".
         for (const h of KNOWN_HARNESSES) {
             expect(harnessShortLabel(h)).not.toBe(h);
         }
     });
 
-    test("the UiPath harness reads as Delegate", () => {
-        // The run data's id stays `delegate-sdk` (it's the registered
-        // `agent.type`); only the label people read is the short one.
+    test("the UiPath harness reads as Delegate under both of its ids", () => {
+        expect(harnessShortLabel("delegate")).toBe("Delegate");
         expect(harnessShortLabel("delegate-sdk")).toBe("Delegate");
     });
 
@@ -31,7 +30,7 @@ describe("harnessShortLabel", () => {
 
 describe("HarnessBadge", () => {
     test("names the vendor in the alt text, not just the product", () => {
-        render(<HarnessBadge harness="delegate-sdk" />);
+        render(<HarnessBadge harness="delegate" />);
         expect(screen.getByAltText("Delegate · UiPath")).toBeInTheDocument();
     });
 

@@ -801,7 +801,7 @@ class TestAutoMountAllowlistMask:
         assert f"{CONTAINER_PLUGINS_DIR}/0/.claude-plugin" not in tmpfs
 
     def test_tmpfs_targets_are_under_mounted_container_root(self, tmp_path: Path):
-        # Codex symlinks / Antigravity search paths dereference the container path
+        # Codex skill copies / Antigravity search paths read from the container path
         # the staged task.yaml names, so the mask must sit under that path.
         root = self._plugin_root(tmp_path / "plugin")
         (root / "skills" / "demo").mkdir(parents=True)

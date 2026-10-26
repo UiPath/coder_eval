@@ -104,6 +104,7 @@ agent:
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. Works with either `system_prompt_mode`. |
 | `setting_sources` | `list["user"\|"project"\|"local"] \| null` | Which host setting sources the SDK reads. Default resolves to `["project"]`. See [Sandbox isolation](#sandbox-isolation). |
 | `claude_settings` | `str \| dict \| null` | Passed to the SDK `--settings`. A dict is JSON-serialized; a str is a settings file path. Use `permissions.deny` to block tools/paths. |
+| `context_window` | `int \| null` (100000-1000000) | Auto-compact window, in tokens, sent as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. It outranks `--autocompact` and every settings scope, and is capped to the model's window. Setting `claude_settings.autoCompactWindow` too is a load error. See [Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness). |
 | `sdk_options` | `dict` (default `{}`) | Pass-through for `ClaudeAgentOptions` fields Coder Eval doesn't own (e.g. `effort`). Validated at load — an unknown or framework-owned key is a hard error. |
 | `ignore_patterns` | `list[str] \| null` | Gitignore-style overrides for the workspace copy used by judge sub-agents (supports `!` negation). |
 
@@ -212,9 +213,11 @@ resolution for any agent that does not declare `supports_cooperative_stop`. See 
 
 Claude Code produces the richest telemetry of the agents:
 
-- **Authoritative billing** comes from the SDK's cumulative `model_usage` on the
+- **Authoritative billing** comes from the SDK's `model_usage` on the
   terminal result message and reconciles to `total_cost_usd` — this already includes
-  sub-agent consumption that the per-message stream under-reports.
+  sub-agent consumption that the per-message stream under-reports. Both count the
+  whole session, so a resumed turn books only what changed since the session's
+  previous result message.
 - **Sub-agent accounting** is derived by grouping `parent_tool_use_id`-tagged
   assistant messages; there is no separate per-sub-agent field. The terminal
   sub-agent generation (delivered as the Agent tool result, never streamed) is

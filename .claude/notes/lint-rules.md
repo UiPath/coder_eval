@@ -714,16 +714,15 @@ None else self.open_start_ms)` collapse to one instant whenever `open_end_ms` is
 
 An identity invariant, which is why it is its own id rather than a second arm of
 CE058/CE059, both of which are about timing. Antigravity omitted the kwarg, so the field
-defaulted to `None` on every message it ever recorded, and the evalboard — which groups
-assistant emissions by `message_id` and falls back to a `SAME_EMISSION_GAP_MS` wall-clock
-gap when either side lacks one — collapsed a whole turn's generations into ONE timeline
-row as soon as the harness's generation windows became contiguous (the gap is then exactly
-0 ms, always). Nothing failed: the consumer SUMS the group, so the totals and the
-reconciliation invariant stayed right, and the golden snapshots had ratified the `null` on
-the day they were written — a snapshot is regenerated from whatever the code currently
-does, so it catches a later change and never an initial omission. The damage was not
-confined to the timeline, which is why "only granularity is lost" was the wrong way to
-describe it: a grouped emission is one API call to the evalboard's thinking-cost
+defaulted to `None` on every message it ever recorded, and the evalboard — which then
+grouped assistant emissions by `message_id`, else by a 100 ms wall-clock gap — collapsed a
+whole turn's generations into ONE timeline row as soon as the harness's generation windows
+became contiguous (the gap is then exactly 0 ms, always). Nothing failed: the consumer
+SUMS the group, so the totals and the reconciliation invariant stayed right, and the
+golden snapshots had ratified the `null` on the day they were written — a snapshot is
+regenerated from whatever the code currently does, so it catches a later change and never
+an initial omission. The damage was not confined to the timeline, which is why "only
+granularity is lost" was the wrong way to describe it: a grouped emission is one API call to the evalboard's thinking-cost
 simulator, whose prompt-cache cascade is quadratic in that count, so a single-shot
 Antigravity run had every cascade coefficient pinned at zero; the `Messages` count and the
 10 s slow-generation bar were per-turn too. Deriving the constructor set from each
@@ -845,7 +844,7 @@ assertion for each. A defaulted `AgentStartEvent` lands ~365 days before the clo
 first window, so the head blows any sane UPPER bound by the whole offset. A defaulted
 `AgentEndEvent` lands ~365 days BEFORE its own last message, so `decompose_turn` clamps the
 negative to `0.0` — "measured, and instant", which passes an upper bound. Only a strict
-`> 0.0` catches it. It holds on all three clocked harnesses because real work separates a
+`> 0.0` catches it. It holds on every clocked harness because real work separates a
 turn's last flush from its end event. The margin is smallest on antigravity, which holds
 its process across turns: it measures 0.007-0.035 ms there, 7-35 ticks of the 1 us
 resolution that both `datetime` and `time.monotonic()` have on Linux, macOS and Windows.

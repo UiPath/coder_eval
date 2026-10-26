@@ -27,8 +27,9 @@ SRC = Path(__file__).parent.parent / "src"
 # Rules whose defect class lives in the TEST tree, not in src/. CE048's whole
 # subject is an in-process call to a Typer command, and the only place that
 # happens is a test — scanning src/ alone would leave the rule permanently green
-# while the bug it exists for sat five lines away.
-_ALSO_SCAN_TESTS = {"CE048"}
+# while the bug it exists for sat five lines away. CE016's dropped kwarg makes a
+# test fixture silently build zero input, so the assertion passes on another cell.
+_ALSO_SCAN_TESTS = {"CE016", "CE048"}
 
 
 @pytest.mark.lint

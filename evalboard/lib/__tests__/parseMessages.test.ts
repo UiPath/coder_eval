@@ -13,6 +13,7 @@ function msg(
         text?: string;
         thinking?: string;
         toolUseId?: string;
+        messageId?: string;
     },
 ) {
     const block: Record<string, unknown> = { block_type: kind };
@@ -24,6 +25,7 @@ function msg(
         started_at: opts.startedAt,
         completed_at: opts.completedAt,
         generation_duration_ms: opts.genMs,
+        message_id: opts.messageId ?? null,
         content_blocks: [block],
     };
 }
@@ -38,7 +40,6 @@ describe("parseMessages — per-block-kind generation attribution", () => {
                         completedAt: "2026-01-01T00:00:05.000Z",
                         genMs: 5000,
                     }),
-                    // separate emission > 100ms gap so it doesn't collapse
                     msg("text", {
                         startedAt: "2026-01-01T00:00:06.000Z",
                         completedAt: "2026-01-01T00:00:07.000Z",
@@ -58,7 +59,7 @@ describe("parseMessages — per-block-kind generation attribution", () => {
     });
 
     test("collapsed mixed emission attributes each raw's gen to its own kind", () => {
-        // Same emission (gap < 100ms) → one MessageEvent with two block kinds.
+        // Same message_id → one MessageEvent with two block kinds.
         const turns: TurnEntry[] = [
             {
                 messages: [
@@ -66,12 +67,14 @@ describe("parseMessages — per-block-kind generation attribution", () => {
                         startedAt: "2026-01-01T00:00:00.000Z",
                         completedAt: "2026-01-01T00:00:08.000Z",
                         genMs: 8000,
+                        messageId: "msg_1",
                     }),
                     msg("tool_use", {
-                        startedAt: "2026-01-01T00:00:08.010Z", // 10ms gap
+                        startedAt: "2026-01-01T00:00:08.010Z",
                         completedAt: "2026-01-01T00:00:08.500Z",
                         genMs: 500,
                         toolUseId: "tu_1",
+                        messageId: "msg_1",
                     }),
                 ],
                 commands: [
@@ -185,9 +188,8 @@ describe("parseMessages — per-block-kind generation attribution", () => {
 
 describe("parseMessages — message_id collapsing", () => {
     test("collapses splits sharing a message_id even when wall-clock gap is large", () => {
-        // The CLI emits per-block-kind events back-to-back, but if a slow tool
-        // result lands between them the gap heuristic would (incorrectly) split
-        // them. With a shared message_id we collapse anyway.
+        // A slow tool result can land between the per-block-kind events of one
+        // response; the shared message_id still collapses them.
         const turns: TurnEntry[] = [
             {
                 messages: [
@@ -201,7 +203,6 @@ describe("parseMessages — message_id collapsing", () => {
                     },
                     {
                         role: "assistant",
-                        // Far apart in wall-clock — gap heuristic would split.
                         started_at: "2026-01-01T00:00:30.000Z",
                         completed_at: "2026-01-01T00:00:30.500Z",
                         generation_duration_ms: 500,
@@ -257,7 +258,7 @@ describe("parseMessages — message_id collapsing", () => {
         expect(events).toHaveLength(2);
     });
 
-    test("falls back to gap heuristic when message_id absent (legacy runs)", () => {
+    test("entries without a message_id never collapse, however close", () => {
         const turns: TurnEntry[] = [
             {
                 messages: [
@@ -270,7 +271,7 @@ describe("parseMessages — message_id collapsing", () => {
                     },
                     {
                         role: "assistant",
-                        started_at: "2026-01-01T00:00:01.050Z", // 50ms gap — under threshold
+                        started_at: "2026-01-01T00:00:01.000Z",
                         completed_at: "2026-01-01T00:00:01.200Z",
                         generation_duration_ms: 150,
                         content_blocks: [{ block_type: "text", text: "hi" }],
@@ -279,8 +280,7 @@ describe("parseMessages — message_id collapsing", () => {
             },
         ];
         const events = parseMessages(turns);
-        expect(events).toHaveLength(1);
-        expect(events[0].blockTypes).toEqual(["thinking", "text"]);
+        expect(events).toHaveLength(2);
     });
 });
 

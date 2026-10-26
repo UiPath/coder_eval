@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -13,7 +14,8 @@ from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, NamedTuple
+from types import SimpleNamespace
+from typing import Any, ClassVar, Literal, NamedTuple
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
@@ -128,6 +130,12 @@ _TOOL_ITEM_NAMES: dict[str, str] = {
 # to recover. Lowercased to match _status_value's normalization.
 _COLLAB_SPAWN_TOOL = "spawnagent"
 
+# Multi-agent v2's sub-agent item: the `started` kind is the spawn, the other kinds
+# are notices about a spawned child.
+# Rationale: .claude/notes/agents.md § Codex rollout rebuild
+_SUB_AGENT_ACTIVITY_ITEM = "subAgentActivity"
+_SUB_AGENT_SPAWN_KIND = "started"
+
 # Tool names for the raw ResponseItem function calls in a sub-agent's on-disk
 # rollout, which is the only place its inner tool calls survive.
 # Rationale: .claude/notes/agents.md § Codex rollout rebuild
@@ -135,10 +143,48 @@ _ROLLOUT_FN_NAMES: dict[str, str] = {
     "exec_command": "Bash",
     "shell": "Bash",
     "local_shell": "Bash",
+    "shell_command": "Bash",
     "apply_patch": "Write",
     "spawn_agent": "Agent",
     "wait_agent": "Agent",
 }
+
+# A code-mode `exec` script call, and the first line of its output when the script
+# ran to the end. Its commands come from the rollout's `item_completed` records.
+# Rationale: .claude/notes/agents.md § Codex rollout rebuild
+_EXEC_TOOL = "exec"
+_EXEC_SCRIPT_COMPLETED = "Script completed"
+# The first line of a script that `wait` stopped before it ended: it has no result.
+_EXEC_SCRIPT_TERMINATED = "Script terminated"
+_ITEM_COMPLETED_EVENT = "item_completed"
+_COMMAND_RECORD_ITEM = "CommandExecution"
+_FILE_CHANGE_RECORD_ITEM = "FileChange"
+# The result line in the header of a direct shell call's output: `shell_command`
+# writes `Exit code: N`, `exec_command` and `write_stdin` write `Process exited with
+# code N`, or `Process running with session ID N` while the command still runs.
+_SHELL_RESULT_LINE = re.compile(
+    r"^(?:(?:Exit code: |Process exited with code )(?P<exit_code>-?\d+)|Process running with session ID \d+)",
+    re.MULTILINE,
+)
+# The first line of a script that still runs after its yield time.
+_EXEC_SCRIPT_YIELDED = "Script running with cell ID"
+_WAIT_TOOL = "wait"
+# The whole output Codex writes for a call that an interrupt cut off: a direct
+# `exec_command` gets its wall time, any other tool the seconds it ran.
+_ABORTED_CALL = re.compile(r"(?:Wall time: [\d.]+ seconds\n)?aborted by user(?: after [\d.]+s)?")
+# A direct call that did not run at all: `exec_command failed: ...` when the process
+# could not start, `write_stdin failed: Unknown process id 7`. No result line and no
+# output body, unlike a patch's `Success. Updated ...`.
+_CALL_FAILED = re.compile(r"\w+ failed:")
+# A shell wrapper's argv: the shell (sh/bash/zsh/pwsh, powershell, cmd), then the
+# flag that precedes the command (a `-c` cluster such as `-lc`, `-Command`, `/c`).
+_SHELL_PROGRAM = re.compile(r"(?:.*[\\/])?(?:[a-z]*sh|powershell|cmd)(?:\.exe)?", re.IGNORECASE)
+_SHELL_SCRIPT_FLAG = re.compile(r"-[a-z]*c|-command|/c", re.IGNORECASE)
+# A JavaScript string escape: `\n`, `\u00e9`, `\u{1F600}`, `\x41`, or any escaped character.
+_JS_ESCAPE = re.compile(r"\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", re.DOTALL)
+_JS_CHAR_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
+
+_ResultStatus = Literal["success", "error", "unknown"]
 
 # Rollout ResponseItem payload types that are sub-agent tool CALLS and their
 # matching OUTPUT type (keyed by `call_id`). Anything not listed is skipped.
@@ -213,6 +259,85 @@ def _status_value(status: Any) -> str:
     return str(value).lower() if value is not None else ""
 
 
+def _failed_turn_reason(turn: Any) -> str | None:
+    """The crash message for a Turn codex ended as ``failed``, or None for any other status.
+
+    Codex ends a turn ``failed`` when it gives up on the provider, e.g. a
+    ``rateLimitExceeded`` it will not retry. The message carries the provider's
+    own text, so ``categorize_error`` routes it (``rate limit`` ->
+    ``AGENT_RATE_LIMIT``) like any other agent crash.
+    """
+    if turn is None or _status_value(getattr(turn, "status", None)) != "failed":
+        return None
+    error = getattr(turn, "error", None)
+    message = str(getattr(error, "message", "") or "").strip() or "no error message"
+    kind, _ = _codex_error_kind(error)
+    suffix = f" (codexErrorInfo={kind})" if kind else ""
+    return f"Codex turn failed: {message}{suffix}"
+
+
+def _record_command_text(argv: Any) -> str:
+    """The command a CommandExecution record ran, without the shell wrapper Codex adds.
+
+    ``["/bin/zsh", "-lc", "pytest -q"]`` gives ``pytest -q``; an argv that is not a
+    shell wrapper is joined with shell quoting.
+    """
+    if isinstance(argv, str):
+        return argv
+    if not isinstance(argv, list):
+        return ""
+    parts = [str(a) for a in argv]
+    if len(parts) >= 3 and _SHELL_PROGRAM.fullmatch(parts[0]) and _SHELL_SCRIPT_FLAG.fullmatch(parts[-2]):
+        return parts[-1]
+    return shlex.join(parts)
+
+
+def _js_unescaped(source: str) -> str:
+    """A script source with its string escapes decoded: a ``"a\\nb"`` literal reads as the two-line command it runs."""
+
+    def decode(match: re.Match[str]) -> str:
+        escape = match[1]
+        if len(escape) == 1:
+            return _JS_CHAR_ESCAPES.get(escape, escape)
+        try:
+            return chr(int(escape.strip("ux{}"), 16))
+        except ValueError:
+            return match[0]
+
+    return _JS_ESCAPE.sub(decode, source)
+
+
+def _file_change_outcome(paths: list[str], status: str) -> tuple[_ResultStatus, str]:
+    """(result_status, result_summary) of a Codex file change; a failed or declined patch wrote nothing."""
+    if status in _FILE_CHANGE_FAILURE_STATUSES:
+        return "error", f"apply_patch {status}: {len(paths)} file(s) not written"
+    return "success", f"{len(paths)} file(s) changed"
+
+
+def _exec_script_status(text: str) -> _ResultStatus:
+    """An ``exec`` script's status from the first line of its output, or of a ``wait`` output."""
+    output = text.lstrip()
+    if output.startswith(_EXEC_SCRIPT_COMPLETED):
+        return "success"
+    if output.startswith((_EXEC_SCRIPT_TERMINATED, _EXEC_SCRIPT_YIELDED)):
+        return "unknown"
+    return "error"
+
+
+def _shell_output_status(text: str) -> _ResultStatus:
+    """A direct call's status from the result line in its output header.
+
+    Without one the call succeeded, unless the output says the call itself failed.
+    """
+    header, has_body, _ = text.partition("\nOutput:")
+    result = _SHELL_RESULT_LINE.search(header) if has_body else None
+    if result is None:
+        return "error" if _CALL_FAILED.match(text.lstrip()) else "success"
+    if result["exit_code"] is None:
+        return "unknown"
+    return "success" if result["exit_code"] == "0" else "error"
+
+
 def _fresh_input_tokens(raw_input: int, cached: int) -> int:
     """The fresh (uncached) prompt slice = tokens written to cache this call.
 
@@ -276,24 +401,29 @@ _LOGIN_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".z
 _ZSH_PROFILE_NAMES = frozenset({".zshenv", ".zprofile", ".zshrc"})
 
 
-def _provider_error_from(payload: Any) -> ProviderError:
-    """Map a codex ``ErrorNotification`` payload onto a ``ProviderError``.
+def _codex_error_kind(error: Any) -> tuple[str | None, int | None]:
+    """``(kind, http_status)`` of a codex ``TurnError``'s ``codexErrorInfo``.
 
     ``codexErrorInfo`` is either a bare category (enum) or a one-key object whose
     key is the category and whose value may carry ``httpStatusCode``.
     """
-    error = getattr(payload, "error", None)
-    kind: str | None = None
-    http_status: int | None = None
-    info = getattr(getattr(error, "codex_error_info", None), "root", None)
+    info: Any = getattr(getattr(error, "codex_error_info", None), "root", None)
     if isinstance(info, Enum):
-        kind = str(info.value)
-    elif hasattr(info, "model_dump"):
+        return str(info.value), None
+    if hasattr(info, "model_dump"):
         dumped = info.model_dump(by_alias=True, mode="json")
         if len(dumped) == 1:
             kind, body = next(iter(dumped.items()))
             if isinstance(body, dict) and isinstance(body.get("httpStatusCode"), int):
-                http_status = body["httpStatusCode"]
+                return kind, body["httpStatusCode"]
+            return kind, None
+    return None, None
+
+
+def _provider_error_from(payload: Any) -> ProviderError:
+    """Map a codex ``ErrorNotification`` payload onto a ``ProviderError``."""
+    error = getattr(payload, "error", None)
+    kind, http_status = _codex_error_kind(error)
     return ProviderError(
         at=datetime.now(),
         message=str(getattr(error, "message", "") or ""),
@@ -316,6 +446,30 @@ def _get_item_root(notification: Any) -> Any:
     if item is None:
         return None
     return getattr(item, "root", None)
+
+
+def _tool_item_root(notification: Any) -> Any:
+    """The item root as the turn state handles it, with multi-agent v2 mapped onto v1.
+
+    A ``subAgentActivity`` ``started`` item becomes the v1 ``collabAgentToolCall``
+    spawn of its child, under the same id; its other kinds are notices and give
+    None. Every other root passes through.
+    Rationale: .claude/notes/agents.md § Codex rollout rebuild
+    """
+    root = _get_item_root(notification)
+    if getattr(root, "type", None) != _SUB_AGENT_ACTIVITY_ITEM:
+        return root
+    if _status_value(getattr(root, "kind", "")) != _SUB_AGENT_SPAWN_KIND:
+        return None
+    child = getattr(root, "agent_thread_id", None)
+    return SimpleNamespace(
+        type="collabAgentToolCall",
+        id=getattr(root, "id", None),
+        tool=_COLLAB_SPAWN_TOOL,
+        status="completed",
+        receiver_thread_ids=[str(child)] if child else [],
+        agent_path=getattr(root, "agent_path", None),
+    )
 
 
 class _CodexTurnState:
@@ -592,7 +746,7 @@ class _CodexTurnState:
 
     def on_item_started(self, notification: Any) -> None:
         """Emit ToolStartEvent + record the tool_use block for every tool-like item."""
-        root = _get_item_root(notification)
+        root = _tool_item_root(notification)
         if root is None:
             return
         # Record the start time for every item kind so flushed messages get real timing.
@@ -631,7 +785,7 @@ class _CodexTurnState:
 
     def on_item_completed(self, notification: Any) -> None:
         """Emit ToolEndEvent + capture telemetry / sub-agents / transcript blocks."""
-        root = _get_item_root(notification)
+        root = _tool_item_root(notification)
         if root is None:
             return
         completed_ms = getattr(notification.payload, "completed_at_ms", None)
@@ -854,6 +1008,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
+        self._skill_dirs: list[Path] = []
+        self._skill_copies: list[Path] = []
+        self._skill_parent_dirs: list[Path] = []
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -909,8 +1066,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         "CodexAgent: login_api_key failed — agent will fall back to env-based auth: %s", exc
                     )
 
-            # Set up skills from plugin_tools_dir or plugins config
-            self._setup_skills(plugin_tools_dir)
+            self._collect_skills(plugin_tools_dir)
 
             # Log permission and tool configuration
             self._log_config_enforcement()
@@ -954,6 +1110,27 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not self.working_directory or not self.codex_client:
             raise RuntimeError("Agent not started. Call start() first.")
 
+        self._install_skills()
+        try:
+            return await self._communicate_turn(
+                user_input,
+                stream_callback=stream_callback,
+                timeout=timeout,
+                max_turns=max_turns,
+                should_stop=should_stop,
+            )
+        finally:
+            self._remove_skills()
+
+    async def _communicate_turn(
+        self,
+        user_input: str,
+        *,
+        stream_callback: StreamCallback | None,
+        timeout: float | None,
+        max_turns: int | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> TurnRecord:
         assert self.config.type is not None, "CodexAgent requires AgentConfig.type to be set before communicate()"
 
         # Reset the pending slot + bump the iteration counter (shared lifecycle).
@@ -1044,6 +1221,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # like every other timeout path.
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout)
+            failed_reason = None if state.ended_cleanly else _failed_turn_reason(state.result_turn)
+            if failed_reason is not None:
+                # Codex gave up on the turn (a provider error it would not retry),
+                # so the agent never finished: crash, never score it.
+                # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
+                self._finalize_and_raise_crash(state.finalize, truncate_crash_message(failed_reason))
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
@@ -1092,6 +1275,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._thread_usage_baseline = _ThreadTotals()
         self._active_turn_handle = None
         self._cleanup_login_shell_home()
+        self._remove_skills()
         self._mark_stopped()
 
     async def kill(self) -> None:
@@ -1108,6 +1292,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._interrupt_active_turn()
         self._close_client()
         self._cleanup_login_shell_home()
+        self._remove_skills()
 
     def _interrupt_active_turn(self) -> None:
         """Interrupt the in-flight Codex turn, if any (best-effort, idempotent)."""
@@ -1147,17 +1332,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
             "codex_model_is_deployment": True,
         }
 
-    def _setup_skills(self, plugin_tools_dir: str | None) -> None:
-        """Set up .agents/skills directory from plugins or plugin_tools_dir.
+    def _collect_skills(self, plugin_tools_dir: str | None) -> None:
+        """Resolve the skill dirs that :meth:`_install_skills` copies in for each turn.
 
-        Codex auto-discovers skills in ``.agents/skills/``, scanned from the working
-        directory up to the repo root, so each source's skill dirs are symlinked
-        (or copied, on Windows) into it.
+        A source may hold skill dirs directly or be a plugin root whose skills live
+        one level deeper; both layouts are scanned, and the first source to provide
+        a skill name wins.
 
         Rationale: .claude/notes/agents.md § Skills, per harness
         """
-        if not self.working_directory:
-            return
+        self._skill_dirs = []
 
         skills_sources: list[Path] = []
 
@@ -1179,7 +1363,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
                             self._log.warning(
                                 f"Plugin skills path did not resolve: {path_str!r} "
-                                + f"→ {expanded_path!r} ({hint}); no skills linked from it"
+                                + f"→ {expanded_path!r} ({hint}); no skills taken from it"
                             )
 
         # Also check plugin_tools_dir parameter
@@ -1192,52 +1376,74 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not skills_sources:
             return
 
-        # Create .agents/skills directory (Codex auto-discovery location)
-        agents_skills_dir = self.working_directory / ".agents" / "skills"
         try:
-            agents_skills_dir.mkdir(parents=True, exist_ok=True)
-
-            # A source may hold skill dirs directly or be a plugin root whose
-            # skills live one level deeper. Scan both layouts.
             for skills_source in skills_sources:
                 scan_dirs = [skills_source]
                 nested = skills_source / "skills"
                 if nested.is_dir():
                     scan_dirs.append(nested)
-
                 for scan_dir in scan_dirs:
                     for skill_dir in scan_dir.iterdir():
                         if not (skill_dir.is_dir() and (skill_dir / "SKILL.md").exists()):
                             continue
-                        target = agents_skills_dir / skill_dir.name
-                        if target.exists():
-                            # Skip if already exists (first source wins)
-                            continue
+                        if all(d.name != skill_dir.name for d in self._skill_dirs):
+                            self._skill_dirs.append(skill_dir)
+        except OSError as e:
+            self._log.warning(f"Failed to scan skills: {e}")
 
-                        try:
-                            # Try to create a symlink for efficiency
-                            target.symlink_to(skill_dir)
-                            self._log.debug(f"Linked skill: {skill_dir.name}")
-                        except (OSError, NotImplementedError):
-                            # Fall back to copying if symlink fails (Windows compatibility)
-                            shutil.copytree(skill_dir, target, dirs_exist_ok=True)
-                            self._log.debug(f"Copied skill: {skill_dir.name}")
+        if self._skill_dirs:
+            self._log.debug(f"Found {len(self._skill_dirs)} skill(s): {[d.name for d in self._skill_dirs]}")
+        else:
+            # Sources existed but held no SKILL.md, so codex runs with no
+            # skill context at all.
+            self._log.warning(
+                f"0 skills found in {len(skills_sources)} plugin source(s): "
+                + f"{[str(s) for s in skills_sources]}; "
+                + "check the plugin path points at a skills repo root"
+            )
 
-            linked = list(agents_skills_dir.iterdir())
-            if linked:
-                self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
-            else:
-                # Sources existed but held no SKILL.md, so codex runs with no
-                # skill context at all.
-                self._log.warning(
-                    f"0 skills linked into {agents_skills_dir} despite "
-                    + f"{len(skills_sources)} plugin source(s): "
-                    + f"{[str(s) for s in skills_sources]}; "
-                    + "check the plugin path points at a skills repo root"
-                )
+    def _install_skills(self) -> None:
+        """Copy the collected skills into ``.agents/skills/``, where Codex auto-discovers them.
 
+        Real copies, not symlinks. Codex resolves a symlinked skill to its source,
+        finds the plugin manifest there and lists it as ``<plugin>:<skill>``, which
+        models turn into a nonexistent ``<plugin>/<skill>/`` path; ``rg --files`` and
+        ``find`` then skip the symlinks, so the search that follows finds nothing. A
+        skill dir already in the workspace is left alone and never removed.
+
+        Rationale: .claude/notes/agents.md § Skills, per harness
+        """
+        if not (self.working_directory and self._skill_dirs):
+            return
+        agents_skills_dir = self.working_directory / ".agents" / "skills"
+        try:
+            for parent in (agents_skills_dir.parent, agents_skills_dir):
+                if not parent.exists():
+                    parent.mkdir()
+                    self._skill_parent_dirs.append(parent)
+            for skill_dir in self._skill_dirs:
+                target = agents_skills_dir / skill_dir.name
+                if target.exists() or target.is_symlink():
+                    continue
+                self._skill_copies.append(target)
+                shutil.copytree(skill_dir, target, symlinks=True)
+            self._log.debug(f"Copied {len(self._skill_copies)} skill(s) into {agents_skills_dir}")
         except Exception as e:
             self._log.warning(f"Failed to set up skills: {e}")
+
+    def _remove_skills(self) -> None:
+        """Remove what :meth:`_install_skills` created (best-effort, idempotent).
+
+        Runs at the end of every turn, so criteria and run artifacts see the workspace
+        the agent left, not the skill copies.
+        """
+        copies, self._skill_copies = self._skill_copies, []
+        parents, self._skill_parent_dirs = self._skill_parent_dirs, []
+        for copy in copies:
+            shutil.rmtree(copy, ignore_errors=True)
+        for parent in reversed(parents):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
 
     @staticmethod
     def _resolve_base_url() -> str | None:
@@ -1500,6 +1706,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 + f"api_version={'set' if api_version else 'unset'})"
             )
 
+        if self.config.context_window is not None:
+            # Codex then auto-compacts at 90% of this window.
+            tool_config["model_context_window"] = self.config.context_window
+
         if tool_config:
             options["config"] = tool_config
 
@@ -1700,6 +1910,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 params["model"] = model
             if prompt := getattr(root, "prompt", None):
                 params["prompt"] = prompt
+            if agent_path := getattr(root, "agent_path", None):
+                params["agent_path"] = str(agent_path)
             return params
         if root_type in ("mcpToolCall", "dynamicToolCall"):
             params = {"tool": getattr(root, "tool", "")}
@@ -1817,7 +2029,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         1. SPAWN: remember which Agent call owns each spawned child thread, and the
            spawned model. Follow-up ``wait``/messaging calls reuse the same thread
-           and are NOT new sub-agents.
+           and are NOT new sub-agents. A child is registered once, so a repeated
+           spawn item cannot mine its rollout twice.
         2. RESULT: stash the child's returned message as a FALLBACK, used only when
            the child's rollout cannot be found later.
 
@@ -1827,14 +2040,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
         receivers = getattr(root, "receiver_thread_ids", None) or []
         if tool == _COLLAB_SPAWN_TOOL:
             model = getattr(root, "model", None) or self._effective_model() or None
-            for thread_id in receivers:
+            for thread_id in map(str, receivers):
+                if thread_id in spawn_by_thread:
+                    continue
                 spawn_by_thread[thread_id] = tool_id
-                spawned_children.append((str(thread_id), tool_id, model))
+                spawned_children.append((thread_id, tool_id, model))
 
         states = getattr(root, "agents_states", None) or {}
         for thread_id, state in states.items():
             message = getattr(state, "message", None)
-            if message and thread_id in spawn_by_thread:
+            if message and str(thread_id) in spawn_by_thread:
                 collab_results[str(thread_id)] = str(message)
 
     async def _recover_subagent_tool_calls(
@@ -1935,37 +2150,39 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         A ``token_count`` event marks each generation boundary. Tool CALLS are
         paired with their OUTPUT by ``call_id``, since the output can be emitted a
-        generation later. Trailing items with no closing ``token_count`` flush as a
-        final token-less generation; corrupt lines are skipped.
+        generation later. A code-mode ``exec`` script's rows are the
+        ``item_completed`` records Codex writes for it, one per shell command or file
+        change, in the script's generation; a script that left no record is one
+        ``exec`` row. Trailing items with no closing ``token_count`` flush as a final
+        token-less generation; corrupt lines are skipped.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
-        objs: list[dict[str, Any]] = []
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                objs.append(json.loads(raw))
-            except json.JSONDecodeError:
-                continue
+        objs = cls._rollout_objects(path)
+        objs = objs[cls._fork_boundary(objs) :]
 
         # Pass 1: tool OUTPUTs by call_id.
-        outputs: dict[str, tuple[str, bool]] = {}
+        outputs: dict[str, dict[str, Any]] = {}
         for obj in objs:
             if obj.get("type") == "response_item":
                 p = obj.get("payload") or {}
                 if p.get("type") in _ROLLOUT_TOOL_OUTPUT_TYPES:
-                    outputs[str(p.get("call_id") or "")] = cls._subagent_output(p)
+                    outputs[str(p.get("call_id") or "")] = p
 
         # Pass 2: walk into generations.
         gens: list[dict[str, Any]] = []
         cur: list[dict[str, Any]] = []
         n_calls = 0
+        direct_call_ids: set[str] = set()
+        # Every exec script with the source text a record is matched against, and the
+        # records each one wrote, by its call id: a script's records replace its row.
+        scripts: list[tuple[dict[str, Any], str]] = []
+        records: dict[str, list[dict[str, Any]]] = {}
 
         def close(tokens: tuple[int, int, int, int] | None) -> None:
             nonlocal cur
             if not cur and tokens is None:
                 return
-            gens.append({"tokens": tokens, "items": cur, "tools": [it["call"] for it in cur if it["kind"] == "tool"]})
+            gens.append({"tokens": tokens, "items": cur})
             cur = []
 
         for obj in objs:
@@ -1976,23 +2193,36 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 if pt in _ROLLOUT_TOOL_CALL_TYPES:
                     call_id = str(p.get("call_id") or p.get("id") or f"call_{n_calls}")
                     n_calls += 1
-                    summary, is_error = outputs.get(call_id, ("", False))
-                    cur.append(
-                        {
-                            "kind": "tool",
-                            "call": {
-                                "call_id": call_id,
-                                "tool_name": cls._subagent_tool_name(p),
-                                "parameters": cls._subagent_parameters(p),
-                                "result_summary": summary,
-                                "is_error": is_error,
-                            },
-                        }
+                    name = p.get("name")
+                    summary, status = cls._subagent_output(
+                        outputs.get(call_id), exec_script=name in (_EXEC_TOOL, _WAIT_TOOL)
                     )
+                    call = {
+                        "call_id": call_id,
+                        "tool_name": cls._subagent_tool_name(p),
+                        "parameters": cls._subagent_parameters(p),
+                        "result_summary": summary,
+                        "status": status,
+                    }
+                    if name == _EXEC_TOOL:
+                        source = _js_unescaped(str(call["parameters"].get("input", ""))).replace("\\", "")
+                        scripts.append((call, source))
+                    else:
+                        direct_call_ids.add(call_id)
+                    cur.append({"kind": "tool", "call": call})
                 elif pt == "message" and p.get("role") == "assistant":
                     text = cls._message_text(p.get("content"))
                     if text:
                         cur.append({"kind": "text", "text": text})
+            elif t == "event_msg" and p.get("type") == _ITEM_COMPLETED_EVENT:
+                record = cls._record_call(p.get("item"), f"call_{n_calls}")
+                if record is None or record["call_id"] in direct_call_ids:
+                    continue
+                owner = cls._record_owner(record, scripts)
+                if owner is None:
+                    continue
+                n_calls += 1
+                records.setdefault(owner["call_id"], []).append(record)
             elif t == "event_msg" and p.get("type") == "token_count":
                 last = (p.get("info") or {}).get("last_token_usage") or {}
                 close(
@@ -2004,7 +2234,58 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     )
                 )
         close(None)
+        for gen in gens:
+            gen["items"] = [row for item in gen["items"] for row in cls._script_rows(item, records)]
+            gen["tools"] = [item["call"] for item in gen["items"] if item["kind"] == "tool"]
         return gens
+
+    @staticmethod
+    def _script_rows(item: dict[str, Any], records: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        """An item's rows: a script's records in its place when it has any, else the item itself."""
+        own = records.get(item["call"]["call_id"]) if item["kind"] == "tool" else None
+        return [{"kind": "tool", "call": record} for record in own] if own else [item]
+
+    @staticmethod
+    def _rollout_objects(path: Path) -> list[dict[str, Any]]:
+        """The JSON-object lines of a rollout file; blank, corrupt and non-object lines are skipped."""
+        objs: list[dict[str, Any]] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                objs.append(obj)
+        return objs
+
+    @staticmethod
+    def _fork_boundary(objs: list[dict[str, Any]]) -> int:
+        """Index where the child's own history starts.
+
+        A spawn with ``fork_turns`` copies the parent's history into the child's
+        rollout first, parent tool calls included; replaying those would credit
+        them to the child. The copy ends at the ``thread_settings_applied`` event
+        carrying the rollout's own thread id (its first ``session_meta``); 0 when
+        the rollout is not a fork or has no such event.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
+        """
+        meta = next(((o.get("payload") or {}) for o in objs if o.get("type") == "session_meta"), {})
+        own = meta.get("id")
+        if not own or not meta.get("forked_from_id"):
+            return 0
+        for i, o in enumerate(objs):
+            p = o.get("payload") or {}
+            if (
+                o.get("type") == "event_msg"
+                and p.get("type") == "thread_settings_applied"
+                and p.get("thread_id") == own
+            ):
+                return i
+        logger.warning("CodexAgent: forked rollout %s has no thread_settings_applied of its own; parsed whole", own)
+        return 0
 
     @staticmethod
     def _message_text(content: Any) -> str:
@@ -2055,17 +2336,84 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return {}
 
     @staticmethod
-    def _subagent_output(payload: dict[str, Any]) -> tuple[str, bool]:
-        """(result_summary, is_error) for a rollout tool-output ResponseItem."""
+    def _subagent_output(payload: dict[str, Any] | None, *, exec_script: bool = False) -> tuple[str, _ResultStatus]:
+        """(result_summary, result_status) for a rollout tool-output ResponseItem.
+
+        An ``exec`` script succeeded only when its output starts ``Script completed``.
+        A shell call's status is the result line in the header of its output. A call
+        with no result is ``unknown``: its output never arrived, an interrupt cut it
+        off, or it was stopped or still runs.
+        """
+        if payload is None:
+            return "", "unknown"
         output = payload.get("output")
-        is_error = False
-        if isinstance(output, dict):
-            if output.get("success") is False:
-                is_error = True
-            text = output.get("content") or output.get("output") or json.dumps(output)
+        if isinstance(output, list):
+            text = "".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in output)
+        elif isinstance(output, dict):
+            text = str(output.get("content") or output.get("output") or json.dumps(output))
         else:
             text = "" if output is None else str(output)
-        return str(text), is_error
+        if _ABORTED_CALL.fullmatch(text.strip()):
+            return text, "unknown"
+        if exec_script:
+            return text, _exec_script_status(text)
+        if isinstance(output, dict) and output.get("success") is False:
+            return text, "error"
+        return text, _shell_output_status(text)
+
+    @staticmethod
+    def _record_call(item: Any, fallback_id: str) -> dict[str, Any] | None:
+        """The recovered call for an ``item_completed`` record in a rollout.
+
+        A ``CommandExecution`` is a Bash row with its own exit code, a ``FileChange``
+        a Write row; any other item gives None.
+        """
+        if not isinstance(item, dict):
+            return None
+        call_id = str(item.get("id") or fallback_id)
+        if item.get("type") == _COMMAND_RECORD_ITEM:
+            exit_code = item.get("exit_code")
+            return {
+                "call_id": call_id,
+                "tool_name": "Bash",
+                "parameters": {"command": _record_command_text(item.get("command"))},
+                "result_summary": str(item.get("aggregated_output") or ""),
+                "status": "success" if exit_code == 0 else "error" if exit_code is not None else "unknown",
+            }
+        if item.get("type") == _FILE_CHANGE_RECORD_ITEM:
+            changes = item.get("changes")
+            paths = [str(path) for path in changes] if isinstance(changes, dict) else []
+            status, summary = _file_change_outcome(paths, _status_value(item.get("status")))
+            return {
+                "call_id": call_id,
+                "tool_name": "Write",
+                "parameters": {"paths": paths},
+                "result_summary": summary,
+                "status": status,
+            }
+        return None
+
+    @staticmethod
+    def _record_owner(record: dict[str, Any], scripts: list[tuple[dict[str, Any], str]]) -> dict[str, Any] | None:
+        """The exec script a record came from.
+
+        The newest script whose source holds the record's command, compared with the
+        source's string escapes decoded and backslashes removed; else the newest
+        script. None only when the rollout holds no script.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
+        """
+        command = record["parameters"].get("command")
+        text = str(command or "").replace("\\", "")
+        owner = next((s for s, source in reversed(scripts) if text and text in source), None)
+        if owner is None and scripts:
+            owner = scripts[-1][0]
+            logger.debug(
+                "CodexAgent: %s record %r matches no script source; attributed to script %s",
+                record["tool_name"],
+                command or record["parameters"],
+                owner["call_id"],
+            )
+        return owner
 
     def _subagent_generation_blocks(
         self, gen: dict[str, Any], thread_id: str
@@ -2083,7 +2431,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 call = item["call"]
                 tool_id = f"sub:{thread_id}:{call['call_id']}"
                 blocks.append(
-                    ContentBlock(block_type="tool_use", sequence=seq, tool_use_id=tool_id, is_error=call["is_error"])
+                    ContentBlock(
+                        block_type="tool_use", sequence=seq, tool_use_id=tool_id, is_error=call["status"] == "error"
+                    )
                 )
                 telemetries.append(
                     CommandTelemetry(
@@ -2091,7 +2441,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         tool_id=tool_id,
                         timestamp=datetime.now(),
                         parameters=call["parameters"],
-                        result_status="error" if call["is_error"] else "success",
+                        result_status=call["status"],
                         result_summary=call["result_summary"],
                     )
                 )
@@ -2233,7 +2583,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         try:
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
             status_str = _status_value(status)
-            failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
+            result_status, result_summary = _file_change_outcome(paths, status_str)
             timing = _item_timing(started_ms, completed_ms, None)
             return CommandTelemetry(
                 tool_name="Write",
@@ -2243,13 +2593,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 execution_completed_at=timing.execution_completed_at,
                 duration_ms=timing.duration_ms,
                 parameters={"paths": paths},
-                result_status="error" if failed else "success",
-                result_summary=(
-                    f"{len(paths)} file(s) changed"
-                    if not failed
-                    else f"apply_patch {status_str}: {len(paths)} file(s) not written"
-                ),
-                error_message=f"apply_patch {status_str}" if failed else None,
+                result_status=result_status,
+                result_summary=result_summary,
+                error_message=f"apply_patch {status_str}" if result_status == "error" else None,
                 result_data=None,
                 sequence_number=sequence,
             )

@@ -75,7 +75,10 @@ publishing different numbers for the same run.
 
 Each entry is an **untyped dict** (a denormalization, not a Pydantic model) with keys
 including: `task_id`, `replicate_index`, `variant_id`, `status`
-([`FinalStatus`](#finalstatus)), `weighted_score`, `duration`, `iteration_count`,
+([`FinalStatus`](#finalstatus)), `weighted_score`, `duration` (END-TO-END seconds:
+setup + the agent's turns + grading), the timing split (`agent_wall_ms`, `setup_ms`,
+`grading_ms` — see [Agent wall vs end-to-end](#agent-wall-vs-end-to-end)), the four
+turn buckets (`startup_ms`, `generation_ms`, `tool_ms`, `teardown_ms`), `iteration_count`,
 `tags`, `task_path`, `model_used`, `reference_similarity`, the token buckets
 (`input_tokens` = uncached input, `output_tokens`, `cache_creation_input_tokens`,
 `cache_read_input_tokens`, `total_tokens`), the cost fields
@@ -88,6 +91,25 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+### Agent wall vs end-to-end
+
+`duration` is the task's whole wall clock. It includes `setup_ms` (sandbox, agent
+start, `pre_run`) and `grading_ms` (every success check). A checker that runs a live
+command can spend tens of seconds there, so `duration` is not the agent's time.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `agent_wall_ms` | `float \| None` | Sum of the positive `iterations[].duration_seconds`, in ms. The agent's own turns. `None` when no turn was timed. |
+| `setup_ms` | `float \| None` | Copied from `task.json`. |
+| `grading_ms` | `float \| None` | Copied from `task.json`. `None` on an ungraded row (`coder-eval execute`) and on a detached grade. |
+
+Example (calculator, one run): `duration` 101.3 s = `agent_wall_ms` 55,657 +
+`setup_ms` 13,678 + `grading_ms` 27,657 + about 4 s not in a named phase.
+
+A `run.json` written before these keys existed has none of them. Readers derive
+agent wall from the row's `iterations[].duration_seconds` with the same rule, and show
+grading as unknown, never `0`.
 
 ### Missing cost is never fatal
 
@@ -139,8 +161,10 @@ The authoritative per-replicate record.
 **Errors** (populated on failure): `error_message`, `error_details`,
 `error_log_tail` (carries the Docker build-log tail for `BUILD_FAILED`).
 
-**Config/environment:** `environment_info`, `agent_config`, `sdk_options` (raw
-`ClaudeAgentOptions` dump), `sandbox_path`, `task_config`
+**Config/environment:** `environment_info`, `agent_config`, `sdk_options` (the
+options the agent sent to its SDK; the shape depends on the agent: a raw
+`ClaudeAgentOptions` dump on Claude Code, the host's `init` options with
+credentials redacted on Delegate, `null` on the other agents), `sandbox_path`, `task_config`
 (`{resolved, source_yaml, source_file, lineage}` — `lineage` maps each field to
 `{value, source, source_detail}` so you can trace which config layer set it).
 `environment_info.system_prompt_semantics` (`"append"` / `"replace"` /
@@ -167,8 +191,7 @@ no longer `str | null`, so consumers must not string-handle it unconditionally.
 
 ### CriterionResult
 
-A discriminated union on `result_kind` (`basic` / `judge` / `classification`); legacy
-files without `result_kind` are inferred from `criterion_type`. Base fields
+A discriminated union on `result_kind` (`basic` / `judge` / `classification`). Base fields
 (`result_kind="basic"`):
 
 `criterion_type`, `description`, `score` (0.0–1.0), `details`, `error`,
@@ -309,8 +332,7 @@ Serialized fields: `uncached_input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `total_cost_usd`, plus a
 computed **`input_tokens`** (= sum of the three input buckets). Note: `total_tokens`
 is a plain property and is **not** serialized. Cost bills `uncached_input_tokens`,
-not `input_tokens`. Legacy files that only have `input_tokens` are adopted as
-`uncached_input_tokens` on read.
+not `input_tokens`.
 
 ## FinalStatus
 

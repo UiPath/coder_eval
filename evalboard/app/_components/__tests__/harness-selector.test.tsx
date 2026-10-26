@@ -48,11 +48,11 @@ describe("HarnessSelector", () => {
     });
 
     test("a deep-linked harness that has aged out still shows as a segment", () => {
-        // Otherwise `?h=delegate-sdk` after a quiet fortnight renders a control
+        // Otherwise `?h=delegate` after a quiet fortnight renders a control
         // with nothing selected, which reads as an unscoped page.
         render(
             <HarnessSelector
-                current="delegate-sdk"
+                current="delegate"
                 harnesses={["claude-code", "codex"]}
                 includeAll
             />,

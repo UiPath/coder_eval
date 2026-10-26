@@ -89,48 +89,6 @@ def test_base_criterion_round_trip() -> None:
     assert cr.score == 1.0
 
 
-def test_legacy_task_json_infers_result_kind_from_criterion_type() -> None:
-    """Legacy task.json files (no ``result_kind``) infer the subclass via criterion_type."""
-    legacy_payload = {
-        "task_id": "t",
-        "task_description": "d",
-        "agent_type": "claude-code",
-        "started_at": "2026-05-12T00:00:00",
-        "final_status": "SUCCESS",
-        "iteration_count": 1,
-        "success_criteria_results": [
-            {"criterion_type": "llm_judge", "description": "x", "score": 0.5, "findings": ["leg"]},
-            {
-                "criterion_type": "agent_judge",
-                "description": "y",
-                "score": 0.6,
-                "findings": ["aj"],
-            },
-            {
-                "criterion_type": "classification_match",
-                "description": "c",
-                "score": 1.0,
-                "observed_label": "a",
-                "expected_label": "a",
-            },
-            {
-                "criterion_type": "skill_triggered",
-                "description": "s",
-                "score": 0.0,
-                "observed_label": "(none)",
-                "expected_label": "Skill",
-            },
-            {"criterion_type": "file_exists", "description": "f", "score": 1.0},
-        ],
-    }
-    er = EvaluationResult.model_validate(legacy_payload)
-    assert isinstance(er.success_criteria_results[0], JudgeCriterionResult)
-    assert isinstance(er.success_criteria_results[1], JudgeCriterionResult)
-    assert isinstance(er.success_criteria_results[2], ClassificationCriterionResult)
-    assert isinstance(er.success_criteria_results[3], ClassificationCriterionResult)
-    assert type(er.success_criteria_results[4]) is CriterionResult
-
-
 def test_unknown_criterion_type_falls_to_basic() -> None:
     """An unknown criterion_type falls through to the base CriterionResult."""
     payload = {
@@ -157,8 +115,8 @@ def test_unknown_criterion_type_falls_to_basic() -> None:
     assert cr.model_extra.get("unknown_field") == 42
 
 
-def test_explicit_result_kind_overrides_inference() -> None:
-    """Explicit ``result_kind`` wins over ``criterion_type`` inference."""
+def test_result_kind_alone_picks_the_class() -> None:
+    """``result_kind`` picks the class; a judge ``criterion_type`` does not."""
     payload = {
         "task_id": "t",
         "task_description": "d",

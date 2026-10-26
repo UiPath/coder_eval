@@ -42,8 +42,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 ARG PI_VERSION=0.87.1
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
 
-# uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+# uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path.
+# Pinned for the same reason as the CLIs above: agents run `uv` themselves
+# (coded-agent / function tasks build a venv in the workspace), so its speed is
+# part of every such task's wall clock. The workspace is a bind mount and uv's
+# cache is not, so uv cannot hardlink and copies every file instead. From 0.12.11
+# that cross-filesystem copy is ~40x slower (146-package `uipath-langchain`
+# install: 0.3s on 0.12.10, 10-14s on 0.12.11/.12/.19/.21; 60-130s on the CI
+# host), and the unpinned install picked it up silently in the 0.12.1 image
+# (2026-09-12, uv 0.12.12). Bump deliberately, after timing an install into a
+# bind-mounted dir.
+ARG UV_VERSION=0.12.10
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 WORKDIR /opt/coder_eval
 

@@ -124,6 +124,9 @@ class BaseAgentConfig(BaseModel):
     # Cross-field merge exclusion: setting either prompt field at any layer clears
     # the sibling. ClassVar -> not a model field.
     _merge_exclusive_groups: ClassVar[tuple[tuple[str, ...], ...]] = (("system_prompt", "system_prompt_file"),)
+    # Inclusive (min, max) tokens the harness can cap its context window to; None
+    # means the harness has no such knob and ``context_window`` is rejected.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = None
 
     type: str | None = Field(
         default=None,
@@ -162,6 +165,17 @@ class BaseAgentConfig(BaseModel):
             "Path to a file containing the system prompt (relative to task YAML). "
             "The file contents are loaded at task resolution time and set as system_prompt. "
             "Mutually exclusive with system_prompt."
+        ),
+    )
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Cap, in tokens, on the context window the agent works within: the harness compacts "
+            "the conversation before it outgrows this size, and never runs past the model's own "
+            "window. None leaves the harness's default. Each agent type declares whether it applies "
+            "the cap and in what range; one that cannot rejects it at load. See "
+            "docs/agents/HARNESS_PARITY.md#the-context-window-cap-per-harness."
         ),
     )
 
@@ -217,12 +231,43 @@ class BaseAgentConfig(BaseModel):
         """
         return ()
 
+    @model_validator(mode="after")
+    def check_context_window_supported(self) -> Self:
+        """Reject a ``context_window`` the resolved agent type cannot apply.
+
+        A type-less config defers the check to the concrete config it resolves to.
+        An unsupported or out-of-range value fails here, at load, because a harness
+        that drops it would run the variant uncapped and still label it capped.
+
+        Rationale: .claude/notes/context-window.md § Recommended design
+        """
+        if self.context_window is None or self.type is None:
+            return self
+        bounds = type(self)._context_window_range
+        if bounds is None:
+            raise ValueError(
+                f"context_window is not supported by agent type {self.type!s}; "
+                + f"supported agent types: {', '.join(_kinds_supporting_context_window())}"
+            )
+        low, high = bounds
+        if self.context_window < low or (high is not None and self.context_window > high):
+            allowed = f"{low}-{high}" if high is not None else f">= {low}"
+            raise ValueError(
+                f"context_window {self.context_window} is out of range for agent type {self.type!s} "
+                + f"(allowed: {allowed} tokens)"
+            )
+        return self
+
 
 class ClaudeCodeAgentConfig(BaseAgentConfig):
     """Claude Code agent configuration."""
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
     uses_api_backend: ClassVar[bool] = True
+
+    # The CLI's own accepted auto-compact window range; it silently drops a
+    # settings value outside it, so the bound is enforced here instead.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (100_000, 1_000_000)
 
     system_prompt_mode: SystemPromptMode = Field(
         default="append",
@@ -300,11 +345,37 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def check_single_auto_compact_source(self) -> Self:
+        """Reject ``context_window`` alongside ``claude_settings.autoCompactWindow``.
+
+        ``context_window`` reaches the CLI as ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which
+        outranks the settings key, so the settings value would be silently ignored. Only an
+        inline dict can be checked here; when ``claude_settings`` is a file path, the file's
+        ``autoCompactWindow`` is overridden the same way, and the run is still capped at
+        ``context_window``, which is what the task row records.
+        """
+        if (
+            self.context_window is not None
+            and isinstance(self.claude_settings, dict)
+            and "autoCompactWindow" in self.claude_settings
+        ):
+            raise ValueError(
+                "context_window and claude_settings.autoCompactWindow both set the auto-compact window; "
+                + "set only context_window"
+            )
+        return self
+
 
 class CodexAgentConfig(BaseAgentConfig):
     """Codex agent configuration."""
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
+
+    # Codex clamps the value to the model's catalog maximum itself and compacts at 90% of it.
+    # The floor rejects a window too small to work in, such as a dropped "000" or a YAML
+    # `yes` that loads as 1.
+    _context_window_range: ClassVar[tuple[int, int | None] | None] = (32_768, None)
 
     def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.
@@ -441,14 +512,17 @@ class PiAgentConfig(BaseAgentConfig):
         return (_PI_PROVIDER_HOSTS.get(provider if model_id else "", "openrouter.ai:443"),)
 
 
+_DELEGATE_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})
+
+
 class DelegateAgentConfig(BaseAgentConfig):
     """Delegate agent configuration (UiPath Autopilot's Delegate agent).
 
-    Drives a Node host subprocess this framework ships (``agents/delegate/delegate_host.mjs``)
-    that wraps the public ``@uipath/delegate-sdk`` npm package's ``DelegateAgent`` class in a
-    stdio JSON-Lines protocol. The SDK's reasoning runs in the UiPath backend; its tools
-    (shell, file, Office, PDF) execute locally through a bundled interop process, so file-based
-    success criteria work as usual. See ``docs/agents/DELEGATE.md``.
+    Drives the Node host that the public ``@uipath/delegate-stdio`` npm package ships, which
+    runs the ``@uipath/delegate-sdk`` agent behind a stdio JSON-Lines protocol. The SDK's
+    reasoning runs in the UiPath backend; its tools (shell, file, Office, PDF) execute locally
+    through a bundled interop process, so file-based success criteria work as usual. See
+    ``docs/agents/DELEGATE.md``.
 
     ``allowed_tools`` / ``disallowed_tools`` / ``system_prompt`` / ``system_prompt_file``
     have no Delegate SDK equivalent and are warned about, not enforced, at ``start()``.
@@ -461,13 +535,13 @@ class DelegateAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.DELEGATE]  # type: ignore[assignment]
 
-    effort: str | None = Field(
-        default=None,
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
         description=(
-            "Reasoning-effort tier forwarded to the backend as-is (documented values: "
-            "low/medium/high/xhigh/max). Not validated against a closed set here — the SDK "
-            "itself ignores a value it does not recognize, and a strict Literal would reject a "
-            "tier a future SDK release adds."
+            "Pass-through dict of delegate-stdio init options that coder_eval does not own "
+            f"directly. Allowed keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)}. 'effort' is the "
+            "reasoning-effort tier (documented values: low/medium/high/xhigh/max): it must be a "
+            "string, forwarded as-is, and the host ignores a tier it does not recognize."
         ),
     )
     project_id: str | None = Field(
@@ -495,6 +569,19 @@ class DelegateAgentConfig(BaseAgentConfig):
             "grants that a CI runner does not have, and throws unconditionally on Linux."
         ),
     )
+
+    @field_validator("sdk_options")
+    @classmethod
+    def _validate_sdk_options_keys(cls, v: dict[str, Any]) -> dict[str, Any]:
+        unknown = sorted(set(v) - _DELEGATE_SDK_OPTION_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"sdk_options keys {unknown} are not delegate-stdio init options coder_eval forwards "
+                + f"(valid keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)})"
+            )
+        if "effort" in v and not isinstance(v["effort"], str):
+            raise ValueError(f"sdk_options.effort must be a string tier, got {v['effort']!r}")
+        return v
 
 
 class NoneAgentConfig(BaseAgentConfig):
@@ -576,6 +663,17 @@ def parse_agent_config(**kwargs: Any) -> BaseAgentConfig:
     if registration is None:
         raise AgentRegistry.unregistered_kind_error(agent_type)
     return registration.config_class.model_validate(kwargs)
+
+
+def _kinds_supporting_context_window() -> list[str]:
+    """Registered agent kinds whose config class can apply ``context_window``."""
+    from coder_eval.agents.registry import AgentRegistry
+
+    return [
+        kind
+        for kind in sorted(AgentRegistry.list_kinds())
+        if (reg := AgentRegistry.get(kind)) is not None and reg.config_class._context_window_range is not None
+    ]
 
 
 def _coerce_agent_config(value: Any) -> Any:

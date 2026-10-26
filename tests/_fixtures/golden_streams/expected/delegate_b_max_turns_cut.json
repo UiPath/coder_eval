@@ -1,0 +1,112 @@
+{
+  "agent_output": "",
+  "assistant_turn_count": 1,
+  "commands": [
+    {
+      "assistant_turn_index": 0,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
+      "generation_completed_at": null,
+      "parameters": {
+        "command": "step 0"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "out 0",
+      "result_tokens": 2,
+      "sequence_number": 1,
+      "timestamp": "<scrubbed>",
+      "tool_id": "t0",
+      "tool_name": "shell"
+    },
+    {
+      "assistant_turn_index": 0,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
+      "generation_completed_at": null,
+      "parameters": {
+        "command": "step 1"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "out 1",
+      "result_tokens": 2,
+      "sequence_number": 2,
+      "timestamp": "<scrubbed>",
+      "tool_id": "t1",
+      "tool_name": "shell"
+    }
+  ],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": true,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "t0"
+        },
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 1,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "t1"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 30,
+      "message_id": "delegate-1-msg-0",
+      "model": "virtuoso-1-5",
+      "output_tokens": 3,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": [
+        "t0",
+        "t1"
+      ]
+    }
+  ],
+  "model_used": "virtuoso-1-5",
+  "num_turns": 3,
+  "provider_errors": [],
+  "result_summary": {
+    "is_error": false,
+    "result": null,
+    "stop_reason": null,
+    "subtype": "max_turns_exhausted"
+  },
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 30,
+    "output_tokens": 3,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 30
+  },
+  "tool_union_ms": "<scrubbed>",
+  "user_input": "do it"
+}
