@@ -1,3 +1,4 @@
+# Modified from benchflow-ai/skillsbench@95b3e60: grade against fixed EXPECTED_* (issue #233).
 import collections
 import json
 import math
@@ -93,6 +94,7 @@ class TestOutputs:
 
     def test_values_correct(self):
         """Validate submission against ground truth."""
+        # Local aliases so the upstream lines below stay unchanged (keeps the vendored diff small).
         expected_mass, expected_vol, expected_id = EXPECTED_MASS, EXPECTED_VOL, EXPECTED_ID
 
         with open("/root/mass_report.json") as f:
