@@ -688,6 +688,17 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         return self
 
     @model_validator(mode="after")
+    def check_grading_network_without_simulation(self) -> Self:
+        """Refuse a separate grading network on a simulated task: its criteria run between agent turns."""
+        if self.simulation is not None and self.simulation.enabled and self.sandbox.docker.grading_widens_egress:
+            raise ValueError(
+                "sandbox.docker.grading_network / grading_egress_allowlist cannot widen the network of a task "
+                + "with an enabled simulation: its criteria run between dialog turns, so the agent would keep "
+                + "the grading network for the rest of the dialog."
+            )
+        return self
+
+    @model_validator(mode="after")
     def check_reference_consumers_have_a_reference(self) -> Self:
         """Reject criteria that DEMAND the reference when no ``reference:`` block is set.
 

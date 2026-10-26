@@ -1146,6 +1146,35 @@ an `llm_judge` / `agent_judge` criterion), and a URL variable counts only where 
 (`LITELLM_BASE_URL` for the litellm backend, `CODEX_BASE_URL` in `CodexAgentConfig.egress_hosts`).
 Any other host is explicit in `egress_allowlist`.
 
+### Why grading switches the sidecar in place
+
+Graders often install their own test dependencies (SkillsBench test scripts run `apt-get`, the
+`astral.sh` uv installer and `uvx` from PyPI). With one allowlist for both phases those hosts are
+open to the agent as well, and `github.com`, which the uv installer needs, is where public
+benchmark solutions live. So grading may widen the allowlist, never narrow it.
+
+Grading in a second container (the detached-grade path) was rejected: only the workspace crosses
+over, and the known equivalence gaps in § Two known equivalence gaps already score real rows 0.000
+for state outside it. The switch therefore happens in the same container, as in Harbor, at the
+two grading sites that run after the agent is finished (the single-shot loop and the post-failure
+path). The dialog loop is refused at load, because its criteria run between turns and a one-way
+switch would leave the agent the grading network for the rest of the dialog.
+
+The phase boundary is known only inside the container, so the in-container run asks through a
+request file in the run directory and waits for the host's answer in an ack file. The host, not
+the container, talks to the proxy: `docker exec` into the sidecar reaches a control listener on
+the sidecar's own loopback, which no other netns can reach, and the proxy confirms before the
+host answers. The ack is written with `write_text_atomic` because the run directory is writable
+from the container.
+
+This is not a boundary against an agent that targets it. The agent is root in the same
+container, so it can write the request file early, and a background process it started keeps
+running into grading. Both are the same class as the deliberate re-chmod the anti-cheat window
+leaves open. The `PHASE grading` line in `egress.log` separates the two phases' traffic.
+
+Grading-only hosts are checked at setup with `probe --direct` (a TCP connection from the sidecar),
+not through the proxy, because the proxy does not allow them yet.
+
 ### What Phase 0 measured
 
 - Every built-in harness in the image and every judge route (`llm_judge`, `agent_judge`,

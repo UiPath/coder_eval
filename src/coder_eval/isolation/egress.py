@@ -178,6 +178,8 @@ def resolve_egress_targets(task: TaskDefinition, *, env: Mapping[str, str], sett
 EGRESS_PROXY_MODULE = "egress_proxy.py"
 EGRESS_PROXY_ALIAS = "coder-eval-egress"
 EGRESS_PROXY_PORT = 3128
+# Loopback inside the sidecar's own netns: only a `docker exec` there can reach it, never the task container.
+EGRESS_CONTROL = "127.0.0.1:3129"
 EGRESS_LABEL = "org.coder-eval.egress"
 SIDECAR_EGRESS_DIR = "/work/egress"
 SIDECAR_HEARTBEAT = "/work/heartbeat"
@@ -214,12 +216,28 @@ _NETWORK_RM_RETRY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
+class EgressPlan:
+    """What one container's sidecar allows: ``targets`` from the start, and what grading adds.
+
+    ``grading_targets`` are the hosts grading adds; ``grading_any`` lets grading reach any host.
+    """
+
+    targets: tuple[str, ...]
+    grading_targets: tuple[str, ...] = ()
+    grading_any: bool = False
+
+    @property
+    def switches_for_grading(self) -> bool:
+        return self.grading_any or bool(self.grading_targets)
+
+
+@dataclass(frozen=True)
 class EgressHandle:
     """The per-task internal network and proxy sidecar a ``network: llm_only`` container joins."""
 
     network: str
     sidecar: str
-    targets: tuple[str, ...]
+    plan: EgressPlan
 
 
 def task_container_egress_argv() -> list[str]:
@@ -261,7 +279,7 @@ def build_sidecar_create_argv(
     egress_dir: Path,
     heartbeat: Path,
     stale_seconds: float,
-    targets: Sequence[str],
+    plan: EgressPlan,
 ) -> list[str]:
     """``docker`` arguments that create (not start) the proxy sidecar. Pure."""
     argv = [
@@ -306,13 +324,23 @@ def build_sidecar_create_argv(
         "--stale",
         f"{stale_seconds:g}",
     ]
-    for target in targets:
+    for target in plan.targets:
         argv += ["--allow", target]
+    if plan.switches_for_grading:
+        argv += ["--control", EGRESS_CONTROL]
+        if plan.grading_any:
+            argv.append("--grading-allow-any")
+        for target in plan.grading_targets:
+            argv += ["--grading-allow", target]
     return argv
 
 
-def build_probe_argv(sidecar: str, targets: Sequence[str]) -> list[str]:
-    """``docker`` arguments that CONNECT to every target through the running sidecar."""
+def build_probe_argv(sidecar: str, targets: Sequence[str], *, direct: bool = False) -> list[str]:
+    """``docker`` arguments that CONNECT to every target through the running sidecar.
+
+    ``direct`` dials each target from the sidecar instead, for hosts the proxy does not allow yet.
+    """
+    via = ["--direct"] if direct else ["--proxy", f"{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}"]
     return [
         "exec",
         sidecar,
@@ -320,11 +348,24 @@ def build_probe_argv(sidecar: str, targets: Sequence[str]) -> list[str]:
         "-I",
         f"{SIDECAR_EGRESS_DIR}/{EGRESS_PROXY_MODULE}",
         "probe",
-        "--proxy",
-        f"{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}",
+        *via,
         "--timeout",
         str(_PROBE_TIMEOUT_SECONDS),
         *targets,
+    ]
+
+
+def build_grading_argv(sidecar: str) -> list[str]:
+    """``docker`` arguments that switch the running sidecar to its grading allowlist."""
+    return [
+        "exec",
+        sidecar,
+        "python3",
+        "-I",
+        f"{SIDECAR_EGRESS_DIR}/{EGRESS_PROXY_MODULE}",
+        "grading",
+        "--control",
+        EGRESS_CONTROL,
     ]
 
 
@@ -368,20 +409,42 @@ async def _checked(what: str, *args: str, timeout: float = _DOCKER_TIMEOUT_SECON
     return result.stdout
 
 
-async def _probe(sidecar: str, targets: Sequence[str]) -> None:
+async def _probe(sidecar: str, targets: Sequence[str], *, direct: bool = False) -> None:
     try:
-        result = await _docker(*build_probe_argv(sidecar, targets))
+        result = await _docker(*build_probe_argv(sidecar, targets, direct=direct))
     except (OSError, subprocess.SubprocessError) as exc:
         raise EgressSetupError(f"network: llm_only egress probe could not run: {exc}") from exc
     if result.returncode == 0:
         return
     failing = [line.removeprefix("FAIL ") for line in result.stdout.splitlines() if line.startswith("FAIL ")]
     detail = "; ".join(failing) or (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+    if direct:
+        raise EgressSetupError(
+            f"network: llm_only could not reach a grading host from the egress sidecar: {detail}. Check that "
+            + "this host can reach the hosts in sandbox.docker.grading_egress_allowlist."
+        )
     raise EgressSetupError(
         f"network: llm_only egress probe failed: {detail}. Check that this host can reach these targets, add "
         + "a missing host with sandbox.docker.egress_allowlist, and note that chaining to an upstream "
         + "(corporate) proxy is not supported."
     )
+
+
+async def enter_grading(handle: EgressHandle) -> None:
+    """Switch the sidecar to its grading allowlist; returns once the proxy confirms.
+
+    Raises:
+        EgressSetupError: The sidecar has no grading allowlist, or did not confirm the switch.
+    """
+    if not handle.plan.switches_for_grading:
+        raise EgressSetupError("network: llm_only has no grading allowlist to switch to.")
+    try:
+        result = await _docker(*build_grading_argv(handle.sidecar))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EgressSetupError(f"network: llm_only could not switch to the grading allowlist: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stdout or result.stderr).strip() or f"exit code {result.returncode}"
+        raise EgressSetupError(f"network: llm_only could not switch to the grading allowlist: {detail}")
 
 
 async def _best_effort(*args: str) -> subprocess.CompletedProcess[str] | None:
@@ -436,7 +499,7 @@ async def egress_scope(
     egress_dir: Path,
     heartbeat: Path,
     stale_seconds: float,
-    targets: Sequence[str],
+    plan: EgressPlan,
     log_path: Path,
 ) -> AsyncIterator[EgressHandle]:
     """Create the internal network and proxy sidecar, probe every target, yield, then tear both down.
@@ -473,16 +536,21 @@ async def egress_scope(
                 egress_dir=egress_dir,
                 heartbeat=heartbeat,
                 stale_seconds=stale_seconds,
-                targets=targets,
+                plan=plan,
             ),
         )
         await _checked("attach the egress sidecar to the bridge network", "network", "connect", "bridge", sidecar)
         await _checked("start the egress sidecar", "start", sidecar)
-        if targets:
-            await _probe(sidecar, targets)
-        else:
+        if plan.targets:
+            await _probe(sidecar, plan.targets)
+        elif not plan.switches_for_grading:
             logger.warning("network: llm_only with an empty allowlist: the container can reach no host at all.")
-        logger.info("Egress sidecar %s on %s allows: %s", sidecar, network, ", ".join(targets) or "(nothing)")
-        yield EgressHandle(network=network, sidecar=sidecar, targets=tuple(targets))
+        if plan.grading_targets:
+            await _probe(sidecar, plan.grading_targets, direct=True)
+        logger.info("Egress sidecar %s on %s allows: %s", sidecar, network, ", ".join(plan.targets) or "(nothing)")
+        if plan.switches_for_grading:
+            grading = "any host" if plan.grading_any else ", ".join(plan.grading_targets)
+            logger.info("Egress sidecar %s also allows, once grading starts: %s", sidecar, grading)
+        yield EgressHandle(network=network, sidecar=sidecar, plan=plan)
     finally:
         await _run_to_completion(_teardown(network=created_network, sidecar=created_sidecar, log_path=log_path))

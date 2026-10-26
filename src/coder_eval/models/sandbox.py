@@ -267,6 +267,26 @@ class DockerDriverConfig(BaseModel):
             "Ignored for other network modes. Example: ['pypi.org', 'files.pythonhosted.org']."
         ),
     )
+    grading_network: Literal["bridge", "llm_only"] | None = Field(
+        default=None,
+        description=(
+            "Network for grading, when it differs from the agent's. Needs `network: llm_only`. 'bridge': the "
+            "criteria reach any host through the proxy sidecar. 'llm_only': the agent's allowlist plus "
+            "`grading_egress_allowlist`. None (default): grading uses the agent's network. The proxy switches "
+            "once, when grading starts, so a criterion can install its test dependencies while the agent never "
+            "reached those hosts. Not supported with an enabled `simulation`, whose criteria run between turns."
+        ),
+    )
+    grading_egress_allowlist: list[str] = MergeField(
+        strategy="append",
+        default_factory=list,
+        description=(
+            "Extra `host` or `host:port` targets (default port 443) the criteria may reach under "
+            "`network: llm_only`, on top of `egress_allowlist` and the derived model-API hosts. The agent "
+            "cannot reach them. Appended across config layers. Ignored with `grading_network: bridge` or "
+            "another network mode. Example: ['pypi.org', 'files.pythonhosted.org', 'astral.sh']."
+        ),
+    )
     working_dir: str | None = Field(
         default=None,
         description=(
@@ -354,10 +374,26 @@ class DockerDriverConfig(BaseModel):
         description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
     )
 
-    @field_validator("egress_allowlist")
+    @field_validator("egress_allowlist", "grading_egress_allowlist")
     @classmethod
     def _normalize_egress_allowlist(cls, values: list[str]) -> list[str]:
         return [normalize_egress_target(v) for v in values]
+
+    @model_validator(mode="after")
+    def _check_grading_network(self) -> DockerDriverConfig:
+        if self.grading_network is None or self.network == "llm_only":
+            return self
+        if self.network == "bridge" and self.grading_network == "bridge":
+            return self
+        raise ValueError(
+            f"grading_network: {self.grading_network} needs network: llm_only, not {self.network}: the container "
+            + "joins one network for its whole life, so grading can only widen an llm_only allowlist."
+        )
+
+    @property
+    def grading_widens_egress(self) -> bool:
+        """True when grading may reach hosts the agent could not, so the proxy switches when grading starts."""
+        return self.network == "llm_only" and (self.grading_network == "bridge" or bool(self.grading_egress_allowlist))
 
     @field_validator("working_dir")
     @classmethod

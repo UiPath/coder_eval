@@ -30,7 +30,9 @@ from coder_eval.isolation.egress import (
     EGRESS_PROXY_MODULE,
     PROXY_ENV_NAMES,
     EgressHandle,
+    EgressPlan,
     egress_scope,
+    enter_grading,
     forwarded_env_names,
     resolve_egress_targets,
     rewrite_loopback_for_container,
@@ -60,6 +62,9 @@ from coder_eval.models import (
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_GRADING_ACK_FILENAME,
+    EGRESS_GRADING_ACK_OK,
+    EGRESS_GRADING_REQUEST_FILENAME,
     EGRESS_LOG_FILENAME,
     PRIOR_RESULT_FILENAME,
     REFERENCE_COPY_IGNORE,
@@ -124,6 +129,7 @@ CLAUDE_COPY_MAX_ATTEMPTS = 3
 HEARTBEAT_FILENAME = ".coder_eval_host_heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
+_GRADING_REQUEST_POLL_SECONDS = 0.25
 
 # asyncio's StreamReader caps a line at 64 KiB by default, which a single stream
 # event can exceed. The same KIND of guard as Orchestrator._POST_RUN_STREAM_LIMIT,
@@ -163,13 +169,34 @@ async def _heartbeat_loop(heartbeat_path: Path) -> None:
         pass
 
 
-def _network_name(cfg: DockerDriverConfig, egress: EgressHandle | None) -> str:
+def _network_name(network: str, egress: EgressHandle | None) -> str:
     """The ``--network`` value; ``llm_only`` without its sidecar refuses rather than falls back to bridge."""
-    if cfg.network == "llm_only":
+    if network == "llm_only":
         if egress is None:
             raise DockerRunError("network: llm_only needs its egress sidecar; refusing to fall back to bridge.")
         return egress.network
-    return cfg.network
+    return network
+
+
+def _remove_grading_handshake(output_dir: Path) -> None:
+    for name in (EGRESS_GRADING_REQUEST_FILENAME, EGRESS_GRADING_ACK_FILENAME):
+        (output_dir / name).unlink(missing_ok=True)
+
+
+async def _serve_grading_request(output_dir: Path, egress: EgressHandle) -> None:
+    """Switch the sidecar to its grading allowlist once the container asks, then answer in the ack file."""
+    request = output_dir / EGRESS_GRADING_REQUEST_FILENAME
+    while not await asyncio.to_thread(request.exists):
+        await asyncio.sleep(_GRADING_REQUEST_POLL_SECONDS)
+    try:
+        await enter_grading(egress)
+        reply = EGRESS_GRADING_ACK_OK
+        logger.info("Egress sidecar %s switched to the grading allowlist.", egress.sidecar)
+    except EgressSetupError as exc:
+        logger.warning("%s", exc)
+        reply = f"error: {exc}"
+    # Atomic: the run dir is writable from the container, so a planted symlink is replaced, never followed.
+    await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_ACK_FILENAME, reply)
 
 
 def _prepare_egress_dir(egress_dir: Path) -> None:
@@ -651,7 +678,7 @@ class DockerRunner:
         log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
 
         try:
-            egress_targets = self._resolve_egress_targets()
+            egress_plan = self._resolve_egress_plan()
             await self._stage_inputs(input_dir)
 
             # Stable and UNIQUE so cancellation can target it: PID alone collides
@@ -666,7 +693,7 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_reference_mount, staging)
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
             egress_dir = staging / "egress"
-            if egress_targets is not None:
+            if egress_plan is not None:
                 try:
                     await asyncio.to_thread(_prepare_egress_dir, egress_dir)
                 except OSError as exc:
@@ -694,10 +721,10 @@ class DockerRunner:
                     egress_dir=egress_dir,
                     heartbeat=heartbeat_path,
                     stale_seconds=HEARTBEAT_STALE_SECONDS,
-                    targets=egress_targets,
+                    plan=egress_plan,
                     log_path=self.rt.run_dir / EGRESS_LOG_FILENAME,
                 )
-                if egress_targets is not None
+                if egress_plan is not None
                 else contextlib.nullcontext(None)
             )
             async with scope as egress:
@@ -712,12 +739,22 @@ class DockerRunner:
                     limit=STDOUT_LINE_LIMIT_BYTES,
                 )
                 log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
+                grading_watch = (
+                    asyncio.create_task(_serve_grading_request(output_dir, egress))
+                    if egress is not None and egress.plan.switches_for_grading
+                    else None
+                )
                 # HAZARD: `docker run --rm` does NOT propagate a kill daemon-side, so
                 # without this `finally` Ctrl-C leaves the container burning budget.
                 # Rationale: .claude/notes/isolation.md § A container that produced no task.json
                 try:
                     returncode = await self._stream_container_output(proc, log_fh)
                 finally:
+                    if grading_watch is not None:
+                        grading_watch.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await grading_watch
+                        await asyncio.to_thread(_remove_grading_handshake, output_dir)
                     await asyncio.to_thread(log_fh.close)
                     # Cancelled mid-flight: kill the container AND the docker CLI subprocess, best-effort.
                     if proc.returncode is None:
@@ -741,18 +778,36 @@ class DockerRunner:
             # the modes it had. See `restore_modes`.
             await asyncio.to_thread(restore_modes, widened_workspace)
 
-    def _resolve_egress_targets(self) -> list[str] | None:
-        """The ``network: llm_only`` allowlist, or None for any other network mode.
+    def _container_network(self) -> str:
+        """The network this container joins: a detached grade with ``grading_network: bridge`` gets ``bridge``."""
+        cfg = self._docker_config
+        if self.grade_workspace is not None and cfg.network == "llm_only" and cfg.grading_network == "bridge":
+            return "bridge"
+        return cfg.network
+
+    def _resolve_egress_plan(self) -> EgressPlan | None:
+        """This container's ``network: llm_only`` allowlists, or None for any other network.
+
+        ``execute`` keeps the agent's allowlist, a detached grade gets the grading one from
+        the start, and a graded run switches when its grading starts.
 
         Raises:
             EgressSetupError: A forwarded URL, judge ``base_url`` or ``AWS_REGION`` cannot be allowlisted.
         """
-        if self._docker_config.network != "llm_only":
+        if self._container_network() != "llm_only":
             return None
         try:
-            return resolve_egress_targets(self.rt.task, env=os.environ, settings=settings)
+            targets = tuple(resolve_egress_targets(self.rt.task, env=os.environ, settings=settings))
         except ValueError as exc:
             raise EgressSetupError(str(exc)) from exc
+        cfg = self._docker_config
+        if not (self.grade and cfg.grading_widens_egress):
+            return EgressPlan(targets)
+        grading_any = cfg.grading_network == "bridge"
+        grading_targets = () if grading_any else tuple(t for t in cfg.grading_egress_allowlist if t not in targets)
+        if self.grade_workspace is not None:
+            return EgressPlan(tuple(sorted({*targets, *grading_targets})))
+        return EgressPlan(targets, grading_targets, grading_any)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition and the ``ContainerContext`` into the
@@ -1417,7 +1472,8 @@ class DockerRunner:
             "DAC_READ_SEARCH",
         ]
 
-        argv += ["--network", _network_name(cfg, egress)]
+        network = self._container_network()
+        argv += ["--network", _network_name(network, egress)]
 
         if self._limits.max_memory_mb:
             argv += ["--memory", f"{self._limits.max_memory_mb}m"]
@@ -1445,7 +1501,7 @@ class DockerRunner:
         # to the docker host alias and publish that alias. Only a URL, so an
         # explicit `--env VAR=value` is safe in the logged argv -- unlike the token.
         litellm_base_url = os.environ.get("LITELLM_BASE_URL")
-        if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and cfg.network != "none":
+        if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and network != "none":
             rewritten = rewrite_loopback_for_container(litellm_base_url)
             if rewritten is not None:
                 argv += ["--env", f"LITELLM_BASE_URL={rewritten}"]
@@ -1459,7 +1515,7 @@ class DockerRunner:
         # in-container cost join, so bind-mount its dir at the SAME host path
         # read-only and forward the resolved ABSOLUTE path.
         litellm_cost_log = os.environ.get("LITELLM_COST_LOG")
-        if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and cfg.network != "none":
+        if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and network != "none":
             abs_log = Path(litellm_cost_log).expanduser().resolve()
             if abs_log.parent.is_dir():
                 argv += ["-v", f"{abs_log.parent}:{abs_log.parent}:ro", "--env", f"LITELLM_COST_LOG={abs_log}"]

@@ -1,18 +1,18 @@
 """Stdlib-only egress proxy for ``network: llm_only``; it runs inside the egress sidecar.
 
-``serve`` accepts HTTP ``CONNECT host:port`` and absolute-form plain HTTP
-(``GET http://host/...``) and forwards only to an exact allowlisted ``host:port``.
-It never originates TLS: an absolute-form ``https://`` request gets ``400``. Every
-decision is one stdout line (``ALLOW``, ``DENY``, ``FAIL``, ``BAD``, ``STALE``) after
-one ``READY`` line; a request line with a control or non-ASCII byte is refused. With
-``--heartbeat`` it stops when the host heartbeat stops changing for ``--stale`` seconds.
+``serve`` forwards ``CONNECT host:port`` and absolute-form plain HTTP only to an exact
+allowlisted ``host:port`` and never originates TLS. Every decision is one stdout line
+(``ALLOW``, ``DENY``, ``FAIL``, ``BAD``, ``STALE``, ``PHASE``) after one ``READY`` line.
+``--heartbeat`` stops it when the host heartbeat goes stale. ``--control`` listens on
+loopback for one ``GRADING`` line that adds ``--grading-allow`` (or any host, with
+``--grading-allow-any``); the switch is one-way.
 
-``probe`` sends one ``CONNECT`` per target through a running proxy, prints
-``OK target`` or ``FAIL target <reason>``, and exits 0 only when every target is OK.
+``probe`` checks each target through a running proxy (or, with ``--direct``, by a
+TCP connection) and exits 0 only when every target is OK. ``grading`` sends the
+``GRADING`` line to a ``--control`` address and exits 0 once the proxy confirms.
 
-The host bind-mounts this file into the framework image and runs it with
-``python3 -I``, so it may import only ``argparse``, ``asyncio``, ``os``, ``sys`` and
-``time``. Importing it starts nothing.
+The host runs this file with ``python3 -I``, so it imports only ``argparse``,
+``asyncio``, ``os``, ``sys`` and ``time``. Importing it starts nothing.
 
 Rationale: .claude/notes/isolation.md § The egress sidecar (network: llm_only)
 """
@@ -37,10 +37,32 @@ _FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\
 _BAD_GATEWAY = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _UNAVAILABLE = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
+_CONTROL_GRADING = b"GRADING\n"
+_CONTROL_OK = b"OK grading\n"
 
 
 def _log(line: str) -> None:
     print(line, flush=True)
+
+
+class Policy:
+    """Where the proxy forwards: ``allow`` from the start, plus the grading hosts once grading starts."""
+
+    def __init__(
+        self, allow: frozenset[str], grading_allow: frozenset[str] = frozenset(), grading_any: bool = False
+    ) -> None:
+        self.allow = allow
+        self.grading_allow = grading_allow
+        self.grading_any = grading_any
+        self.grading = False
+
+    def permits(self, destination: str) -> bool:
+        if destination in self.allow:
+            return True
+        return self.grading and (self.grading_any or destination in self.grading_allow)
+
+    def describe_grading(self) -> str:
+        return "*" if self.grading_any else "+" + ",".join(sorted(self.grading_allow))
 
 
 def _redacted(request_line: bytes) -> str:
@@ -167,7 +189,7 @@ def _parse_absolute_http(target: str) -> tuple[str, int, str] | None:
 
 
 async def handle_client(
-    allow: frozenset[str], client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
+    policy: Policy, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
 ) -> None:
     """Serve one client connection: parse its request head, then tunnel, forward or refuse."""
     try:
@@ -208,7 +230,7 @@ async def handle_client(
         return
     host, port = parsed
     destination = f"{host}:{port}"
-    if destination not in allow:
+    if not policy.permits(destination):
         _log(f"DENY {destination} {method}")
         await _reply_and_close(client_writer, _FORBIDDEN)
         return
@@ -239,7 +261,7 @@ async def handle_client(
         client_writer.close()
 
 
-async def start_proxy(allow: frozenset[str], host: str, port: int) -> asyncio.Server:
+async def start_proxy(policy: Policy, host: str, port: int) -> asyncio.Server:
     """Start listening; the returned server is already accepting connections.
 
     At most ``MAX_CONNECTIONS`` clients are served at once; one more gets ``503``.
@@ -254,17 +276,47 @@ async def start_proxy(allow: frozenset[str], host: str, port: int) -> asyncio.Se
             return
         active += 1
         try:
-            await handle_client(allow, reader, writer)
+            await handle_client(policy, reader, writer)
         finally:
             active -= 1
 
     return await asyncio.start_server(_handle, host, port, limit=HEAD_LIMIT_BYTES)
 
 
-async def serve(allow: frozenset[str], host: str, port: int, heartbeat: str | None, stale_seconds: float) -> None:
+async def start_control(policy: Policy, host: str, port: int) -> asyncio.Server:
+    """Listen for the one-way ``GRADING`` switch; anything else is refused and changes nothing."""
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), HEAD_TIMEOUT_SECONDS)
+        except (TimeoutError, ConnectionError, OSError):
+            writer.close()
+            return
+        if line != _CONTROL_GRADING:
+            _log("BAD control request")
+            await _reply_and_close(writer, b"BAD\n")
+            return
+        if not policy.grading:
+            policy.grading = True
+            _log(f"PHASE grading allow={policy.describe_grading()}")
+        await _reply_and_close(writer, _CONTROL_OK)
+
+    return await asyncio.start_server(_handle, host, port)
+
+
+async def serve(
+    policy: Policy,
+    host: str,
+    port: int,
+    heartbeat: str | None,
+    stale_seconds: float,
+    control: tuple[str, int] | None = None,
+) -> None:
     """Run the proxy until the heartbeat goes stale (forever when ``heartbeat`` is None)."""
-    server = await start_proxy(allow, host, port)
-    _log(f"READY {host}:{port} allow={','.join(sorted(allow))}")
+    server = await start_proxy(policy, host, port)
+    control_server = None if control is None else await start_control(policy, *control)
+    grading = f" grading={policy.describe_grading()}" if control is not None else ""
+    _log(f"READY {host}:{port} allow={','.join(sorted(policy.allow))}{grading}")
     try:
         if heartbeat is None:
             await server.serve_forever()
@@ -273,6 +325,8 @@ async def serve(allow: frozenset[str], host: str, port: int, heartbeat: str | No
     finally:
         server.close()
         server.abort_clients()
+        if control_server is not None:
+            control_server.close()
 
 
 async def _probe_one(proxy_host: str, proxy_port: int, target: str, timeout: float) -> str | None:
@@ -299,16 +353,55 @@ async def _probe_one(proxy_host: str, proxy_port: int, target: str, timeout: flo
     return status_line.decode("latin-1").strip() or "no response"
 
 
-async def probe(proxy: str, targets: list[str], timeout: float) -> int:
-    """CONNECT to each target through ``proxy``; 0 when all succeed, else 1."""
-    parsed = split_host_port(proxy, None)
+async def _dial_one(target: str, timeout: float) -> str | None:
+    parsed = split_host_port(target, None)
     if parsed is None:
-        _log(f"FAIL {proxy} invalid --proxy (expected host:port)")
-        return 1
-    errors = await asyncio.gather(*(_probe_one(*parsed, target, timeout) for target in targets))
+        return "invalid target (expected host:port)"
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(*parsed), timeout)
+    except (OSError, TimeoutError) as exc:
+        return repr(exc)
+    writer.close()
+    return None
+
+
+async def probe(proxy: str | None, targets: list[str], timeout: float) -> int:
+    """CONNECT to each target through ``proxy`` (dial it directly when None); 0 when all succeed, else 1."""
+    if proxy is None:
+        errors = await asyncio.gather(*(_dial_one(target, timeout) for target in targets))
+    else:
+        parsed = split_host_port(proxy, None)
+        if parsed is None:
+            _log(f"FAIL {proxy} invalid --proxy (expected host:port)")
+            return 1
+        errors = await asyncio.gather(*(_probe_one(*parsed, target, timeout) for target in targets))
     for target, error in zip(targets, errors, strict=True):
         _log(f"OK {target}" if error is None else f"FAIL {target} {error}")
     return 0 if all(error is None for error in errors) else 1
+
+
+async def request_grading(control: str, timeout: float) -> int:
+    """Switch the proxy listening on ``control`` to grading; 0 once it confirms, else 1."""
+    parsed = split_host_port(control, None)
+    if parsed is None:
+        _log(f"FAIL {control} invalid --control (expected host:port)")
+        return 1
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(*parsed), timeout)
+    except (OSError, TimeoutError) as exc:
+        _log(f"FAIL {control} control unreachable: {exc!r}")
+        return 1
+    try:
+        writer.write(_CONTROL_GRADING)
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.readline(), timeout)
+    except (OSError, TimeoutError) as exc:
+        _log(f"FAIL {control} {exc!r}")
+        return 1
+    finally:
+        writer.close()
+    _log(reply.decode("latin-1").strip() or "FAIL no reply")
+    return 0 if reply == _CONTROL_OK else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -319,18 +412,41 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_cmd.add_argument("--heartbeat", default=None, help="host heartbeat file; stop when it goes stale")
     serve_cmd.add_argument("--stale", type=float, default=None, help="seconds without a heartbeat change")
     serve_cmd.add_argument("--allow", action="append", default=[], help="allowed host:port (repeatable)")
+    serve_cmd.add_argument("--control", default=None, help="loopback host:port for the GRADING switch")
+    serve_cmd.add_argument(
+        "--grading-allow", action="append", default=[], help="host:port also allowed after GRADING (repeatable)"
+    )
+    serve_cmd.add_argument("--grading-allow-any", action="store_true", help="allow any host:port after GRADING")
     probe_cmd = commands.add_parser("probe", help="CONNECT to each target through a running proxy")
-    probe_cmd.add_argument("--proxy", required=True, help="proxy host:port")
+    via = probe_cmd.add_mutually_exclusive_group(required=True)
+    via.add_argument("--proxy", help="proxy host:port")
+    via.add_argument("--direct", action="store_true", help="open a TCP connection to each target instead")
     probe_cmd.add_argument("--timeout", type=float, default=5.0, help="per-target timeout in seconds")
     probe_cmd.add_argument("targets", nargs="+", help="host:port targets")
+    grading_cmd = commands.add_parser("grading", help="switch a running proxy to its grading allowlist")
+    grading_cmd.add_argument("--control", required=True, help="the proxy's --control host:port")
+    grading_cmd.add_argument("--timeout", type=float, default=5.0, help="timeout in seconds")
     return parser
+
+
+def _parse_allow(entries: list[str], flag: str) -> set[str] | None:
+    allow: set[str] = set()
+    for entry in entries:
+        parsed = None if "[" in entry else split_host_port(entry.strip(), None)
+        if parsed is None or ":" in parsed[0]:
+            _log(f"BAD {flag} {entry!r} (expected host:port)")
+            return None
+        allow.add(f"{parsed[0]}:{parsed[1]}")
+    return allow
 
 
 def main(argv: list[str] | None = None) -> int:
     """Command-line entry point; returns the process exit code."""
     args = _build_parser().parse_args(argv)
     if args.command == "probe":
-        return asyncio.run(probe(args.proxy, args.targets, args.timeout))
+        return asyncio.run(probe(None if args.direct else args.proxy, args.targets, args.timeout))
+    if args.command == "grading":
+        return asyncio.run(request_grading(args.control, args.timeout))
     listen = split_host_port(args.listen, None)
     if listen is None:
         _log(f"BAD --listen {args.listen!r} (expected host:port)")
@@ -338,14 +454,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.heartbeat is not None and not (args.stale is not None and 0 < args.stale < float("inf")):
         _log("BAD --heartbeat needs a finite, positive --stale")
         return 2
-    allow: set[str] = set()
-    for entry in args.allow:
-        parsed = None if "[" in entry else split_host_port(entry.strip(), None)
-        if parsed is None or ":" in parsed[0]:
-            _log(f"BAD --allow {entry!r} (expected host:port)")
-            return 2
-        allow.add(f"{parsed[0]}:{parsed[1]}")
-    asyncio.run(serve(frozenset(allow), listen[0], listen[1], args.heartbeat, args.stale or 0.0))
+    control = None if args.control is None else split_host_port(args.control, None)
+    if args.control is not None and (control is None or control[0] not in ("127.0.0.1", "localhost")):
+        _log(f"BAD --control {args.control!r} (expected a loopback host:port)")
+        return 2
+    if (args.grading_allow or args.grading_allow_any) and control is None:
+        _log("BAD --grading-allow and --grading-allow-any need --control")
+        return 2
+    allow = _parse_allow(args.allow, "--allow")
+    grading_allow = _parse_allow(args.grading_allow, "--grading-allow")
+    if allow is None or grading_allow is None:
+        return 2
+    policy = Policy(frozenset(allow), frozenset(grading_allow), args.grading_allow_any)
+    asyncio.run(serve(policy, listen[0], listen[1], args.heartbeat, args.stale or 0.0, control))
     return 0
 
 

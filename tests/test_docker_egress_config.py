@@ -77,3 +77,38 @@ async def test_llm_only_without_the_docker_driver_is_refused_before_any_agent_ru
     [result] = results
     assert result.result.final_status == FinalStatus.ERROR
     assert "llm_only needs sandbox.driver: docker" in (result.result.error_message or "")
+
+
+def test_grading_allowlist_normalizes_like_the_agent_allowlist():
+    cfg = DockerDriverConfig(network="llm_only", grading_egress_allowlist=["PyPI.org", "astral.sh:443"])
+    assert cfg.grading_egress_allowlist == ["pypi.org:443", "astral.sh:443"]
+    with pytest.raises(ValidationError):
+        DockerDriverConfig(network="llm_only", grading_egress_allowlist=["https://pypi.org"])
+
+
+@pytest.mark.parametrize(
+    ("docker", "widens"),
+    [
+        ({"network": "llm_only"}, False),
+        ({"network": "llm_only", "grading_network": "llm_only"}, False),
+        ({"network": "llm_only", "grading_network": "bridge"}, True),
+        ({"network": "llm_only", "grading_egress_allowlist": ["pypi.org"]}, True),
+        ({"network": "bridge", "grading_network": "bridge"}, False),
+        ({"network": "bridge", "grading_egress_allowlist": ["pypi.org"]}, False),
+    ],
+)
+def test_grading_widens_egress_only_from_llm_only(docker: dict[str, object], widens: bool):
+    assert DockerDriverConfig(**docker).grading_widens_egress is widens  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "docker",
+    [
+        {"network": "bridge", "grading_network": "llm_only"},
+        {"network": "none", "grading_network": "bridge"},
+        {"network": "none", "grading_network": "llm_only"},
+    ],
+)
+def test_grading_network_cannot_narrow_or_leave_none(docker: dict[str, object]):
+    with pytest.raises(ValidationError, match="needs network: llm_only"):
+        DockerDriverConfig(**docker)  # type: ignore[arg-type]

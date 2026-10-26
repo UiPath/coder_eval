@@ -35,8 +35,9 @@ async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 @contextlib.asynccontextmanager
-async def _proxy(allow: set[str]) -> AsyncIterator[int]:
-    server = await egress_proxy.start_proxy(frozenset(allow), "127.0.0.1", 0)
+async def _proxy(allow: set[str] | egress_proxy.Policy) -> AsyncIterator[int]:
+    policy = allow if isinstance(allow, egress_proxy.Policy) else egress_proxy.Policy(frozenset(allow))
+    server = await egress_proxy.start_proxy(policy, "127.0.0.1", 0)
     try:
         yield server.sockets[0].getsockname()[1]
     finally:
@@ -238,7 +239,7 @@ async def test_watchdog_stops_serve_on_a_stale_or_missing_heartbeat(tmp_path, ca
     heartbeat = tmp_path / "hb"
     heartbeat.write_text("1", encoding="utf-8")
     started = time.monotonic()
-    await asyncio.wait_for(egress_proxy.serve(frozenset(), "127.0.0.1", 0, str(heartbeat), 1.0), 5)
+    await asyncio.wait_for(egress_proxy.serve(egress_proxy.Policy(frozenset()), "127.0.0.1", 0, str(heartbeat), 1.0), 5)
     assert time.monotonic() - started < 3.5
     await asyncio.wait_for(egress_proxy.watch_heartbeat(str(tmp_path / "absent"), 0.5), 5)
     assert capsys.readouterr().out.count("STALE") == 2
@@ -294,6 +295,7 @@ def test_runs_standalone_in_isolated_mode():
     assert result.returncode == 0
     assert "serve" in result.stdout
     assert "probe" in result.stdout
+    assert "grading" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -306,6 +308,10 @@ def test_runs_standalone_in_isolated_mode():
         ),
         (["--heartbeat", "hb"], "--stale"),
         *((["--heartbeat", "hb", "--stale", stale], "--stale") for stale in ["0", "nan", "inf"]),
+        (["--grading-allow", "a.example:443"], "need --control"),
+        (["--grading-allow-any"], "need --control"),
+        (["--control", "0.0.0.0:3129"], "BAD --control"),
+        (["--control", "127.0.0.1:3129", "--grading-allow", "a.example"], "BAD --grading-allow"),
     ],
 )
 def test_main_refuses_invalid_arguments(extra: list[str], named: str, capsys):
@@ -321,3 +327,69 @@ def test_main_serves_until_the_heartbeat_is_stale(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "allow=a.example:443" in out
     assert "STALE" in out
+
+
+async def _connect_status(port: int, target: str) -> bytes:
+    _reader, writer, status = await _request(port, f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
+    writer.close()
+    return status.split()[1]
+
+
+@pytest.mark.parametrize("grading_any", [False, True])
+async def test_grading_widens_the_allowlist_one_way(grading_any: bool, capsys):
+    echo, echo_port = await _upstream(_echo)
+    agent_target, grading_target = f"localhost:{echo_port}", f"127.0.0.1:{echo_port}"
+    policy = egress_proxy.Policy(frozenset({agent_target}), frozenset({grading_target}), grading_any)
+    control = await egress_proxy.start_control(policy, "127.0.0.1", 0)
+    control_address = f"127.0.0.1:{control.sockets[0].getsockname()[1]}"
+    async with echo, control, _proxy(policy) as port:
+        before = [await _connect_status(port, t) for t in (agent_target, grading_target)]
+        switched = await egress_proxy.request_grading(control_address, 5)
+        again = await egress_proxy.request_grading(control_address, 5)
+        after = [await _connect_status(port, t) for t in (agent_target, grading_target, "other.invalid:443")]
+    assert before == [b"200", b"403"]
+    assert (switched, again) == (0, 0)
+    assert after[:2] == [b"200", b"200"]
+    # Any host is forwarded, so an unresolvable one fails upstream (502) instead of being denied (403).
+    assert after[2] == (b"502" if grading_any else b"403")
+    out = capsys.readouterr().out
+    assert out.count("PHASE grading") == 1
+    assert ("PHASE grading allow=*" in out) == grading_any
+
+
+async def test_control_refuses_any_other_request(capsys):
+    policy = egress_proxy.Policy(frozenset(), frozenset({"a.example:443"}))
+    control = await egress_proxy.start_control(policy, "127.0.0.1", 0)
+    async with control:
+        reader, writer = await asyncio.open_connection("127.0.0.1", control.sockets[0].getsockname()[1])
+        writer.write(b"grading\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.readline(), 5)
+        writer.close()
+    assert reply == b"BAD\n"
+    assert not policy.grading
+    assert "BAD control request" in capsys.readouterr().out
+
+
+async def test_request_grading_fails_when_nothing_listens(capsys):
+    assert await egress_proxy.request_grading(f"127.0.0.1:{_free_port()}", 1) == 1
+    assert "control unreachable" in capsys.readouterr().out
+
+
+async def test_direct_probe_dials_each_target(capsys):
+    echo, echo_port = await _upstream(_echo)
+    async with echo:
+        ok = await egress_proxy.probe(None, [f"127.0.0.1:{echo_port}"], 5)
+        mixed = await egress_proxy.probe(None, [f"127.0.0.1:{echo_port}", f"127.0.0.1:{_free_port()}"], 1)
+    assert (ok, mixed) == (0, 1)
+    assert f"OK 127.0.0.1:{echo_port}" in capsys.readouterr().out
+
+
+def test_main_serves_with_a_grading_policy(tmp_path, capsys):
+    heartbeat = tmp_path / "hb"
+    heartbeat.write_text("1", encoding="utf-8")
+    argv = ["serve", "--listen", f"127.0.0.1:{_free_port()}", "--heartbeat", str(heartbeat), "--stale", "0.5"]
+    control = ["--control", f"127.0.0.1:{_free_port()}"]
+    assert egress_proxy.main([*argv, *control, "--allow", "a.example:443", "--grading-allow", "B.example"]) == 2
+    assert egress_proxy.main([*argv, *control, "--allow", "a.example:443", "--grading-allow", "B.example:443"]) == 0
+    assert "allow=a.example:443 grading=+b.example:443" in capsys.readouterr().out

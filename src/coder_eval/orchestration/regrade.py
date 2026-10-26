@@ -286,10 +286,11 @@ def _container_dispatch_commands(task: TaskDefinition, task_file: Path | None) -
     parts += [f"-v {mount}" for mount in docker.extra_mounts or []]
     parts += [f"-v {path}" for path in _dispatch_host_exposure(task, task_file)]
     parts += [f"--env {name}" for name in docker.env_passthrough_extra or []]
-    if docker.network == "llm_only":
+    if docker.network == "llm_only" and docker.grading_network != "bridge":
         parts.append("--network llm_only")
-        if docker.egress_allowlist:
-            parts.append(f"(egress allowed to: {', '.join(docker.egress_allowlist)} plus the derived model-API hosts)")
+        allowed = list(dict.fromkeys([*docker.egress_allowlist, *docker.grading_egress_allowlist]))
+        if allowed:
+            parts.append(f"(egress allowed to: {', '.join(allowed)} plus the derived model-API hosts)")
     parts.append("(with your credentials in its environment and a writable copy of ~/.claude)")
     return [" ".join(parts)]
 

@@ -139,6 +139,43 @@ Typical additions:
 | A remote MCP server or a run-time plugin install | its host |
 | `uv` downloading a managed Python not in the image | `github.com`, `objects.githubusercontent.com` (or bake the Python into the image) |
 
+### Grading network
+
+A host in `egress_allowlist` is open to the agent too. When only the criteria need it, for example a
+test script that installs its test dependencies, give it to grading alone:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+    grading_egress_allowlist: [pypi.org, files.pythonhosted.org, astral.sh]   # grading only
+    # or: grading_network: bridge                                             # grading reaches any host
+```
+
+| Field | Grading reaches |
+|---|---|
+| neither (default) | the agent's allowlist |
+| `grading_egress_allowlist` | the agent's allowlist plus these hosts (same entry rules as `egress_allowlist`, appended across layers) |
+| `grading_network: bridge` | any host, through the sidecar |
+
+Both fields need `network: llm_only`. `grading_network: bridge` with `network: bridge` changes
+nothing; any other combination is refused when the task loads, because the container joins one
+network for its whole life and grading can only widen it. A task with an enabled `simulation` is
+refused too, because its criteria run between dialog turns.
+
+The container runs the agent under the agent's allowlist. Before the first criterion runs, the
+run inside the container asks the host to switch, the host tells the sidecar through a control
+port that only the sidecar itself can reach, and the criteria run after the sidecar confirms. The
+switch is one-way and adds a `PHASE grading` line to `egress.log`. If it fails, the row is an
+`ERROR` that names the failure. Before the agent starts, the host also opens one TCP connection
+from the sidecar to each `grading_egress_allowlist` host, so a host this machine cannot reach
+fails the row before any agent run is paid for.
+
+`coder-eval execute` keeps the agent's allowlist. A detached grade (`coder-eval evaluate`,
+`run --resume`) runs no agent, so its container gets the grading network from the start; with
+`grading_network: bridge` it joins the plain `bridge` network.
+
 ### Tool compatibility
 
 The task image needs nothing new: its tools must honour the proxy variables.
@@ -203,6 +240,11 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
 - **Exact hosts only.** No wildcards and no CIDR ranges.
 - **podman and rootless Docker** are not tested.
 - **Harbor export** refuses an `llm_only` task.
+- **The grading switch trusts the container.** The request to switch comes from inside the
+  container, so an agent that knows the request file can ask for it before its turn ends. A
+  process the agent leaves running in the background also keeps running during grading, with the
+  grading network. Use the grading fields for test dependencies, not to hide hosts from an agent
+  that is trying to defeat the boundary.
 - **The sidecar is also on the default `bridge`.** A `bridge` container of another task can reach
   it. It gets no extra reach, because the allowlist is a subset of what `bridge` already reaches,
   and the sidecar serves at most 256 connections at once (one more gets `503`).
@@ -226,6 +268,14 @@ coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml \
 Run the probes alone in any `llm_only` container with
 `python3 egress_probe.py all`.
 
+`docker_egress_grading.yaml` in the same directory checks the grading network without an agent or
+a model API: `pre_run` records that `pypi.org` is blocked, and the criteria then reach it during
+grading while `example.com` stays blocked.
+
+```bash
+coder-eval run tasks/docker_egress_probe/docker_egress_grading.yaml          # expect 1.000
+```
+
 ### Troubleshooting egress
 
 The sidecar log is the task's `egress.log`, beside `docker.log` (a grading container's log is
@@ -233,8 +283,9 @@ The sidecar log is the task's `egress.log`, beside `docker.log` (a grading conta
 Each connection is one line:
 `ALLOW host:port METHOD`, `DENY host:port METHOD`, `FAIL host:port <error>` (an allowed host the
 sidecar could not reach), or `BAD …` (a request the proxy refused; the line names only its method
-and length, because the target can carry credentials). To see which hosts a
-task needed:
+and length, because the target can carry credentials). A `PHASE grading allow=…` line marks the
+switch to the grading allowlist: the lines before it are the agent's, the lines after it are
+grading's (and any process the agent left running). To see which hosts a task needed:
 
 ```bash
 grep -rhE "^(ALLOW|DENY|FAIL)" --include=egress.log runs/latest | sort | uniq -c
