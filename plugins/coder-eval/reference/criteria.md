@@ -105,11 +105,11 @@ Optional:
 
 | Field | What it is |
 | --- | --- |
-| `tool_name` | Tool name filter (e.g., 'Bash'). None = any tool. |
+| `tool_name` | Tool name filter (e.g., 'Bash'). None = any tool. With a command_pattern, None searches only the `command` param of a call (the Bash command, or a shell tool under another name). Name a tool here to match its other parameters. |
 | `command_pattern` | Regex to match command parameters. None = any command. For a Bash command the pattern is matched against the raw command text OR its shell-normalized form — `shlex`-resolved quoting with a `bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not hand-encode shell quoting/escaping (`'single'`, `"double"`, bare). |
 | `min_count` | Minimum matching commands required. ``0`` allows the criterion to pass when no commands match (combine with ``max_count: 0`` to express ``must NOT match``). |
 | `max_count` | Optional maximum matching commands allowed (inclusive). ``None`` means no upper bound — the current default. When set, the criterion passes iff ``min_count <= match_count <= max_count``. |
-| `require_success` | If True, only count successful commands. |
+| `require_success` | If True, only count successful commands. This is the reported success of the whole tool call, so `cmd \| tail` and `cmd; true` can pass when cmd fails. |
 | `exclude_pattern` | Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so it also excludes quote-obfuscated variants of the same call. |
 
 ### `commands_efficiency`

@@ -200,6 +200,14 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
                 cmd_text = raw_command
                 is_shell = True
+            elif criterion.tool_name is None and pattern is not None:
+                # No tool named: search only the command a call carries. Other params (a
+                # Write body, a Grep pattern, a TodoWrite item) can name a command that
+                # never ran. Name the tool in tool_name to match its params.
+                if not raw_command:
+                    continue
+                cmd_text = raw_command if isinstance(raw_command, str) else json.dumps(raw_command)
+                is_shell = False
             else:
                 cmd_text = json.dumps(cmd.parameters)
                 is_shell = False

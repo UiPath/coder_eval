@@ -884,7 +884,14 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     requires_agent: ClassVar[bool] = True
 
     type: Literal["command_executed"] = "command_executed"
-    tool_name: str | None = Field(default=None, description="Tool name filter (e.g., 'Bash'). None = any tool.")
+    tool_name: str | None = Field(
+        default=None,
+        description=(
+            "Tool name filter (e.g., 'Bash'). None = any tool. With a command_pattern, None searches "
+            "only the `command` param of a call (the Bash command, or a shell tool under another "
+            "name). Name a tool here to match its other parameters."
+        ),
+    )
     command_pattern: str | None = Field(
         default=None,
         description=(
@@ -913,7 +920,13 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
             "passes iff ``min_count <= match_count <= max_count``."
         ),
     )
-    require_success: bool = Field(default=False, description="If True, only count successful commands.")
+    require_success: bool = Field(
+        default=False,
+        description=(
+            "If True, only count successful commands. This is the reported success of the whole tool "
+            "call, so `cmd | tail` and `cmd; true` can pass when cmd fails."
+        ),
+    )
     exclude_pattern: str | None = Field(
         default=None,
         description=(

@@ -2,9 +2,12 @@
 
 from datetime import datetime
 
+import pytest
+
 from coder_eval.criteria.command_executed import (
     _MAX_PATTERN_SEARCH_LEN,
     _WINDOW_OVERLAP,
+    CommandExecutedChecker,
     _match_haystacks,
     _normalize_shell,
     _search_windows,
@@ -1182,8 +1185,83 @@ class TestSearchWindows:
         turn_records = [_make_turn([write])]
         criterion = CommandExecutedCriterion(
             description="must NOT use retired `uip or users list`",
+            # Named: with tool_name null, a pattern never searches a Write at all.
+            tool_name="Write",
             command_pattern=r"uip\s+or\s+users\s+list",
             min_count=0,
             max_count=0,
         )
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
+
+
+# Tool calls that name `uip solution deploy` without running it.
+_MENTIONS_WITHOUT_RUNNING = [
+    pytest.param("Write", {"file_path": "NOTES.md", "content": "Next: uip solution deploy"}, id="write"),
+    pytest.param("Grep", {"pattern": "uip solution deploy", "path": "."}, id="grep"),
+    pytest.param("TodoWrite", {"todos": [{"content": "Run uip solution deploy", "status": "pending"}]}, id="todo"),
+    # A call with a command: only the command is searched, not its other params.
+    pytest.param(
+        "ExecutePowershellCommand",
+        {"command": "echo ok", "description": "Run uip solution deploy later"},
+        id="other-param",
+    ),
+    pytest.param("Bash", {"description": "Run uip solution deploy"}, id="bash-without-command"),
+]
+
+
+class TestNullToolNameSearchesOnlyTheCommand:
+    """With ``tool_name`` null, a ``command_pattern`` searches only a call's ``command``."""
+
+    @staticmethod
+    def _deployed(**overrides) -> CommandExecutedCriterion:
+        fields = {
+            "description": "Agent deployed the solution",
+            "command_pattern": r"uip\s+solution\s+deploy",
+            "min_count": 1,
+            "require_success": True,
+        }
+        return CommandExecutedCriterion(**(fields | overrides))
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_count(self, tool, params):
+        turn_records = [_make_turn([_make_command(tool_name=tool, parameters=params)])]
+        result = SuccessChecker(MockSandbox()).check(self._deployed(), turn_records=turn_records)
+        assert result.score == 0.0
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_live_pass(self, tool, params):
+        # The early-stop trigger shares the matcher: no pass, so no on_pass stop.
+        turn_records = [_make_turn([_make_command(tool_name=tool, parameters=params)])]
+        assert CommandExecutedChecker().live_verdict(self._deployed(), turn_records) == "undecided"
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_trip_a_negative_guard(self, tool, params):
+        guard = self._deployed(description="must NOT deploy", min_count=0, max_count=0, require_success=False)
+        turn_records = [_make_turn([_make_command(tool_name=tool, parameters=params)])]
+        assert SuccessChecker(MockSandbox()).check(guard, turn_records=turn_records).score == 1.0
+
+    @pytest.mark.parametrize(
+        ("tool", "command"),
+        [
+            pytest.param("Bash", "uip solution deploy --name billing", id="bash"),
+            pytest.param("Bash", ["bash", "-lc", "uip solution deploy --name billing"], id="argv-list"),
+            # A shell tool under another name: a Delegate host tool without an alias,
+            # or a hydrated ATIF call. Its `command` param still marks it as a shell call.
+            pytest.param("ExecutePowershellCommand", "uip solution deploy --name billing", id="unaliased"),
+            pytest.param("shell", "uip solution deploy --name billing", id="atif-shell"),
+        ],
+    )
+    def test_shell_call_still_counts(self, tool, command):
+        turn_records = [_make_turn([_make_command(tool_name=tool, parameters={"command": command})])]
+        assert SuccessChecker(MockSandbox()).check(self._deployed(), turn_records=turn_records).score == 1.0
+
+    def test_named_tool_params_are_still_searched(self):
+        params = {"file_path": "NOTES.md", "content": "Next: uip solution deploy"}
+        turn_records = [_make_turn([_make_command(tool_name="Write", parameters=params)])]
+        criterion = self._deployed(tool_name="Write")
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
+
+    def test_without_a_pattern_every_tool_still_counts(self):
+        turn_records = [_make_turn([_make_command(tool_name=t, tool_id=t) for t in ("Read", "Write", "Bash")])]
+        criterion = CommandExecutedCriterion(description="any 3 tool calls", min_count=3)
         assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
