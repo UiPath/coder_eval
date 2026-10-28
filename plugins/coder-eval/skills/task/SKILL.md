@@ -115,7 +115,8 @@ Rules that matter:
   produced. Set `require_success: true` whenever the command's success is what you are
   grading; the permissive default (`false`) counts a crashed invocation as evidence the
   work was done, and survives only for a genuine exception — a probe whose failure is an
-  acceptable outcome.
+  acceptable outcome. It reads the reported success of the whole tool call (`cmd | tail` can
+  pass when `cmd` fails), so also check the effect of the command.
 - When the prompt genuinely must name a literal — a flag like `--json`, an output
   filename — a criterion matching that literal is a **smoke check**, not evidence: it
   only proves the agent typed back what it was told. Keep it if you like, at a low

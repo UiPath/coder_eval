@@ -100,9 +100,30 @@ but the whole command is searched: the first 2000 characters, then the rest in w
 start and end on logical-line boundaries. Agents write long heredoc scripts that end in the
 command a task checks for (`cat > x <<EOF ... EOF` then `uip agent validate`), and a single
 leading window scored those as never run. Normalization runs per window, so `shlex` never
-sees more than the bound and needs no separate guard. Only a Bash command is windowed:
-another tool's params are JSON, and a later window of a Write/Edit body is file content,
-not a command the agent ran, so those keep the single leading window.
+sees more than the bound and needs no separate guard. Only a shell command is windowed:
+JSON params keep the single leading window, because a later window of a Write/Edit body
+is file content, not a command the agent ran.
+
+### Which text a pattern searches
+
+`_search_text` picks the text from the shape of the call, not from the criterion. A shell
+call (`Bash`, or any call with a `command` param) is searched on its command only; another
+call is searched on its JSON params only when `tool_name` names that tool; anything else
+gives no text, which a `command_pattern` never matches and an `exclude_pattern` never
+excludes.
+
+Why not "any tool's params" for a null `tool_name`: a TodoWrite item, a Grep pattern or a
+Write body that names a command counted as running it, also under `require_success` and
+for the early-stop live pass (#241). Why the shape and not `tool_name`: when `tool_name`
+also chose the text, narrowing `null` to `shell` turned a `^npm test` match into JSON and
+dropped it, and an exclude-only criterion searched other text than the same criterion with
+a `command_pattern`. Why every shell call gets normalization and windows: shell tools
+reach telemetry under other names (a Delegate host tool without an alias, a hydrated ATIF
+`shell` call), and the same command must score the same under each name.
+
+The cost: with a null `tool_name`, a `max_count: 0` guard (and the legacy
+`command_not_executed` without a `tool_name`) no longer sees a command written into a Write
+or TodoWrite body. A guard on those bodies names the tool, one criterion per tool.
 
 ## Recording a CLI invocation
 

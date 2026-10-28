@@ -228,7 +228,7 @@ call's `command` parameter) score identically whether the run used Claude, Codex
 or OpenCode.
 
 Tool **argument keys** are normalized the same way, because `command_executed`
-serializes `parameters` to JSON for every tool but `Bash` — so a criterion like
+serializes the `parameters` of a named tool with no `command` to JSON — so a criterion like
 `{type: command_executed, tool_name: Read, command_pattern: 'file_path.*app\.py'}`
 would otherwise match on Claude and score 0 on OpenCode for identical behaviour:
 
