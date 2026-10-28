@@ -887,16 +887,20 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     tool_name: str | None = Field(
         default=None,
         description=(
-            "Tool name filter (e.g., 'Bash'). None = any tool. With a command_pattern, None searches "
-            "only the `command` param of a call (the Bash command, or a shell tool under another "
-            "name). Name a tool here to match its other parameters."
+            "Tool name filter (e.g., 'Bash'). None = any tool. A pattern searches only the `command` "
+            "param of a shell call: a Bash call, or any call with a `command` param, such as a shell "
+            "tool under another name. A named tool without a `command` param is searched on its JSON "
+            "params. With None, a call without a `command` param is not searched: a mention in a "
+            "Write, Edit or TodoWrite body does not count, and a `max_count: 0` guard (also the "
+            "legacy `command_not_executed` without a tool_name) does not see it. Name the tool to "
+            "search its params."
         ),
     )
     command_pattern: str | None = Field(
         default=None,
         description=(
-            "Regex to match command parameters. None = any command. For a Bash "
-            "command the pattern is matched against the raw command text OR its "
+            "Regex to match command parameters. None = any command. For a shell "
+            "command (see tool_name) the pattern is matched against the raw command text OR its "
             "shell-normalized form — `shlex`-resolved quoting with a "
             "`bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not "
             "hand-encode shell quoting/escaping (`'single'`, `\"double\"`, bare)."
@@ -931,7 +935,7 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
         default=None,
         description=(
             "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. "
-            "Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so "
+            "Like command_pattern, this is matched against the raw shell command OR its shell-normalized form, so "
             "it also excludes quote-obfuscated variants of the same call."
         ),
     )

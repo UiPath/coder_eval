@@ -1001,20 +1001,40 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `tool_name` | `null` | Tool-name filter (e.g. `Bash`); `null` counts any tool. With a `command_pattern`, `null` searches only the `command` parameter of a call (the Bash command, or a shell tool under another name). Name a tool here to match its other parameters. |
-| `command_pattern` | `null` | Regex to match the command; `null` matches any command. Matched with shell normalization (see below). |
+| `tool_name` | `null` | Tool-name filter (e.g. `Bash`); `null` counts any tool. It also decides whether a call without a `command` parameter is searched (see **Which text is searched**). |
+| `command_pattern` | `null` | Regex to match the command; `null` matches any command. For a shell call, matched with shell normalization (see below). |
 | `min_count` | 1 | Minimum matching commands required. `0` permits zero matches — combine with `max_count: 0` to assert a command must **NOT** run. |
 | `max_count` | `null` | Optional inclusive upper bound. When set, the criterion passes iff `min_count <= matches <= max_count`. |
 | `require_success` | `false` | Only count commands that completed successfully. This is the reported success of the whole tool call, so `cmd \| tail` and `cmd; true` can pass when `cmd` fails. |
-| `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. Also matched with shell normalization (see below). |
+| `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. It searches the same text as `command_pattern`, whether or not a `command_pattern` is set. |
+
+**Which text is searched.** The shape of a call decides the text that `command_pattern` and `exclude_pattern` search:
+
+- A **shell call** is a `Bash` call, or any call with a `command` parameter, such as a shell tool under another name (`shell`, `ExecutePowershellCommand`). Only its `command` is searched, with or without `tool_name`. A string command gets the shell normalization and long-command windows below; an argv list is searched as its JSON. `^` therefore anchors at the start of a string command in both cases. It can also match at the start of the shell-normalized form (after a `bash -lc` wrapper is stripped), and in a long command at the start of a later window (see **Long commands**). A shell call with a missing or empty `command` is not searched.
+- **Another call** (Write, Edit, Grep, TodoWrite, Skill) is searched on the first 2,000 characters of its JSON parameters, but only when `tool_name` names that tool. There, `^` anchors at the opening `{` of the JSON. With `tool_name: null` the call is not searched.
+
+A call that is not searched never matches a `command_pattern` and is never excluded by an `exclude_pattern`. When a criterion with a `command_pattern` finds fewer matches than `min_count` and some calls were not searched, its details give their number. A criterion with neither pattern counts every call that passes the `tool_name` and `require_success` filters.
+
+So with `tool_name: null`, a `max_count: 0` guard or an `exclude_pattern` does not see a command written into a Write, Edit or TodoWrite body. The legacy `command_not_executed` type is this criterion with `min_count: 0` and `max_count: 0`, so without a `tool_name` it behaves the same. To guard another tool's parameters, add a criterion that names that tool.
+
+**Re-baseline.** Earlier releases searched the JSON parameters of every other call (any call but a Bash call with a command) when `tool_name` was `null`, and of a named tool other than `Bash` even when the call had a `command`. For the same agent output:
+
+- a positive criterion with `tool_name: null` no longer counts a command that a Write, Grep or TodoWrite call only names, and a Bash call without a `command` no longer matches with `tool_name: "Bash"` either;
+- a `max_count: 0` guard or an `exclude_pattern` with `tool_name: null` can now pass where it failed: a forbidden command in a Write body (for example a script the agent writes) no longer trips it, until the agent runs the command;
+- a criterion that names a shell tool other than `Bash` now searches its `command` only, so a pattern written against its other parameters stops matching;
+- a shell tool other than `Bash` now gets the shell normalization and long-command windows, so an `exclude_pattern` or a `max_count: 0` guard can newly catch a quoted command, or one late in a long script.
+
+`evaluate <run_dir>` and `run --resume` re-grade with the current rules, so a re-graded older run can score differently from its recorded result. The `framework_version` of a run shows which release graded it.
 
 **A match is text, not proof.** The pattern is searched in the command text, so `echo 'cmd'`, `# cmd` and `true || cmd` all match a `cmd` pattern, although `cmd` does not run. When the effect of the command is what you grade, also check that effect (a file, a state, an output).
 
-**Shell normalization.** For a Bash command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
+**Shell normalization.** For a shell command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
 
-**Long commands.** A Bash command is searched in full: the first 2,000 characters, then the rest in windows of at most 2,000 characters that start and end on line boundaries. So a command that follows a long heredoc in the same Bash call still counts. A tool named in `tool_name` other than Bash matches only on the first 2,000 characters of its JSON parameters, so a long Write or Edit body is not read as a command. With `tool_name: null`, only the `command` parameter of a call is searched. This is not purely additive either: an `exclude_pattern` or a `max_count: 0` gate can now catch a call late in a long script that it did not see before, so suites should re-baseline. A match that crosses a window boundary is not guaranteed, and `^` and `$` can also match at a window edge.
+**Long commands.** A shell command is searched in full: the first 2,000 characters, then the rest in windows of at most 2,000 characters that start and end on line boundaries. So a command that follows a long heredoc in the same Bash call still counts. JSON parameters are searched only in their first 2,000 characters, so a long Write or Edit body is not read as a command. The windows are not purely additive either: an `exclude_pattern` or a `max_count: 0` gate can now catch a call late in a long script that it did not see before, so suites should re-baseline. A match that crosses a window boundary is not guaranteed, and `^` and `$` can also match at a window edge.
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
+
+With a pattern, `tool_name: null` searches the command of a shell call, not the parameters of every tool (see **Which text is searched**).
 
 ### `cli_called`
 
