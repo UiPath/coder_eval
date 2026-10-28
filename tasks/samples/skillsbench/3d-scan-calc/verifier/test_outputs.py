@@ -1,8 +1,17 @@
+# Modified from benchflow-ai/skillsbench@95b3e60: grade against fixed EXPECTED_* (issue #233).
 import collections
 import json
 import math
 import os
 import struct
+
+# Expected values for the shipped environment/scan_data.stl, computed once with
+# _get_ground_truth() below. They are fixed here because the agent can write to its
+# working copy of the STL, so grading must not read it.
+# tests/test_skillsbench_3d_scan_calc_verifier.py checks they match the shipped file.
+EXPECTED_MASS = 34648.04123490179  # coordinates read as cm
+EXPECTED_VOL = 6242.890312594918
+EXPECTED_ID = 42
 
 
 class TestOutputs:
@@ -10,8 +19,8 @@ class TestOutputs:
         """Check output file was created."""
         assert os.path.exists("/root/mass_report.json"), "Output file not found"
 
-    def _get_ground_truth(self):
-        filepath = "/root/scan_data.stl"
+    def _get_ground_truth(self, filepath):
+        """Derive (mass, vol, id) from an STL. Not used for grading; see EXPECTED_*."""
         triangles = []
 
         # Binary Parse with Attribute
@@ -85,7 +94,8 @@ class TestOutputs:
 
     def test_values_correct(self):
         """Validate submission against ground truth."""
-        expected_mass, expected_vol, expected_id = self._get_ground_truth()
+        # Local aliases so the upstream lines below stay unchanged (keeps the vendored diff small).
+        expected_mass, expected_vol, expected_id = EXPECTED_MASS, EXPECTED_VOL, EXPECTED_ID
 
         with open("/root/mass_report.json") as f:
             submission = json.load(f)
