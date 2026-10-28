@@ -145,7 +145,7 @@ LABEL org.coder-eval.version="<ver>"
 ```
 
 `make coder-eval-runtime` builds the kit (`docker/Dockerfile.runtime`): a
-standalone CPython + Node + the `coder-eval` CLI + Claude Code, all under
+standalone CPython + Node + the `coder-eval` CLI + Claude Code + Pi, all under
 `/opt/coder-eval`, plus the entrypoint at the **same** `/usr/local/bin/...` path
 the host pins. The kit is **glibc-only** — it runs on debian/ubuntu/fedora/rhel/…
 but not musl/Alpine.
@@ -158,6 +158,9 @@ individual targets when you only need one.
 > The kit installs the **no-credential** set only (core + codex), like `make docker-image` —
 > it never installs the `[uipath]` extra, so there is no `make docker-images-full`. An
 > inject-mode task that needs the LLMGW/`uipath` judge isn't supported by the kit as built.
+> Agents under inject mode: `claude-code`, `codex` and `pi` run from the kit; `antigravity`
+> and the `litellm` judge route are in the framework image only, so a task that needs them
+> must rebase onto `coder-eval-agent`.
 
 ```dockerfile
 # environment/Dockerfile
