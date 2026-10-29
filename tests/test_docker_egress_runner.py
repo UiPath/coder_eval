@@ -730,3 +730,30 @@ async def test_a_refused_grading_host_is_recorded_and_the_status_is_kept(
     assert not (tmp_path / "victim").exists()
     recorded = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
     assert (recorded.final_status, recorded.environment_info["egress_denied_in_grading"]) == (status, denied)
+
+
+async def test_a_regrade_replaces_the_recorded_hosts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clean_log = "READY 0.0.0.0:3128 allow=pypi.org:443\nALLOW pypi.org:443 CONNECT\n"
+    monkeypatch.setattr(
+        egress_mod, "_docker", _FakeDocker({"logs c-egress": [subprocess.CompletedProcess([], 0, clean_log, "")]})
+    )
+    task_json = tmp_path / TASK_JSON_FILENAME
+    result = _result(FinalStatus.SUCCESS)
+    result.environment_info["egress_denied_in_grading"] = "pypi.org:443"
+    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan(("pypi.org:443",)))
+    await _graded_runner(tmp_path, detached=True)._record_grading_denials(result, handle, task_json)
+    assert result.environment_info == {}
+    assert EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")).environment_info == {}
+
+
+async def test_an_unreadable_sidecar_log_is_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(egress_mod, "_docker", _FakeDocker({"logs c-egress": [_failed(stderr="No such container")]}))
+    result = _result(FinalStatus.FAILURE)
+    result.environment_info["egress_denied_in_grading"] = "pypi.org:443"
+    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan((), grading_phase=True))
+    await _graded_runner(tmp_path)._record_grading_denials(result, handle, tmp_path / TASK_JSON_FILENAME)
+    assert "could not read the log of egress sidecar c-egress" in caplog.text
+    assert result.environment_info == {"egress_denied_in_grading": "pypi.org:443"}
+    assert not (tmp_path / TASK_JSON_FILENAME).exists()

@@ -177,8 +177,9 @@ no host, and a failed switch is only a warning). After the run, the host records
 sidecar refused during grading in `environment_info.egress_denied_in_grading`, for example
 `"deb.debian.org:80, pypi.org:443"`, and logs a warning. The row's status does not change, because
 a criterion can be refused on purpose (one that checks that a host is blocked). If a criterion
-needed a host, add it to `grading_egress_allowlist` and grade the run again with
-`coder-eval evaluate <run_dir>`. The judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
+needed a host, add it to `grading_egress_allowlist` in the task file and grade the run again with
+`coder-eval evaluate <task.yaml> <task_run_dir>`; the new grade replaces the recorded hosts. The
+judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
 (`http-intake.logs.us5.datadoghq.com:443`, `api.anthropic.com:443`) are not recorded.
 
 `coder-eval execute` keeps the agent's allowlist. A detached grade (`coder-eval evaluate`,

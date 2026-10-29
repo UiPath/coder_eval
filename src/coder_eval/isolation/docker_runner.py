@@ -133,6 +133,7 @@ HEARTBEAT_FILENAME = ".coder_eval_host_heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
 _GRADING_REQUEST_POLL_SECONDS = 0.25
+EGRESS_DENIED_IN_GRADING_KEY = "egress_denied_in_grading"
 
 # asyncio's StreamReader caps a line at 64 KiB by default, which a single stream
 # event can exceed. The same KIND of guard as Orchestrator._POST_RUN_STREAM_LIMIT,
@@ -843,17 +844,27 @@ class DockerRunner:
         Rationale: .claude/notes/isolation.md § Why a refused grading host does not change the status
         """
         proxy_log = await read_proxy_log(egress)
-        denied = [] if proxy_log is None else grading_denials(proxy_log, whole_log=self.grade_workspace is not None)
-        if not denied:
+        if proxy_log is None:
+            logger.warning(
+                "Task '%s': could not read the log of egress sidecar %s, so refused grading hosts are not recorded.",
+                self.rt.task.task_id,
+                egress.sidecar,
+            )
             return
-        hosts = ", ".join(denied)
-        logger.warning(
-            "Task '%s': network: llm_only refused grading access to %s. If a criterion needs one, add it to "
-            + "sandbox.docker.grading_egress_allowlist and grade the run again (`coder-eval evaluate <run_dir>`).",
-            self.rt.task.task_id,
-            hosts,
-        )
-        result.environment_info["egress_denied_in_grading"] = hosts
+        denied = grading_denials(proxy_log, whole_log=self.grade_workspace is not None)
+        previous = result.environment_info.pop(EGRESS_DENIED_IN_GRADING_KEY, None)
+        if not denied and previous is None:
+            return
+        if denied:
+            hosts = ", ".join(denied)
+            logger.warning(
+                "Task '%s': network: llm_only refused grading access to %s. If a criterion needs one, add it to "
+                + "sandbox.docker.grading_egress_allowlist in the task file and grade the run again "
+                + "(`coder-eval evaluate <task.yaml> <task_run_dir>`).",
+                self.rt.task.task_id,
+                hosts,
+            )
+            result.environment_info[EGRESS_DENIED_IN_GRADING_KEY] = hosts
         try:
             await asyncio.to_thread(
                 write_text_atomic, task_json, result.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE)
