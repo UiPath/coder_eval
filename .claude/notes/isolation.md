@@ -516,9 +516,10 @@ the `~/.claude` copy the target can be an arbitrary path outside the staging tre
 `writable=False` is not cosmetic. The container only ever *reads* and `chmod`s the
 reference copy, so withholding the write bit keeps `_verify_reference_integrity` from being
 the sole guard against tampering during the gaps between windows. The task-dir copy is
-read-only for the same reason: criteria read fixtures there, nothing legitimately writes
-them, and withholding `o+w` keeps an agent from rewriting the expectations it is graded
-against. The `~/.claude` copy IS writable — the CLI rewrites settings and state in place,
+read-only too: criteria read fixtures there and nothing legitimately writes them. That
+does not stop an agent from rewriting the expectations it is graded against: root keeps
+`CAP_FOWNER` and can chmod the copy back, and `_verify_reference_integrity` does not cover
+it. The `~/.claude` copy IS writable — the CLI rewrites settings and state in place,
 `copytree` preserves host modes, and `~/.claude` is routinely 0700 with 0600 files, which
 without DAC_OVERRIDE is unreadable to the container, so the agent cannot authenticate.
 

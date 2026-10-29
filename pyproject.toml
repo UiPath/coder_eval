@@ -105,7 +105,7 @@ uipath = [
 # the litellm-route judge path fails at dispatch with a clear hint pointing
 # back here.
 litellm = [
-    "litellm>=1.95.0,<2.0.0",
+    "litellm>=1.103.1,<2.0.0",
 ]
 # Optional extra that enables Codex agent support:
 #   - CodexAgent implementation using official openai-codex SDK
@@ -224,14 +224,18 @@ override-dependencies = ["openai-codex-cli-bin==0.156.1"]
 constraint-dependencies = [
     # Fix known CVEs in transitive dependencies
     "cryptography>=48.0.1",
+    "filelock>=4.2.1",
     "langgraph>=1.0.10",
     "langsmith>=0.6.3",
+    "msgpack>=1.2.3",
+    "oauthlib>=4.0.0",
     "orjson>=3.11.6",
     "pyjwt>=2.14.0",
     "python-multipart>=0.0.31",
     "requests>=2.33.0",
     "starlette>=1.3.1",
     "urllib3>=2.6.3",
+    "virtualenv>=21.14.13",
 ]
 
 [tool.ruff]
