@@ -173,17 +173,13 @@ from the sidecar to each `grading_egress_allowlist` host, so a host this machine
 fails the row before any agent run is paid for.
 
 Every graded `llm_only` run marks the phase, also with neither field set (then the switch adds
-no host, and a failed switch is only a warning). After the run, the host checks which hosts the
-sidecar refused during grading:
-
-| Row status | Grading was refused a host |
-|---|---|
-| `FAILURE` | becomes `ERROR`, with `error_message` naming the hosts to add to `grading_egress_allowlist` |
-| any other | kept |
-
-Either way the hosts are in `environment_info.egress_denied_in_grading`, for example
-`["deb.debian.org:80", "pypi.org:443"]`. The judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
-(`http-intake.logs.us5.datadoghq.com:443`, `api.anthropic.com:443`) do not count.
+no host, and a failed switch is only a warning). After the run, the host records the hosts the
+sidecar refused during grading in `environment_info.egress_denied_in_grading`, for example
+`"deb.debian.org:80, pypi.org:443"`, and logs a warning. The row's status does not change, because
+a criterion can be refused on purpose (one that checks that a host is blocked). If a criterion
+needed a host, add it to `grading_egress_allowlist` and grade the run again with
+`coder-eval evaluate <run_dir>`. The judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
+(`http-intake.logs.us5.datadoghq.com:443`, `api.anthropic.com:443`) are not recorded.
 
 `coder-eval execute` keeps the agent's allowlist. A detached grade (`coder-eval evaluate`,
 `run --resume`) runs no agent, so its container gets the grading network from the start; with
@@ -260,8 +256,8 @@ Some clients call hosts they do not need. These `DENY` lines are harmless:
   container, so an agent that knows the request file can ask for it before its turn ends. A
   process the agent leaves running in the background also keeps running during grading, with the
   grading network. Use the grading fields for test dependencies, not to hide hosts from an agent
-  that is trying to defeat the boundary. A host such a process is refused during grading also
-  makes a failed row `ERROR`.
+  that is trying to defeat the boundary. A host such a process is refused during grading is also
+  recorded in `egress_denied_in_grading`.
 - **The sidecar is also on the default `bridge`.** A `bridge` container of another task can reach
   it. It gets no extra reach, because the allowlist is a subset of what `bridge` already reaches,
   and the sidecar serves at most 256 connections at once (one more gets `503`).

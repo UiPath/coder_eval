@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, TextIO
 import yaml
 
 from coder_eval.config import settings
+from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
 from coder_eval.isolation.egress import (
     DOCKER_HOST_ALIAS,
     EGRESS_PROXY_MODULE,
@@ -198,7 +199,25 @@ async def _serve_grading_request(output_dir: Path, egress: EgressHandle) -> None
         logger.warning("%s", exc)
         reply = f"error: {exc}"
     # Atomic: the run dir is writable from the container, so a planted symlink is replaced, never followed.
-    await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_ACK_FILENAME, reply)
+    try:
+        await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_ACK_FILENAME, reply)
+    except OSError as exc:
+        logger.warning("Could not answer the egress grading request in %s: %s", output_dir, exc)
+
+
+async def _stop_grading_watch(watch: asyncio.Task[None], output_dir: Path) -> None:
+    """Cancel the grading watcher and remove the handshake files; a failure here is only a warning."""
+    watch.cancel()
+    try:
+        await watch
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.warning("The egress grading watcher failed: %s", exc)
+    try:
+        await asyncio.to_thread(_remove_grading_handshake, output_dir)
+    except OSError as exc:
+        logger.warning("Could not remove the egress grading handshake files in %s: %s", output_dir, exc)
 
 
 def _prepare_egress_dir(egress_dir: Path) -> None:
@@ -734,6 +753,13 @@ class DockerRunner:
                     input_dir, output_dir, container_name=container_name, image=image, egress=egress
                 )
                 logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
+                if egress is not None:
+                    try:
+                        await asyncio.to_thread(_remove_grading_handshake, output_dir)
+                    except OSError as exc:
+                        raise EgressSetupError(
+                            f"network: llm_only could not clear a stale grading request: {exc}"
+                        ) from exc
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
                     stdout=asyncio.subprocess.PIPE,
@@ -752,15 +778,12 @@ class DockerRunner:
                 try:
                     returncode = await self._stream_container_output(proc, log_fh)
                 finally:
-                    if grading_watch is not None:
-                        grading_watch.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await grading_watch
-                        await asyncio.to_thread(_remove_grading_handshake, output_dir)
                     await asyncio.to_thread(log_fh.close)
                     # Cancelled mid-flight: kill the container AND the docker CLI subprocess, best-effort.
                     if proc.returncode is None:
                         await self._kill_container(proc, container_name)
+                    if grading_watch is not None:
+                        await _stop_grading_watch(grading_watch, output_dir)
 
                 result = await self._parse_result_or_raise(output_dir, returncode, log_path)
                 if egress is not None and self.grade:
@@ -815,26 +838,26 @@ class DockerRunner:
         return EgressPlan(targets, grading_targets, grading_any, grading_phase=True)
 
     async def _record_grading_denials(self, result: EvaluationResult, egress: EgressHandle, task_json: Path) -> None:
-        """Record the hosts grading was refused, and make a FAILURE graded without them an ERROR.
+        """Record the hosts grading was refused in ``environment_info``; the row's status is kept.
 
-        Rationale: .claude/notes/isolation.md § Why a refused grading host makes the row ERROR
+        Rationale: .claude/notes/isolation.md § Why a refused grading host does not change the status
         """
         proxy_log = await read_proxy_log(egress)
         denied = [] if proxy_log is None else grading_denials(proxy_log, whole_log=self.grade_workspace is not None)
         if not denied:
             return
         hosts = ", ".join(denied)
-        logger.warning("Task '%s': network: llm_only refused grading access to %s.", self.rt.task.task_id, hosts)
-        result.environment_info["egress_denied_in_grading"] = denied
-        if result.final_status is FinalStatus.FAILURE:
-            result.final_status = FinalStatus.ERROR
-            result.error_message = (
-                f"Grading was refused access to {hosts} under network: llm_only, so the grader may have failed, "
-                + "not the agent. Add each host to sandbox.docker.grading_egress_allowlist and grade the run again "
-                + "(`coder-eval evaluate <run_dir>`)."
-            )
+        logger.warning(
+            "Task '%s': network: llm_only refused grading access to %s. If a criterion needs one, add it to "
+            + "sandbox.docker.grading_egress_allowlist and grade the run again (`coder-eval evaluate <run_dir>`).",
+            self.rt.task.task_id,
+            hosts,
+        )
+        result.environment_info["egress_denied_in_grading"] = hosts
         try:
-            await asyncio.to_thread(write_text_atomic, task_json, result.model_dump_json(indent=2))
+            await asyncio.to_thread(
+                write_text_atomic, task_json, result.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE)
+            )
         except OSError as exc:
             logger.warning("Could not record the refused grading hosts in %s: %s", task_json, exc)
 

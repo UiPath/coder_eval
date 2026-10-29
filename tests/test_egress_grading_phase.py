@@ -46,6 +46,12 @@ async def test_request_raises_on_a_refusal_or_no_answer(tmp_path: Path) -> None:
         await request_grading_egress(tmp_path, timeout=0.2)
 
 
+async def test_a_stale_ack_does_not_answer_a_new_request(tmp_path: Path) -> None:
+    (tmp_path / EGRESS_GRADING_ACK_FILENAME).write_text("ok\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="did not switch"):
+        await request_grading_egress(tmp_path, timeout=0.2)
+
+
 async def test_a_switch_that_only_marks_the_phase_does_not_stop_grading(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

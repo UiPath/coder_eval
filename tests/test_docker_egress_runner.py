@@ -47,7 +47,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.regrade import _container_dispatch_commands
-from coder_eval.path_utils import TASK_JSON_FILENAME
+from coder_eval.path_utils import EGRESS_GRADING_ACK_FILENAME, EGRESS_GRADING_REQUEST_FILENAME, TASK_JSON_FILENAME
 
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="docker driver is POSIX-only")
@@ -403,6 +403,33 @@ async def test_llm_only_runs_the_container_inside_the_scope(
     assert launches[0][launches[0].index("--network") + 1] == "c-net"
 
 
+async def test_a_stale_grading_handshake_is_removed_before_the_container_starts(
+    hermetic_env: None, launches: list[tuple[object, ...]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dr.settings, "api_backend", ApiBackend.DIRECT)
+
+    @contextlib.asynccontextmanager
+    async def _fake_scope(**kwargs: Any):
+        yield EgressHandle(network="c-net", sidecar="c-egress", plan=kwargs["plan"])
+
+    monkeypatch.setattr(dr, "egress_scope", _fake_scope)
+    runner = _rt_runner(tmp_path, "llm_only")
+    runner.rt.run_dir.mkdir(parents=True)
+    stale = [runner.rt.run_dir / name for name in (EGRESS_GRADING_REQUEST_FILENAME, EGRESS_GRADING_ACK_FILENAME)]
+    for path in stale:
+        path.write_text("ok", encoding="utf-8")
+    present_at_launch: list[bool] = []
+
+    async def _fake_exec(*argv: object, **kwargs: object) -> None:
+        present_at_launch.append(any(path.exists() for path in stale))
+        raise FileNotFoundError("docker run is not under test")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    with pytest.raises(FileNotFoundError):
+        await runner.run()
+    assert present_at_launch == [False]
+
+
 @pytest.mark.parametrize(("cause", "match"), [("probe", "probe failed"), ("region", "AWS_REGION")])
 async def test_setup_failure_writes_a_synthetic_error_row(
     hermetic_env: None,
@@ -560,8 +587,6 @@ async def test_scope_dials_the_grading_hosts_directly(tmp_path: Path, monkeypatc
 async def test_the_host_answers_the_grading_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: subprocess.CompletedProcess[str], reply: str
 ) -> None:
-    from coder_eval.path_utils import EGRESS_GRADING_ACK_FILENAME, EGRESS_GRADING_REQUEST_FILENAME
-
     fake = _FakeDocker({"exec c-egress": [answer]})
     monkeypatch.setattr(egress_mod, "_docker", fake)
     monkeypatch.setattr(dr, "_GRADING_REQUEST_POLL_SECONDS", 0.01)
@@ -574,6 +599,30 @@ async def test_the_host_answers_the_grading_request(
     assert (tmp_path / EGRESS_GRADING_ACK_FILENAME).read_text(encoding="utf-8").startswith(reply)
     assert fake.calls[0][-3:] == ("grading", "--control", egress_mod.EGRESS_CONTROL)
     dr._remove_grading_handshake(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_an_unwritable_grading_ack_is_only_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = _FakeDocker({"exec c-egress": [subprocess.CompletedProcess(["docker"], 0, "OK grading\n", "")]})
+    monkeypatch.setattr(egress_mod, "_docker", fake)
+    (tmp_path / EGRESS_GRADING_REQUEST_FILENAME).write_text("grading", encoding="utf-8")
+    (tmp_path / EGRESS_GRADING_ACK_FILENAME).mkdir()
+    handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan((), (), True, grading_phase=True))
+    await asyncio.wait_for(dr._serve_grading_request(tmp_path, handle), 5)
+    assert "Could not answer the egress grading request" in caplog.text
+
+
+async def test_a_failed_grading_watch_is_only_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    async def _failed_watch() -> None:
+        raise OSError("disk full")
+
+    watch = asyncio.create_task(_failed_watch())
+    await asyncio.sleep(0)
+    (tmp_path / EGRESS_GRADING_REQUEST_FILENAME).write_text("grading", encoding="utf-8")
+    await dr._stop_grading_watch(watch, tmp_path)
+    assert "The egress grading watcher failed: disk full" in caplog.text
     assert list(tmp_path.iterdir()) == []
 
 
@@ -643,17 +692,25 @@ def _result(status: FinalStatus) -> EvaluationResult:
     )
 
 
+PROBE_TASK_LOG = """READY 0.0.0.0:3128 allow=bedrock-runtime.us-east-2.amazonaws.com:443 grading=unchanged
+PHASE grading allow=unchanged
+DENY example.com:443 CONNECT
+DENY bedrock-runtime.us-east-2.amazonaws.com:8443 CONNECT
+"""
+
+
 @pytest.mark.parametrize(
-    ("status", "log", "after"),
+    ("status", "log", "denied"),
     [
-        (FinalStatus.FAILURE, PROXY_LOG, FinalStatus.ERROR),
-        (FinalStatus.SUCCESS, PROXY_LOG, FinalStatus.SUCCESS),
+        (FinalStatus.FAILURE, PROXY_LOG, "deb.debian.org:80, pypi.org:443"),
+        (FinalStatus.SUCCESS, PROXY_LOG, "deb.debian.org:80, pypi.org:443"),
+        (FinalStatus.FAILURE, PROBE_TASK_LOG, "bedrock-runtime.us-east-2.amazonaws.com:8443, example.com:443"),
         (FinalStatus.FAILURE, "PHASE grading allow=unchanged\nDENY api.anthropic.com:443 CONNECT\n", None),
     ],
-    ids=["failure-becomes-error", "success-is-kept", "only-noise"],
+    ids=["failure-is-kept", "success-is-kept", "criteria-probe-blocked-hosts", "only-noise"],
 )
-async def test_a_refused_grading_host_is_recorded_and_a_failure_becomes_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: FinalStatus, log: str, after: FinalStatus | None
+async def test_a_refused_grading_host_is_recorded_and_the_status_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: FinalStatus, log: str, denied: str | None
 ) -> None:
     monkeypatch.setattr(
         egress_mod, "_docker", _FakeDocker({"logs c-egress": [subprocess.CompletedProcess([], 0, log, "")]})
@@ -663,13 +720,13 @@ async def test_a_refused_grading_host_is_recorded_and_a_failure_becomes_error(
     result = _result(status)
     handle = EgressHandle(network="c-net", sidecar="c-egress", plan=EgressPlan(("a.example:443",), grading_phase=True))
     await _graded_runner(tmp_path)._record_grading_denials(result, handle, task_json)
-    if after is None:
-        assert (result.final_status, result.environment_info) == (status, {})
+    assert (result.final_status, result.error_message) == (status, None)
+    if denied is None:
+        assert result.environment_info == {}
         assert task_json.is_symlink()
         return
-    assert result.final_status == after
-    assert result.environment_info["egress_denied_in_grading"] == ["deb.debian.org:80", "pypi.org:443"]
-    assert ("deb.debian.org:80, pypi.org:443" in (result.error_message or "")) is (after == FinalStatus.ERROR)
+    assert result.environment_info["egress_denied_in_grading"] == denied
     assert not task_json.is_symlink()
     assert not (tmp_path / "victim").exists()
-    assert EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")).final_status == after
+    recorded = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
+    assert (recorded.final_status, recorded.environment_info["egress_denied_in_grading"]) == (status, denied)

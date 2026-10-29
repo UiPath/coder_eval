@@ -1131,20 +1131,28 @@ egress setup first prunes egress-labelled stopped containers and unused networks
 concurrent setup between `network create` and `start`. A SIGTERM-to-cancel bridge was not added: the
 prune also covers SIGKILL, and a process-wide handler would change shutdown for every driver.
 
-### Why a refused grading host makes the row ERROR
+### Why a refused grading host does not change the status
 
 A grader that cannot reach a host it needs (an `apt-get` mirror, PyPI) fails its criterion, and
 the row reads as an ordinary FAILURE: an agent miss that is really the grader's. Only `egress.log`
 showed it. So after a graded run the host reads the sidecar log from Docker (not the run
 directory's copy, which the container can write), takes the `DENY` lines after `PHASE grading` (or
 all of them for a container that only grades), and records the hosts in
-`environment_info["egress_denied_in_grading"]`. A FAILURE becomes ERROR with the hosts named. A
-SUCCESS stays, because the grader passed without them.
+`environment_info["egress_denied_in_grading"]` as one comma-separated string, which the report
+environment tables render as-is.
+
+Turning such a FAILURE into an ERROR does not work. A DENY does not prove the grader needed the
+host: the probe task's criteria and any no-internet task's criteria are refused on purpose, so a
+real leak would read as a grader error with advice to allowlist `example.com`; an `agent_judge` can
+use a network tool on one run and not the next; and a process the agent left running is refused
+under the same rule. An ERROR written by the host is also an execution fact decided outside the
+orchestrator, so `evaluate` would not re-grade it and `task.html` would keep the FAILURE. Errors
+count as misses in the pass rate, so the rewrite would buy only an error count. The row keeps its
+status, and the host writes the hosts through the same `TASK_JSON_TRANSCRIPT_EXCLUDE` serializer
+the orchestrator uses.
 
 `GRADING_DENIAL_NOISE` drops the hosts the judge CLIs call and do not need (§ Expected DENY lines
-in docs/DOCKER_ISOLATION.md), or every `agent_judge` FAILURE on the direct or litellm route would
-become ERROR. A process the agent left running is refused under the same rule, so its row also
-becomes ERROR; that misnames an agent miss as an error, but errors count as misses in the pass rate.
+in docs/DOCKER_ISOLATION.md), so they are not recorded on every judged row.
 
 ### Why every docker call runs to completion
 

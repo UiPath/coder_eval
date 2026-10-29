@@ -69,6 +69,7 @@ async def request_grading_egress(
         RuntimeError: The host refused a widening switch, or did not answer within ``timeout`` seconds.
     """
     ack = output_dir / EGRESS_GRADING_ACK_FILENAME
+    await asyncio.to_thread(ack.unlink, missing_ok=True)
     await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_REQUEST_FILENAME, "grading")
     deadline = time.monotonic() + timeout
     while not (answered := await asyncio.to_thread(ack.is_file)) and time.monotonic() <= deadline:

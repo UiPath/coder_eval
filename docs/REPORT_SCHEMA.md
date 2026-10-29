@@ -181,6 +181,9 @@ those two the boundary is a reporting change, not a behavioral one.
 (`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
 on append-mode Claude Code runs and a plain string only in replace mode — it is
 no longer `str | null`, so consumers must not string-handle it unconditionally.
+`environment_info.egress_denied_in_grading` (a comma-separated `host:port` string) names the
+hosts the egress proxy refused during grading under `network: llm_only`; it is absent when none
+were refused, and it never changes `final_status`.
 
 **Telemetry/totals:** `total_token_usage` ([TokenUsage](#tokenusage)),
 `command_stats` (`CommandStatistics`), `total_assistant_turns`, `expected_commands` /
