@@ -90,11 +90,9 @@ def test_grading_allowlist_normalizes_like_the_agent_allowlist():
     ("docker", "widens"),
     [
         ({"network": "llm_only"}, False),
-        ({"network": "llm_only", "grading_network": "llm_only"}, False),
         ({"network": "llm_only", "grading_network": "bridge"}, True),
         ({"network": "llm_only", "grading_egress_allowlist": ["pypi.org"]}, True),
         ({"network": "bridge", "grading_network": "bridge"}, False),
-        ({"network": "bridge", "grading_egress_allowlist": ["pypi.org"]}, False),
     ],
 )
 def test_grading_widens_egress_only_from_llm_only(docker: dict[str, object], widens: bool):
@@ -104,11 +102,16 @@ def test_grading_widens_egress_only_from_llm_only(docker: dict[str, object], wid
 @pytest.mark.parametrize(
     "docker",
     [
-        {"network": "bridge", "grading_network": "llm_only"},
         {"network": "none", "grading_network": "bridge"},
-        {"network": "none", "grading_network": "llm_only"},
+        {"network": "bridge", "grading_egress_allowlist": ["pypi.org"]},
+        {"network": "none", "grading_egress_allowlist": ["pypi.org"]},
     ],
 )
-def test_grading_network_cannot_narrow_or_leave_none(docker: dict[str, object]):
+def test_grading_fields_need_llm_only(docker: dict[str, object]):
     with pytest.raises(ValidationError, match="needs network: llm_only"):
         DockerDriverConfig(**docker)  # type: ignore[arg-type]
+
+
+def test_grading_network_has_no_llm_only_value():
+    with pytest.raises(ValidationError, match="grading_network"):
+        DockerDriverConfig(network="llm_only", grading_network="llm_only")  # type: ignore[arg-type]

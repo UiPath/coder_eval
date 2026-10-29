@@ -267,14 +267,16 @@ class DockerDriverConfig(BaseModel):
             "Ignored for other network modes. Example: ['pypi.org', 'files.pythonhosted.org']."
         ),
     )
-    grading_network: Literal["bridge", "llm_only"] | None = Field(
+    grading_network: Literal["bridge"] | None = Field(
         default=None,
         description=(
-            "Network for grading, when it differs from the agent's. Needs `network: llm_only`. 'bridge': the "
-            "criteria reach any host through the proxy sidecar. 'llm_only': the agent's allowlist plus "
-            "`grading_egress_allowlist`. None (default): grading uses the agent's network. The proxy switches "
-            "once, when grading starts, so a criterion can install its test dependencies while the agent never "
-            "reached those hosts. Not supported with an enabled `simulation`, whose criteria run between turns."
+            "'bridge': the criteria reach any host through the proxy sidecar. Needs `network: llm_only`. "
+            "None (default): grading uses the agent's network plus `grading_egress_allowlist`. The proxy "
+            "switches once, when grading starts, so a criterion can install its test dependencies from hosts "
+            "the agent's turn was refused. The switch is requested from inside the container, so an agent "
+            "that writes the request file early, or a process it leaves running, gets the grading network "
+            "too (see Egress limits in docs/DOCKER_ISOLATION.md). Not supported with an enabled `simulation`, "
+            "whose criteria run between turns."
         ),
     )
     grading_egress_allowlist: list[str] = MergeField(
@@ -282,9 +284,11 @@ class DockerDriverConfig(BaseModel):
         default_factory=list,
         description=(
             "Extra `host` or `host:port` targets (default port 443) the criteria may reach under "
-            "`network: llm_only`, on top of `egress_allowlist` and the derived model-API hosts. The agent "
-            "cannot reach them. Appended across config layers. Ignored with `grading_network: bridge` or "
-            "another network mode. Example: ['pypi.org', 'files.pythonhosted.org', 'astral.sh']."
+            "`network: llm_only`, on top of `egress_allowlist` and the derived model-API hosts. They are "
+            "refused during the agent's turn, but an agent that writes the grading request file early, or a "
+            "process it leaves running, can reach them (see Egress limits in docs/DOCKER_ISOLATION.md). "
+            "Appended across config layers. Needs `network: llm_only`; ignored with `grading_network: bridge`. "
+            "Example: ['pypi.org', 'files.pythonhosted.org', 'astral.sh']."
         ),
     )
     working_dir: str | None = Field(
@@ -381,9 +385,14 @@ class DockerDriverConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_grading_network(self) -> DockerDriverConfig:
-        if self.grading_network is None or self.network == "llm_only":
+        if self.network == "llm_only":
             return self
-        if self.network == "bridge" and self.grading_network == "bridge":
+        if self.grading_egress_allowlist:
+            raise ValueError(
+                f"grading_egress_allowlist needs network: llm_only, not {self.network}: only the llm_only proxy "
+                + "sidecar can add hosts when grading starts."
+            )
+        if self.grading_network is None or self.network == "bridge":
             return self
         raise ValueError(
             f"grading_network: {self.grading_network} needs network: llm_only, not {self.network}: the container "
