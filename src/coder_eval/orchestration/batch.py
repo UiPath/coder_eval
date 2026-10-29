@@ -35,7 +35,7 @@ from ..path_utils import (
     format_task_log_id,
     write_text_atomic,
 )
-from ..pricing import unpriced_models
+from ..pricing import delegate_rate_key, unpriced_models
 from ..run_record import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
@@ -46,16 +46,23 @@ logger = logging.getLogger(__name__)
 
 
 def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
-    """Every model id this run pins up front: subject agents and judge criteria.
+    """Every model id this run pins up front: subject agents, judge criteria and the simulated user.
 
-    A criterion's model is always priced from the rate card (no judge backend
-    reports a cost), so it matters more here than the agent's, which only falls
-    back to the card on a turn the backend never priced.
+    A criterion's model and the simulator's are always priced from the rate card
+    (no judge backend reports a cost, and ``simulator_cost_usd`` prices its tokens),
+    so they matter more here than the agent's, which only falls back to the card on
+    a turn the backend never priced.
     """
     for rt in resolved_tasks:
-        yield rt.task.agent.model if rt.task.agent else None
+        agent = rt.task.agent
+        if agent is not None and agent.model and agent.type == AgentKind.DELEGATE:
+            yield delegate_rate_key(agent.model)
+        else:
+            yield agent.model if agent else None
         for criterion in rt.task.success_criteria:
             yield getattr(criterion, "model", None)
+        if rt.task.simulation is not None and rt.task.simulation.enabled:
+            yield rt.task.simulation.model
 
 
 def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
@@ -78,7 +85,7 @@ def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
         return []
     logger.warning(
         "No pricing rate for %s. Turns the agent's own backend prices are unaffected, but any "
-        + "judge call, timed-out turn or killed partial will book its tokens with no cost, so "
+        + "judge call, simulator turn, timed-out turn or killed partial will book its tokens with no cost, so "
         + "run-level totals will understate the bill (RunSummary.cost_complete reports false). "
         + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
         ", ".join(repr(m) for m in missing),

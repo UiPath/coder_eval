@@ -49,9 +49,7 @@ const _ROUTING_PREFIXES = [
     "openrouter/",
 ];
 const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
-// Exported so the run header's model tally groups on the same key pricing looks
-// up on (lib/runs.ts::tallyModels).
-export function normalizeModel(model: string): string {
+function normalizeModel(model: string): string {
     let m = model.trim();
     for (const pre of _ROUTING_PREFIXES) {
         if (m.startsWith(pre)) {
@@ -67,6 +65,15 @@ export function normalizeModel(model: string): string {
     }
     if (m.startsWith("anthropic.")) m = m.slice("anthropic.".length);
     return m;
+}
+
+// The Delegate backend echoes underscored ids ("gpt_5_6_luna") while the rate
+// table keys the hyphenated form — mirror of pricing.py::delegate_rate_key. A row
+// does not say which harness wrote it, so resolvePricing tries this key only
+// after the exact id. Exported so the run header's model tally groups on it
+// (lib/runs.ts::tallyModels).
+export function rateKey(model: string): string {
+    return normalizeModel(model).replaceAll("_", "-");
 }
 
 // Resolve pricing for a model id, tolerating routing/region prefixes and undated
@@ -85,6 +92,8 @@ export function resolvePricing(model: string | null): Pricing | null {
     // Try stripping a trailing -YYYYMMDD date.
     const undated = norm.replace(/-\d{8}$/, "");
     if (Object.hasOwn(PRICING, undated)) return PRICING[undated];
+    const hyphenated = rateKey(model);
+    if (Object.hasOwn(PRICING, hyphenated)) return PRICING[hyphenated];
     return null;
 }
 
