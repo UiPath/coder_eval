@@ -210,9 +210,8 @@ async def _stop_grading_watch(watch: asyncio.Task[None], output_dir: Path) -> No
     """Cancel the grading watcher and remove the handshake files; a failure here is only a warning."""
     watch.cancel()
     try:
-        await watch
-    except asyncio.CancelledError:
-        pass
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch
     except Exception as exc:
         logger.warning("The egress grading watcher failed: %s", exc)
     try:
