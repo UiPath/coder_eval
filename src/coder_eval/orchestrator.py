@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -352,6 +352,10 @@ class Orchestrator:
         self.artifacts_dir = artifacts_dir
         self.task_file = task_file
         self.stream_callback = stream_callback
+        # Awaited once, before the first criterion of a graded run; the in-container run
+        # sets it to widen the egress allowlist for grading.
+        self.before_grading: Callable[[], Awaitable[None]] | None = None
+        self._grading_started = False
         self.sandbox = sandbox
         self.variant_id = variant_id
         self.source_yaml = source_yaml
@@ -856,6 +860,7 @@ class Orchestrator:
 
         checked: CriteriaResults = []
         if runnable:
+            await self._start_grading()
             checked = await self.success_checker.check_all_async(
                 runnable,
                 reference_dir=self._reference_dir,
@@ -875,6 +880,11 @@ class Orchestrator:
             else:
                 recovered.append(next(checked_iter))
         self.result.post_failure_criteria_results = recovered
+
+    async def _start_grading(self) -> None:
+        if self.before_grading is not None and not self._grading_started:
+            self._grading_started = True
+            await self.before_grading()
 
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
@@ -2208,6 +2218,7 @@ class Orchestrator:
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
+        await self._start_grading()
         await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,

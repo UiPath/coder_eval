@@ -55,6 +55,12 @@ class TestStructuralRefusals:
         with pytest.raises(TaskNotExportableError):
             export_task(task_file, tmp_path / "out")
 
+    def test_llm_only_network_is_refused_not_widened_to_public(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"network": "llm_only"}}})
+        with pytest.raises(TaskNotExportableError, match="llm_only"):
+            export_task(task_file, tmp_path / "out")
+        assert not (tmp_path / "out").exists()
+
     def test_unsupported_criteria_are_refused_before_any_file_is_written(self, tmp_path: Path) -> None:
         task_file = _write_task(
             tmp_path,

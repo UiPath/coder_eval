@@ -167,6 +167,28 @@ class TestLayers14Current:
         # exp-defaults appended first, then task.
         assert resolved.sandbox.docker.env_passthrough_extra == ["EXP_VAR", "TASK_VAR"]
 
+    def test_egress_allowlist_appends_exp_defaults_then_task(self):
+        default_exp = _default_exp()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(egress_allowlist=["task.example.com"])),
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(
+                sandbox=SandboxConfig(docker=DockerDriverConfig(egress_allowlist=["pypi.org"]))
+            ),
+            variants=[ExperimentVariant(variant_id="v")],
+        )
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.sandbox.docker.egress_allowlist == ["pypi.org:443", "task.example.com:443"]
+        apply_overrides(resolved, {"sandbox.docker.egress_allowlist": ["cli.example.com:80"]})
+        assert resolved.sandbox.docker.egress_allowlist == [
+            "pypi.org:443",
+            "task.example.com:443",
+            "cli.example.com:80",
+        ]
+
     def test_template_sources_task_first_order(self):
         """template_sources resolve task-first: the task's base templates, then
         experiment-defaults and variant overlays appended after (the documented

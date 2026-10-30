@@ -1037,3 +1037,192 @@ separator a value beginning with `-` is parsed as an OPTION rather than a reposi
 (`--upload-pack=…` runs a command of the caller's choosing). That URL is task-authored, and
 since `evaluate <run_dir>` rebuilds the task from a shareable run directory it is no longer
 necessarily the operator's own string.
+
+## The egress sidecar (network: llm_only)
+
+`network: llm_only` puts the task container on a per-task `--internal` network whose only exit
+is a proxy sidecar that forwards to an exact `host:port` allowlist. The plan and its spike log
+are in `c/2026-10-01-docker-no-internet-egress.md` (not committed); the facts that shaped the
+design are below.
+
+### Why an explicit proxy, not a transparent one
+
+Harbor's design (a `gost` sidecar, nftables `redirect`, SNI sniffing, the task in the sidecar's
+netns with `NET_ADMIN`) also catches tools that ignore proxy env. Phase 0 found no built-in
+harness that needs it: Claude Code (Bun native binary), Codex (Rust reqwest), Antigravity (Go
+`ProxyFromEnvironment`) and Pi (undici `EnvHttpProxyAgent` with `NODE_USE_ENV_PROXY=1`) all
+honour `HTTPS_PROXY`. An explicit proxy needs no capability, no third-party image and no SNI
+parser, and a tool that ignores it has no route, so it fails closed. iptables inside the task
+container was rejected because it needs `NET_ADMIN` in the agent's own container, which lets the
+agent undo it.
+
+### Why a per-task network
+
+A shared internal network lets task A use task B's sidecar (and its allowlist) and reach task
+B's ports. One network per task costs one address pool each: a default Docker Desktop ran out at
+the 30th network (`all predefined address pools have been fully subnetted`), which is why the
+error names `--max-parallel` and `default-address-pools`.
+
+### Why inhibit_ipv4 and ip_forward=0
+
+On native Linux a default `--internal` bridge still holds a gateway IP on the host, and the task
+container reached every host service bound on `0.0.0.0` through it (dockerd 20.10, 24 and 29,
+both firewall backends; on 20.10 and 24 also `docker0` and the host NIC). The
+`com.docker.network.bridge.inhibit_ipv4=true` option removes the gateway; the sidecar then takes
+the `.1` address and the embedded DNS alias still works. `gateway_mode_ipv4=isolated` was
+rejected: Docker 24 ignores it silently. Docker Desktop never showed the hole.
+`--sysctl net.ipv4.ip_forward=0` on the sidecar is defence in depth: Docker enables forwarding in
+the sidecar's netns, so a task container with `NET_ADMIN` could try to route through it. No
+config field grants the task container run-time capabilities, and the measured route did not
+reach the internet, but the sysctl costs nothing.
+
+### Why a black-hole DNS server and --ipv6=false
+
+The spikes ran on dind, which has no loopback resolver, so they could not show CVE-2024-29018:
+on daemons before 26.0 / 25.0.5 / 23.0.11 the embedded DNS forwards an internal network's
+queries from the host namespace when the host resolver is loopback (systemd-resolved), which is a
+DNS tunnel out. The task container's `--dns 192.0.2.1` (TEST-NET-1, never routed) keeps the
+embedded DNS answering the sidecar alias while every external forward goes nowhere.
+`inhibit_ipv4` removes only the IPv4 gateway, so `--ipv6=false` keeps a daemon whose
+`default-network-opts` enable IPv6 from giving the internal bridge an IPv6 gateway. IPv6
+link-local reach to a host service was not measured.
+
+`NET_RAW` is dropped from the task container for the same reason: with raw sockets an agent could
+write frames for the bridge's own MAC address and reach a host service over UDP without the
+sidecar. That path was not measured; the cap drop removes it at no cost, since no tool needs raw
+sockets under `llm_only`.
+
+### Why the sidecar log is a separate, atomically written file
+
+The first version appended the sidecar log to `docker.log` after the container exited. That file
+is in the run directory, which is bind-mounted writable into the container at the SAME path, so
+the agent could replace it with a symlink to a host file (for example a shell rc file) and get a
+line it chose (`DENY $(cmd):443 CONNECT` passes the visible-ASCII check) appended there by the
+host. Container stdout could also forge `ALLOW` / `DENY` lines in it. The log is now `egress.log`,
+written once by `write_text_atomic`, whose `os.replace` replaces a planted symlink instead of
+following it. `BAD` lines carry only the method and length, because a refused target can hold
+credentials in its userinfo or query.
+
+### Why the framework image and a bind-mounted module
+
+The sidecar image is the framework image, never the task image: a task image is task-authored and
+may be a runtime-kit image with a different Python. The proxy code is NOT taken from the image:
+the host bind-mounts its own `egress_proxy.py` read-only, so the code under test is the boundary
+that runs and image skew cannot change it. That is also why the module is stdlib-only (five
+imports, guarded by a test): the image only supplies `python3`.
+
+### Why the sidecar watches the heartbeat
+
+A host SIGKILL skips every `finally`, and so does a SIGTERM (a CI cancel, `timeout`, systemd):
+coder-eval has no SIGTERM-to-cancel bridge, and `fs_permissions` re-kills with the default action.
+The task container already exits on a stale host heartbeat;
+the sidecar reads the same file through a single-file `:ro` bind (Docker Desktop VirtioFS saw
+every in-place counter write) and stops itself with the same counter-or-mtime rule as
+`heartbeat_is_alive`. It has no `--rm`, so a crashed or stale-stopped sidecar keeps its log until
+teardown reads it; `docker network rm` works with a stopped container still attached, so a later
+prune needs no ordering. The watchdog returns from `serve` instead of calling `os._exit`, because
+CE052 gates process-lethal calls on `IN_CONTAINER_ENV`, which a stdlib-only module cannot import.
+
+The heartbeat stops the sidecar but cannot remove it or its network, and each leaked network holds
+one of the daemon's address pools (about 29 on a default Docker Desktop). A few cancelled parallel
+runs then fail every `network create`, for coder-eval and for anything else on that daemon. So every
+egress setup first prunes egress-labelled stopped containers and unused networks older than
+`RECLAIM_MIN_AGE`. Prune never removes a running container or a network in use, and the age spares a
+concurrent setup between `network create` and `start`. A SIGTERM-to-cancel bridge was not added: the
+prune also covers SIGKILL, and a process-wide handler would change shutdown for every driver.
+
+### Why a refused grading host does not change the status
+
+A grader that cannot reach a host it needs (an `apt-get` mirror, PyPI) fails its criterion, and
+the row reads as an ordinary FAILURE: an agent miss that is really the grader's. Only `egress.log`
+showed it. So after a graded run the host reads the sidecar log from Docker (not the run
+directory's copy, which the container can write), takes the `DENY` lines after `PHASE grading` (or
+all of them for a container that only grades), and records the hosts in
+`environment_info["egress_denied_in_grading"]` as one comma-separated string, which the report
+environment tables render as-is.
+
+Turning such a FAILURE into an ERROR does not work. A DENY does not prove the grader needed the
+host: the probe task's criteria and any no-internet task's criteria are refused on purpose, so a
+real leak would read as a grader error with advice to allowlist `example.com`; an `agent_judge` can
+use a network tool on one run and not the next; and a process the agent left running is refused
+under the same rule. An ERROR written by the host is also an execution fact decided outside the
+orchestrator, so `evaluate` would not re-grade it and `task.html` would keep the FAILURE. Errors
+count as misses in the pass rate, so the rewrite would buy only an error count. The row keeps its
+status, and the host writes the hosts through the same `TASK_JSON_TRANSCRIPT_EXCLUDE` serializer
+the orchestrator uses.
+
+`GRADING_DENIAL_NOISE` drops the hosts the judge CLIs call and do not need (§ Expected DENY lines
+in docs/DOCKER_ISOLATION.md), so they are not recorded on every judged row.
+
+### Why every docker call runs to completion
+
+`_docker` runs `subprocess.run` in a worker thread, and cancelling the await does not stop the
+thread. A Ctrl-C during `docker create` once let teardown run `docker rm -f` before the create
+finished, leaking a created-but-never-started sidecar that no heartbeat would ever stop. So every
+call is joined across any number of cancels (`_run_to_completion`) before the cancel propagates,
+and teardown is joined the same way.
+
+### The log line format is a security boundary
+
+`docker.log` is the only evidence the boundary leaves, and operators grep it for
+`^(ALLOW|DENY|FAIL)`. A request line with a control or non-ASCII byte is refused before anything is
+logged, because a lone `\n` in a method once forged a separate `ALLOW` line.
+
+### Why the allowlist follows the model callers, not the forwarded env
+
+The first version allowed the API backend's hosts for every agent and the host of every forwarded
+`*_URL` variable. The real runs showed the cost: a Claude task could reach the Azure
+`CODEX_BASE_URL` host, and a Codex, Antigravity or Pi task could reach `api.anthropic.com`,
+because those variables are on the default passthrough list and the default backend is `direct`.
+Each host was a model provider, but none was needed. So the backend's hosts are added only for a
+component that uses `API_BACKEND` (`uses_api_backend` on the agent config, an enabled simulator,
+an `llm_judge` / `agent_judge` criterion), and a URL variable counts only where its owner reads it
+(`LITELLM_BASE_URL` for the litellm backend, `CODEX_BASE_URL` in `CodexAgentConfig.egress_hosts`).
+Any other host is explicit in `egress_allowlist`.
+
+### Why grading switches the sidecar in place
+
+Graders often install their own test dependencies (SkillsBench test scripts run `apt-get`, the
+`astral.sh` uv installer and `uvx` from PyPI). With one allowlist for both phases those hosts are
+open to the agent as well, and `github.com`, which the uv installer needs, is where public
+benchmark solutions live. So grading may widen the allowlist, never narrow it.
+
+Grading in a second container (the detached-grade path) was rejected: only the workspace crosses
+over, and the known equivalence gaps in § Two known equivalence gaps already score real rows 0.000
+for state outside it. The switch therefore happens in the same container, as in Harbor, at the
+two grading sites that run after the agent is finished (the single-shot loop and the post-failure
+path). The dialog loop is refused at load, because its criteria run between turns and a one-way
+switch would leave the agent the grading network for the rest of the dialog.
+
+The phase boundary is known only inside the container, so the in-container run asks through a
+request file in the run directory and waits for the host's answer in an ack file. The host, not
+the container, talks to the proxy: `docker exec` into the sidecar reaches a control listener on
+the sidecar's own loopback, which no other netns can reach, and the proxy confirms before the
+host answers. The ack is written with `write_text_atomic` because the run directory is writable
+from the container.
+
+This is not a boundary against an agent that targets it. The agent is root in the same
+container, so it can write the request file early, and a background process it started keeps
+running into grading. Both are the same class as the deliberate re-chmod the anti-cheat window
+leaves open. The `PHASE grading` line in `egress.log` separates the two phases' traffic.
+
+Every graded `llm_only` run switches, including one with no grading allowlist: there the switch
+adds nothing and only writes the `PHASE grading` line that § Why a refused grading host makes the
+row ERROR reads. Such a switch is best-effort, because a failure only loses that report.
+
+Grading-only hosts are checked at setup with `probe --direct` (a TCP connection from the sidecar),
+not through the proxy, because the proxy does not allow them yet.
+
+### What Phase 0 measured
+
+- Every built-in harness in the image and every judge route (`llm_judge`, `agent_judge`,
+  litellm with aiohttp) works through the proxy with an exact host set.
+- Claude Code on Bedrock calls the control plane `bedrock.<region>.amazonaws.com` at every start;
+  it is allowed so the CLI behaves as under `bridge`. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
+  does not remove that call, and on direct its Datadog `DENY` did not slow the CLI, so it is not set.
+- Claude Code OAuth refresh goes to `platform.claude.com` (binary string `TOKEN_URL`), which is on
+  the direct backend list because `agent_judge` runs the CLI too.
+- `LITELLM_LOCAL_MODEL_COST_MAP=True` costs no latency either way (the `403` is immediate); it is set
+  to remove one `DENY` per process and a network-dependent cost map.
+- busybox `wget` sends absolute-form `GET https://…` to a proxy instead of `CONNECT`; the proxy
+  answers `400` with a `BAD … absolute-form https (use CONNECT)` line rather than originate TLS.

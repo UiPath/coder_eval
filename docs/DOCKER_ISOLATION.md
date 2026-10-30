@@ -47,8 +47,271 @@ coder-eval run --driver docker
 sandbox:
   driver: docker
   docker:
-    network: bridge         # or "none" for sealed runs
+    network: bridge         # bridge | llm_only | none (see Network modes)
     image: my-custom:tag    # override the default image
+```
+
+## Network modes
+
+`sandbox.docker.network` selects what the task container can reach. The same mode applies to
+the grading container of a detached `coder-eval evaluate`.
+
+| Mode | The container reaches | Use it for |
+|---|---|---|
+| `bridge` (default) | the full network | tasks that install packages or call other services |
+| `llm_only` | only the model APIs and the hosts in `egress_allowlist`, through a proxy sidecar | agent tasks that must not use general internet |
+| `none` | nothing | `agent: {type: none}` tasks only: a real agent cannot reach its model API |
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+    egress_allowlist: [pypi.org, files.pythonhosted.org]   # optional, appended across layers
+```
+
+You can also set it per run: `-D sandbox.docker.network=llm_only` and
+`-D 'sandbox.docker.egress_allowlist=["pypi.org"]'`.
+
+### How the egress sidecar works
+
+For each task the host creates:
+
+1. A per-task `docker network create --internal --ipv6=false` network with
+   `com.docker.network.bridge.inhibit_ipv4=true`. The network has no route out and no IPv4 gateway
+   address on the host, so the task container cannot reach the internet or a host service.
+2. An egress-proxy sidecar from the framework image `coder-eval-agent:<version>`. It joins the
+   internal network (DNS alias `coder-eval-egress`) and the default `bridge`. It runs the host's
+   own `egress_proxy.py`, bind-mounted read-only, as uid 65534 with all capabilities dropped and a
+   read-only root file system. It opens TCP connections only to exact `host:port` targets.
+3. The task container, on the internal network only, with `HTTPS_PROXY` / `HTTP_PROXY` (both
+   cases) set to `http://coder-eval-egress:3128`, `NO_PROXY=localhost,127.0.0.1,::1`,
+   `NODE_USE_ENV_PROXY=1` and `LITELLM_LOCAL_MODEL_COST_MAP=True`. A host value of a proxy
+   variable (`*_PROXY`, `NO_PROXY`, `NODE_USE_ENV_PROXY`) is never forwarded. Its upstream DNS
+   server is `192.0.2.1`, an address that is never routed: Docker's own DNS still resolves the
+   sidecar, but an external name does not resolve. It also runs without `NET_RAW`, so it cannot
+   send crafted packets onto the internal bridge.
+
+Before the task container starts, the host sends one `CONNECT` per allowlisted target through
+the sidecar. If one fails, the task is an `ERROR` row that names the failing targets. The host
+removes the sidecar and the network on every path (success, error, Ctrl-C). If the host process
+is killed, the sidecar stops by itself when the host heartbeat goes stale; see
+[Troubleshooting egress](#troubleshooting-egress) to remove what is left.
+
+A tool that ignores the proxy variables has no route, so it fails closed. It cannot bypass the
+allowlist.
+
+### The derived allowlist
+
+You do not list the model APIs yourself. The host derives them from the parts of the task that
+call a model, and adds nothing for the parts that do not:
+
+| Source | Hosts added |
+|---|---|
+| API backend (`API_BACKEND`), only when a `claude-code` agent, an enabled `simulation:`, or an `llm_judge` / `agent_judge` criterion uses it | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the host of the forwarded `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`) |
+| Agent | codex: the host of the forwarded `CODEX_BASE_URL`, else `api.openai.com:443`. antigravity: `generativelanguage.googleapis.com:443`. pi: the host of the `provider/` prefix of `agent.model` (`openrouter`, `anthropic`, `openai`, `google`; anything else or no model gives `openrouter.ai:443`). claude-code, opencode, delegate, none: nothing beyond the backend row |
+| `system_one_judge` criteria | the host of each `base_url` (default `api.typesafe.ai:443`) |
+| `egress_allowlist` | your entries |
+
+A judge with its own `checker_context.api_route.route` uses the hosts of that backend. A
+`route: litellm` judge configures its endpoint through `params`, so add that host to
+`egress_allowlist`. Other forwarded `*_URL` variables, such as `UIPATH_URL`, add no host: a task
+whose tools call that service lists the host in `egress_allowlist`. A Pi provider other than the
+four above, and every OpenCode or Delegate provider, also needs its host in `egress_allowlist`.
+
+### Extra egress hosts
+
+`egress_allowlist` takes `host` or `host:port` entries; a bare host means port 443. A host is a DNS
+name or an IPv4 address. Schemes, paths, wildcards and IPv6 addresses are refused when the task
+loads. Entries are appended across the config layers, like `env_passthrough_extra`. Under `bridge`
+or `none` the field is ignored.
+
+Typical additions:
+
+| Need | Entries |
+|---|---|
+| `sandbox.python.env_packages`, `pip`, `uv` | `pypi.org`, `files.pythonhosted.org` |
+| `npm`, `npx -y` MCP servers | `registry.npmjs.org` |
+| `git clone` over https from GitHub | `github.com` |
+| `apt` (Debian) | `deb.debian.org:80` |
+| `apt` (Ubuntu) | `archive.ubuntu.com:80`, `security.ubuntu.com:80` (amd64) or `ports.ubuntu.com:80` (arm64) |
+| `apk` (Alpine) | `dl-cdn.alpinelinux.org` |
+| A remote MCP server or a run-time plugin install | its host |
+| `uv` downloading a managed Python not in the image | `github.com`, `objects.githubusercontent.com` (or bake the Python into the image) |
+
+### Grading network
+
+A host in `egress_allowlist` is open to the agent too. When only the criteria need it, for example a
+test script that installs its test dependencies, give it to grading alone:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+    grading_egress_allowlist: [pypi.org, files.pythonhosted.org, astral.sh]   # grading only
+    # or: grading_network: bridge                                             # grading reaches any host
+```
+
+| Field | Grading reaches |
+|---|---|
+| neither (default) | the agent's allowlist |
+| `grading_egress_allowlist` | the agent's allowlist plus these hosts (same entry rules as `egress_allowlist`, appended across layers) |
+| `grading_network: bridge` | any host, through the sidecar |
+
+Both fields need `network: llm_only`. `grading_network: bridge` with `network: bridge` changes
+nothing; any other combination is refused when the task loads, because the container joins one
+network for its whole life and grading can only widen it. A task with an enabled `simulation` is
+refused too, because its criteria run between dialog turns.
+
+The container runs the agent under the agent's allowlist. Before the first criterion runs, the
+run inside the container asks the host to switch, the host tells the sidecar through a control
+port that only the sidecar itself can reach, and the criteria run after the sidecar confirms. The
+switch is one-way and adds a `PHASE grading` line to `egress.log`. If it fails, the row is an
+`ERROR` that names the failure. Before the agent starts, the host also opens one TCP connection
+from the sidecar to each `grading_egress_allowlist` host, so a host this machine cannot reach
+fails the row before any agent run is paid for.
+
+Every graded `llm_only` run marks the phase, also with neither field set (then the switch adds
+no host, and a failed switch is only a warning). After the run, the host records the hosts the
+sidecar refused during grading in `environment_info.egress_denied_in_grading`, for example
+`"deb.debian.org:80, pypi.org:443"`, and logs a warning. The row's status does not change, because
+a criterion can be refused on purpose (one that checks that a host is blocked). If a criterion
+needed a host, add it to `grading_egress_allowlist` in the task file and grade the run again with
+`coder-eval evaluate <task.yaml> <task_run_dir>`; the new grade replaces the recorded hosts. The
+judge CLI hosts in [Expected DENY lines](#expected-deny-lines)
+(`http-intake.logs.us5.datadoghq.com:443`, `api.anthropic.com:443`) are not recorded.
+
+`coder-eval execute` keeps the agent's allowlist. A detached grade (`coder-eval evaluate`,
+`run --resume`) runs no agent, so its container gets the grading network from the start; with
+`grading_network: bridge` it joins the plain `bridge` network.
+
+### Tool compatibility
+
+The task image needs nothing new: its tools must honour the proxy variables.
+
+| Tool | Under `llm_only` |
+|---|---|
+| curl, GNU wget, git over https, pip, uv, npm/npx, apt, apk | honour the proxy; a denied host fails fast (`CONNECT tunnel failed, response 403`, `npm error 403`; pip and uv retry for about 8–12 s first) |
+| Python urllib / requests / httpx | honour the proxy (`trust_env` is on by default) |
+| Python aiohttp | only with `trust_env=True` (litellm sets it); otherwise no route |
+| Node `fetch` / `https` | only on Node ≥ 22.21 or ≥ 24.5, through `NODE_USE_ENV_PROXY=1`; older Node has no route. Node prints an `UNDICI-EHPA` warning on stderr |
+| Go `net/http` default client | honours the proxy; a custom transport without `Proxy` has no route |
+| busybox `wget` (Alpine) | plain http works; https always fails `400`, because it sends `GET https://…` instead of `CONNECT`. Use curl |
+| dnf (Rocky, Fedora) | its metalink picks random mirrors, so an exact-host list cannot work. Pin a `baseurl` or bake the packages into the image |
+| git over ssh, raw sockets, DNS lookups, Java without proxy flags | no route |
+
+Every built-in harness in the framework image honours the proxy (Claude Code, Codex,
+Antigravity, Pi). See [Run-Limit Parity § Network modes](agents/HARNESS_PARITY.md#network-modes-under-the-docker-driver).
+
+The sidecar always runs the Debian framework image, so the task image's distribution does not
+change the boundary. Debian, Ubuntu, Rocky Linux, Fedora and Alpine task images were tested as
+clients. A runtime-kit image needs the framework image too (`make docker-images` builds both).
+
+**Docker versions.** Docker 20.10 or later (`host-gateway` first shipped there). Docker 26.0,
+25.0.5 or 23.0.11 or later is recommended: older daemons forward the DNS queries of an internal
+network from the host (CVE-2024-29018). The black-hole upstream DNS server above stops that
+forward, but a patched daemon removes the cause. Tested on Docker
+Desktop 29 (macOS) and on Linux dockerd 20.10, 24 and 29, with both the `iptables` and the
+`nftables` firewall backends. On Linux, `host.docker.internal` resolves to the `docker0` address,
+so a LiteLLM proxy on the host must listen on `docker0` or `0.0.0.0`, as under `bridge`.
+
+### Expected DENY lines
+
+Some clients call hosts they do not need. These `DENY` lines are harmless:
+
+| Client | Denied host |
+|---|---|
+| Claude Code with `API_BACKEND=direct` | `http-intake.logs.us5.datadoghq.com:443` (telemetry) |
+| Codex | `chatgpt.com:443`, `github.com:443`, `api.github.com:443` (update check, remote config). Codex without `CODEX_API_KEY` falls back to a ChatGPT login whose model host is `chatgpt.com`, so that setup needs it in `egress_allowlist` |
+| litellm without `LITELLM_LOCAL_MODEL_COST_MAP` | `raw.githubusercontent.com:443` (cost map) |
+| OpenCode | `models.opencode.ai:443` (model catalog refresh), `registry.npmjs.org:443` (update check) |
+| Claude Code with `API_BACKEND=litellm` | `api.anthropic.com:443` (startup calls the CLI does not need on this route) |
+| Claude Code `WebFetch` on Bedrock | `api.anthropic.com:443` (the domain safety check before a fetch; `WebFetch` then fails) |
+
+### Egress limits
+
+- **Parallel tasks.** Each task uses one Docker network. A default Docker Desktop has address
+  pools for about 29 user networks, so keep `--max-parallel` under that. When the pools are
+  exhausted, the row error names `--max-parallel`, the prune command and the daemon's
+  `default-address-pools` setting.
+- **A killed run leaks until the next one.** A SIGTERM or SIGKILL of coder-eval leaves the
+  task's sidecar (stopped) and network behind. Each `llm_only` setup first removes egress
+  sidecars that stopped and egress networks that no container uses, once they are 10 minutes old.
+- **No upstream proxy.** The sidecar connects directly. A host that can reach the internet only
+  through a corporate proxy cannot use `llm_only`.
+- **Not exfiltration-proof.** The agent can still send data to an allowlisted host.
+- **Server-side tools are outside the boundary.** A tool that the model provider runs, such as
+  Claude Code's `WebSearch` on the direct API, fetches from the internet on the provider's side.
+  The container network cannot block it; remove it with `disallowed_tools` if the task needs no
+  internet at all.
+- **An exact host is a TCP destination, not a site.** A host behind a shared CDN front (for
+  example `files.pythonhosted.org` or `deb.debian.org`) can serve other sites that the agent names
+  in its `Host` header or TLS SNI.
+- **`extra_mounts` can defeat the boundary.** Mounting the Docker socket, for example, gives the
+  agent the daemon.
+- **Exact hosts only.** No wildcards and no CIDR ranges.
+- **podman and rootless Docker** are not tested.
+- **Harbor export** refuses an `llm_only` task.
+- **The grading switch trusts the container.** The request to switch comes from inside the
+  container, so an agent that knows the request file can ask for it before its turn ends. A
+  process the agent leaves running in the background also keeps running during grading, with the
+  grading network. Use the grading fields for test dependencies, not to hide hosts from an agent
+  that is trying to defeat the boundary. A host such a process is refused during grading is also
+  recorded in `egress_denied_in_grading`.
+- **The sidecar is also on the default `bridge`.** A `bridge` container of another task can reach
+  it. It gets no extra reach, because the allowlist is a subset of what `bridge` already reaches,
+  and the sidecar serves at most 256 connections at once (one more gets `503`).
+- **Plugin agents.** A third-party agent gets the API backend's hosts only when its config class
+  sets `uses_api_backend = True`, and its own hosts only through `egress_hosts()`; see
+  [Extending Coder Eval](EXTENDING.md#the-config-class).
+
+### Checking the boundary
+
+`tasks/docker_egress_probe/` tests the mode end to end. The agent tries to reach the internet in
+its own ways, and the grading criteria then probe each path out from inside the container: the
+proxy, direct IPv4 and IPv6, DNS, raw sockets, the docker host, `pip`, `git` and `npm`. Each
+probe passes only when its path is blocked, and the model host must stay reachable:
+
+```bash
+coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml            # expect 1.000
+coder-eval run tasks/docker_egress_probe/docker_egress_probe.yaml \
+  -D sandbox.docker.network=bridge                                          # control: expect a FAILURE
+```
+
+The task pins Claude Code. To check another harness, replace its `agent:` block (without the
+Claude-only `setting_sources`). The model-host check accepts the model host of any built-in
+harness. Run the probes alone in any `llm_only` container with `python3 egress_probe.py all`.
+
+`docker_egress_grading.yaml` in the same directory checks the grading network without an agent or
+a model API: `pre_run` records that `pypi.org` is blocked, and the criteria then reach it during
+grading while `example.com` stays blocked.
+
+```bash
+coder-eval run tasks/docker_egress_probe/docker_egress_grading.yaml          # expect 1.000
+```
+
+### Troubleshooting egress
+
+The sidecar log is the task's `egress.log`, beside `docker.log` (a grading container's log is
+`grade.egress.log`). It is a separate file so that container output cannot add lines to it.
+Each connection is one line:
+`ALLOW host:port METHOD`, `DENY host:port METHOD`, `FAIL host:port <error>` (an allowed host the
+sidecar could not reach), or `BAD …` (a request the proxy refused; the line names only its method
+and length, because the target can carry credentials). A `PHASE grading allow=…` line marks the
+switch to the grading allowlist: the lines before it are the agent's, the lines after it are
+grading's (and any process the agent left running). To see which hosts a task needed:
+
+```bash
+grep -rhE "^(ALLOW|DENY|FAIL)" --include=egress.log runs/latest | sort | uniq -c
+```
+
+Add each needed `DENY` host to `egress_allowlist`. The next `llm_only` task removes what a killed
+run leaked once it is 10 minutes old. To remove it now:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=org.coder-eval.egress)
+docker network prune -f --filter label=org.coder-eval.egress
 ```
 
 ## Using a pre-built custom image

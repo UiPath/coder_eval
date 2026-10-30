@@ -193,6 +193,12 @@ async def run_batch(
                 # HERE, where the original driver is still visible: the
                 # in-container orchestrator sees it forced to tempdir.
                 driver = sandbox_cfg.driver if sandbox_cfg is not None else "tempdir"
+                if sandbox_cfg is not None and driver != "docker" and sandbox_cfg.docker.network == "llm_only":
+                    raise ValueError(
+                        f"sandbox.docker.network: llm_only needs sandbox.driver: docker, not {driver!r}; "
+                        + "without the container the agent would get the full host network. "
+                        + "Set driver: docker or pass --driver docker."
+                    )
                 preservation_mode = resolve_preservation_mode(config.preservation_mode, driver)
                 # DIRECT_WRITE on a non-docker host re-opens the parent-dir
                 # node_modules contamination MOVE_ON_WRITE exists to prevent

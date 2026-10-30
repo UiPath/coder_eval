@@ -558,6 +558,12 @@ Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
 
+Under `driver: docker`, `sandbox.docker.network` selects `bridge` (default), `llm_only` (model
+APIs plus `sandbox.docker.egress_allowlist` only) or `none`. See
+[Docker Isolation § Network modes](DOCKER_ISOLATION.md#network-modes). Under `llm_only`,
+`sandbox.docker.grading_egress_allowlist` and `sandbox.docker.grading_network` give the criteria
+hosts the agent cannot reach; see [§ Grading network](DOCKER_ISOLATION.md#grading-network).
+
 ### Recording CLI Invocations
 
 `record_cli` shadows executables with generated recording shims, so a task can assert on **what the agent actually ran** without hand-writing a mock:

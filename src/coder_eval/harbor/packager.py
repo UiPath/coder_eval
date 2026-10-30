@@ -158,6 +158,12 @@ def export_resolved_task(
             + "Set sandbox.driver: docker (with dockerfile_path or a custom image) to export this task."
         )
 
+    if task.sandbox.docker.network == "llm_only":
+        raise TaskNotExportableError(
+            f"Task {task.task_id!r}: Harbor v1 export does not map network: llm_only; use bridge or none, "
+            + "or export with a Harbor allowlist by hand."
+        )
+
     if task.dataset is not None:
         # `load_task` does NOT run `expand_dataset` -- fan-out happens later, so
         # exporting a raw dataset-backed task would emit ONE Harbor task still
