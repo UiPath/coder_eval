@@ -1,3 +1,4 @@
+# Modified from benchflow-ai/skillsbench@95b3e60: require form fields and preserve AcroForm read and field dereference errors (issue #234).
 """
 Tests for court-form-filling task (SC-100 Small Claims Court form).
 
@@ -63,26 +64,23 @@ def extract_checkbox_values(pdf_path: Path) -> dict:
         checkbox_values.update(parse_xfa_checkboxes(xfa_xml))
 
     # Method 2: Try pypdf get_fields() for AcroForms
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(str(pdf_path))
-        fields = reader.get_fields() or {}
+    from pypdf import PdfReader
+    reader = PdfReader(str(pdf_path))
+    fields = reader.get_fields() or {}
 
-        for name, field in fields.items():
-            # Check if it's a checkbox/radio field
-            if "Checkbox" in name or field.get("/FT") in ["/Btn"]:
-                value = field.get("/V", "")
-                if value:
-                    if hasattr(value, "get_object"):
-                        value = str(value.get_object())
-                    else:
-                        value = str(value)
-                    # Normalize value
-                    value = value.strip("/")
-                    if value and value not in ["Off", "None", ""]:
-                        checkbox_values[name] = value
-    except Exception:
-        pass
+    for name, field in fields.items():
+        # Check if it's a checkbox/radio field
+        if "Checkbox" in name or field.get("/FT") in ["/Btn"]:
+            value = field.get("/V", "")
+            if value:
+                if hasattr(value, "get_object"):
+                    value = str(value.get_object())
+                else:
+                    value = str(value)
+                # Normalize value
+                value = value.strip("/")
+                if value and value not in ["Off", "None", ""]:
+                    checkbox_values[name] = value
 
     return checkbox_values
 
@@ -347,10 +345,7 @@ def pdf_field_values():
         value = field.get("/V", "")
         if value:
             if hasattr(value, "get_object"):
-                try:
-                    value = str(value.get_object())
-                except:
-                    value = str(value)
+                value = str(value.get_object())
             else:
                 value = str(value)
         field_values[name] = value if value else ""

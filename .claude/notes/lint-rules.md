@@ -961,3 +961,12 @@ the module as a parameter instead of a third copy.
 Taking the class name from the model follows CE056 importing `IN_CONTAINER_ENV` and CE057
 deriving its target set from `SIDECAR_MODULES`. Alias resolution removes the *local
 binding* spelling, not every rename; taking the name from the model covers the rest.
+
+## CE071 — patched binary verifiers must not skip
+
+The court-form verifier skipped checks when checkbox data or blank-field keys
+were absent. Its shell runner treated pytest's successful exit as reward 1.
+The guard rejects skip and xfail calls or marks in the two locally patched
+binary-reward SkillsBench verifiers. It also rejects bare `except:` and
+`except BaseException:` handlers. Real PDF regression tests
+also anchor the court-form field names and extraction to the shipped input.

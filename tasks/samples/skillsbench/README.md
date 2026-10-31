@@ -15,14 +15,18 @@ coder_eval task wiring were added locally, along with two verifier patches:
 - `court-form-filling` fails when required checkbox data or fields that must
   remain blank are missing (issue #234). Its blank-field checks also replace
   a nonexistent county field with the omitted third trial court address field.
+  AcroForm read and field dereference errors propagate to the test runner.
+  Its environment pins pypdf 6.21.4 (upstream 5.1.0) to remove known advisories.
 
 The `dialogue-parser` verifier is unchanged and takes part of its ground truth
-from the agent-writable `/app/script.txt`.
+from the agent-writable `/app/script.txt`. The `court-form-filling` verifier
+also reads the agent-writable `/root/sc100-blank.pdf` for its input-versus-output
+identity check.
 
-The `3d-scan-calc` patch closes only the `scan_data.stl` vector. Grading still runs in the
-agent's container, so the `pytest` on `PATH`, auto-loaded `pytest11` plugins,
-site-packages, and the `$TASK_DIR` verifier copy remain tamperable by the
-agent. See the follow-up issue
+The `3d-scan-calc` patch closes only the `scan_data.stl` vector. Grading still
+runs in the agent's container, so the `pytest` on `PATH`, auto-loaded `pytest11`
+plugins, site-packages, and the `$TASK_DIR` verifier copy remain tamperable by
+the agent. See the follow-up issue
 [#238](https://github.com/UiPath/coder_eval/issues/238).
 
 ## What they do
@@ -60,8 +64,8 @@ coder-eval run tasks/samples/skillsbench/*/*.yaml
 
 Each task builds its container, runs the agent (Claude Sonnet 4.6 by default) in
 an isolated sandbox, then scores the result with the upstream verifier (for
-`3d-scan-calc` and `court-form-filling`, the local patches described above). Budget roughly 1–3
-minutes per task.
+`3d-scan-calc` and `court-form-filling`, the local patches described above).
+Budget roughly 1–3 minutes per task.
 
 ## Interpreting the results
 
@@ -93,6 +97,10 @@ is non-deterministic, so exact numbers vary from run to run:
 | `3d-scan-calc` | 1.00 |
 | `court-form-filling` | 1.00 |
 | `dialogue-parser` | ~0.83 |
+
+The court-form score above predates the verifier fix for issue #234 and the
+pypdf update. Those historical scores are not comparable with scores from
+the updated sample.
 
 ## How it works (brief)
 
