@@ -59,6 +59,11 @@ DELEGATE_MODEL_IDS: frozenset[str] = frozenset(_DELEGATE_PRICING)
 rather than a second hand-copied literal that could drift from ``_DELEGATE_PRICING``."""
 
 
+def delegate_rate_key(model: str) -> str:
+    """The rate-card key for a Delegate model id: the backend's ``gpt_5_6_luna`` prices as ``gpt-5-6-luna``."""
+    return model.replace("_", "-")
+
+
 _PRICING: dict[str, ModelPricing] = {
     # Fable 5.1 (and Mythos 5.1) price cache hits at 0.025x input, not the 0.1x
     # every other Claude model uses. Fable 5 pays $1 on the identical $10 base.

@@ -1092,6 +1092,20 @@ class TestCommunicate:
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(0.95 + 4.0)
 
+    async def test_cost_prices_the_underscored_id_the_backend_echoes(self, patch_exec, tmp_path):
+        events = [
+            _result(
+                response="done",
+                model="gpt_5_6_luna",
+                usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+            )
+        ]
+        agent, _ = await _started_agent(patch_exec, events, tmp_path, model="gpt_5_6_luna")
+        record = await agent.communicate("hi")
+        assert record.model_used == "gpt_5_6_luna"
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == pytest.approx(0.20 + 1.20)
+
     async def test_send_error_delivers_end_events_to_stream_callback(self, patch_exec, tmp_path):
         events = [_line({"type": "error", "message": "network blip"})]
         agent, _ = await _started_agent(patch_exec, events, tmp_path)
