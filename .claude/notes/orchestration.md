@@ -50,9 +50,10 @@
   path. Three things are refused rather than degraded: `--junit-xml` (a report of
   verdicts, and there are none — though `reports/junit.py` still emits `<skipped>` for
   an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row
-  is GRADED, and `execute` grades nothing), and simulation tasks (their
-  turn-continuation logic reads criteria results, so an ungraded dialog would silently
-  change its own stopping behavior). `stop_early:` blocks are inert under `execute` for
+  is GRADED, and `execute` grades nothing), and simulation tasks with an LLM-simulated
+  user (their turn-continuation logic reads criteria results, so an ungraded dialog would
+  silently change its own stopping behavior). A scripted dialog reads none, so `execute`
+  accepts it. `stop_early:` blocks are inert under `execute` for
   the same reason the kill switch exists: the full trajectory is the deliverable.
   Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its
   own container, calls coder-eval as the agent, and grades with its own tests.
@@ -95,11 +96,13 @@ the loop over the real execution facts.
 2. **The single-shot loop** stops after capturing the trajectory. Returning False keeps
    `FinalStatus` off SUCCESS and the status chain turns it into NOT_GRADED. The
    reference-integrity check is skipped too — it protects a grade that is not happening.
-3. **The dialog loop** RAISES, and is unreachable today because `execute` rejects
-   simulation tasks at the CLI: the dialog reads criteria results to decide whether to
-   keep talking, so an ungraded dialog would silently change its own stopping behavior.
-   An empty-list "defensive no-op" here would be worse than a refusal — both callers go
-   straight on to the gate, which treats an empty criteria list as a vacuous pass.
+3. **The dialog loop** checks criteria only on a graded run. Its end-of-dialog and
+   budget-gate checks are skipped when ungraded, so a scripted dialog finalizes
+   NOT_GRADED. The per-turn check still RAISES, and is unreachable today because
+   `execute` rejects LLM-simulated tasks at the CLI: that dialog reads criteria results to
+   decide whether to keep talking, so an ungraded run would silently change its own
+   stopping behavior. An empty-list "defensive no-op" there would be worse than a
+   refusal — the gate treats an empty criteria list as a vacuous pass.
 4. **The diagnostics path** records nothing: a `not_evaluated` vector would imply criteria
    we were supposed to run and could not.
 
@@ -632,9 +635,36 @@ unchanged.
 § Gate selection is fired-only — so `result.early_stop` is never assigned here and an armed
 simulation task gates strict-AND on a possibly truncated trajectory.
 
-`execute` rejects simulation tasks at the CLI, because the loop reads criteria results to
+`execute` rejects LLM-simulated tasks at the CLI, because the loop reads criteria results to
 decide whether to keep talking: an ungraded dialog would silently change its own stopping
 behaviour rather than merely skipping the score.
+
+### Scripted dialogs
+
+`simulation.turns` swaps the LLM user for `ScriptedUser`, which answers the loop's own
+`next_user_message` call. `_evaluation_loop` composes it and hands it to the loop as
+`user=`; the loop never branches on the kind afterwards, so the stop, telemetry and logging
+paths are shared.
+
+- **The cursor is the loop's history.** `ScriptedUser` returns `turns[len(dialog_pairs)]`
+  and keeps no counter, so it cannot drift from the exchanges the loop actually completed.
+  The dialog ends in `evaluate_stop` (`script_exhausted`) before the user is asked past the
+  last turn.
+- **`turns[0]` is the pinned opener.** `_evaluation_loop` hands it to the loop as
+  `initial_prompt`, so turn 1 is recorded like any pinned opener (no simulator timing, an
+  accurate `conversation.log` label) and the task carries one source of truth for its
+  first prompt: `initial_prompt` beside `turns` is rejected.
+- **The fields a script ignores are compared by value, not by `model_fields_set`.**
+  `evaluate` rebuilds the task from a full `model_dump()`, which marks every field as set,
+  so a "was it set" test would reject every recorded scripted task.
+- **`max_turns >= len(turns)` is validated, not derived.** Deriving the cap from the list
+  would let a variant that swaps the script inherit the task's stale cap, and truncating a
+  script silently would score a different conversation than the one authored.
+- **No criteria steer a script.** `check_criteria` and `stop_on_criteria_pass` stay at their
+  defaults, so the one criteria check is the end-of-dialog verdict. That is also why
+  `execute` can accept it: nothing the dialog does depends on a verdict it lacks.
+- **No simulator, no simulator egress.** `isolation/egress.py` adds the simulator's model
+  route only for a simulated user.
 
 ## Embedded commands
 

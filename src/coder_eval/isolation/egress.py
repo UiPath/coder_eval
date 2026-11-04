@@ -127,7 +127,7 @@ def _model_routes(task: TaskDefinition, settings: Settings) -> list[ApiRoute]:
     routes: list[ApiRoute] = []
     if task.agent is not None and task.agent.uses_api_backend:
         routes.append(agent_route)
-    if task.simulation is not None and task.simulation.enabled:
+    if task.simulation is not None and task.simulation.enabled and not task.simulation.is_scripted:
         routes.append(resolve_evaluation_route(settings, agent_route))
     if any(isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and c.enabled for c in task.success_criteria):
         api_route = task.checker_context.api_route if task.checker_context else None

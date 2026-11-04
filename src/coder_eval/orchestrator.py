@@ -78,7 +78,7 @@ from .path_utils import (
 )
 from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
-from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
+from .simulation import DialogStopReason, DialogUser, ScriptedUser, SimulatorResult, UserSimulator, evaluate_stop
 from .simulation.utterance import extract_utterance as _extract_utterance
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
@@ -2103,6 +2103,12 @@ class Orchestrator:
                 logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
         return self.result.all_criteria_passed(self.task.success_criteria)
 
+    def _agent_prompt(self, prompt: str, sandbox_dir: Path) -> str:
+        """The text the agent receives for ``prompt``: behind the working-directory prefix unless the task opts out."""
+        if not self.task.working_directory_prefix:
+            return prompt
+        return f"Your working directory is: {sandbox_dir.resolve()}\n\n{prompt}"
+
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
 
@@ -2150,17 +2156,23 @@ class Orchestrator:
             self.result.success_criteria_results = criteria_results
             return self._select_gate()
 
-        # Working directory context prepended to every prompt (including feedback).
+        # Working directory context prepended to every prompt (see `_agent_prompt`).
         # The agent resumes its session between iterations via session_id.
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
 
         # A simulation block replaces the single-shot loop entirely; a simulated
         # task runs exactly one dialog per call.
-        if self.task.simulation is not None and self.task.simulation.enabled:
-            # initial_prompt is optional in simulation mode — when unset, the
-            # simulator produces the opening utterance itself.
-            return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
+        simulation = self.task.simulation
+        if simulation is not None and simulation.enabled:
+            if simulation.turns is None:
+                # initial_prompt is optional in simulation mode — when unset, the
+                # simulator produces the opening utterance itself.
+                return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
+            # A scripted dialog opens with its first turn; ScriptedUser replays the rest.
+            return await self._simulation_dialog_loop(
+                simulation.turns[0], sandbox_dir, user=ScriptedUser(simulation.turns)
+            )
 
         # Guaranteed for real agents by check_prompt_fields; a no-op task runs with
         # no prompt, which NoOpAgent ignores, returning an empty turn.
@@ -2170,13 +2182,13 @@ class Orchestrator:
         self.result.iteration_count = iteration
 
         # Communicate with agent (with retry logic)
-        prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
+        agent_prompt = self._agent_prompt(current_prompt, sandbox_dir)
         logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
         # The agent owns its lifecycle events now (AgentStartEvent fires inside
         # communicate()); the orchestrator is a pure consumer of the stream.
         turn_record = await self._communicate_with_retry(
-            prompt=prompt_with_cwd,
+            prompt=agent_prompt,
             iteration=iteration,
             operation_label="Agent communication",
         )
@@ -2289,16 +2301,17 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
-        # Grading site 3 of 4. Unreachable today, and RAISES rather than returning
-        # an empty list: both callers go straight on to the gate, which treats an
-        # empty criteria list as a vacuous pass, so a silent no-op here would
-        # produce a criteria-free dialog scoring as though nothing was asked.
+        # Grading site 3 of 4. The loop skips its end-of-dialog and budget-gate checks
+        # when ungraded; the per-turn check is reachable ungraded only past the CLI
+        # refusal, and RAISES rather than returning an empty list: the gate treats an
+        # empty criteria list as a vacuous pass, so a silent no-op here would produce
+        # a criteria-free dialog scoring as though nothing was asked.
         # Rationale: .claude/notes/orchestration.md § The four grading sites
         if not self.grade:
             raise ValueError(
                 "Grading is disabled but the simulation dialog path requires criteria results to "
-                + "decide turn continuation. `execute` refuses simulation tasks at the CLI; reaching "
-                + "here means that refusal was bypassed."
+                + "decide turn continuation. `execute` refuses LLM-simulated dialogs at the CLI; "
+                + "reaching here means that refusal was bypassed."
             )
         await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
@@ -2338,7 +2351,7 @@ class Orchestrator:
 
     async def _solicit_user_message(
         self,
-        simulator: UserSimulator,
+        simulator: DialogUser,
         history: list[tuple[str, str]],
         sim_model_id: str | None,
         failure_log_msg: str,
@@ -2369,7 +2382,7 @@ class Orchestrator:
         )
 
     async def _acquire_opener(
-        self, simulator: UserSimulator, sim_config: SimulationConfig, sim_model_id: str | None
+        self, simulator: DialogUser, sim_config: SimulationConfig, sim_model_id: str | None
     ) -> _OpenerOutcome:
         """Pure-simulation opener (``initial_prompt is None``): ask the simulator to
         generate turn 1 from empty history.
@@ -2424,12 +2437,15 @@ class Orchestrator:
             failures=0,
         )
 
-    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
+    async def _simulation_dialog_loop(  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
+        self, initial_prompt: str | None, sandbox_dir: Path, *, user: DialogUser | None = None
+    ) -> bool:
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
         Replaces the criteria-feedback iteration loop for tasks that define a
         ``simulation`` block. One invocation runs exactly ONE dialog trajectory;
-        parallel trials are expanded upstream.
+        parallel trials are expanded upstream. ``user`` replaces the LLM simulator
+        (a scripted dialog passes its ``ScriptedUser``).
 
         Lifecycle: obtain the opening utterance (pinned ``initial_prompt``, else
         ask the simulator), send it as turn 1, then after each agent reply
@@ -2437,7 +2453,7 @@ class Orchestrator:
         budget), and ask the simulator for the next message — breaking on a passing
         criteria check with ``stop_on_criteria_pass``, on the simulator's stop
         token, or on a simulator exception. A final criteria check runs afterwards
-        unless one just did.
+        unless one just did, and only when graded.
 
         Emits the same streaming events as the single-shot loop, so downstream
         renderers work unchanged. Simulator telemetry lands on
@@ -2452,13 +2468,17 @@ class Orchestrator:
         assert self.task.agent is not None
         sim_config = self.task.simulation
 
-        simulator = UserSimulator(
-            config=sim_config,
-            task_description=self.task.description,
-            initial_prompt=initial_prompt,
-            # Resolved independently of eval_route and checker_context: the
-            # simulator is a real CLI subprocess, not a checker concern.
-            route=self.simulator_route,
+        simulator = (
+            user
+            if user is not None
+            else UserSimulator(
+                config=sim_config,
+                task_description=self.task.description,
+                initial_prompt=initial_prompt,
+                # Resolved independently of eval_route and checker_context: the
+                # simulator is a real CLI subprocess, not a checker concern.
+                route=self.simulator_route,
+            )
         )
         await simulator.start()
 
@@ -2503,7 +2523,7 @@ class Orchestrator:
             else:
                 current_prompt = initial_prompt
                 pending_user_turn = UserMessage(text=initial_prompt)
-                self._log_conversation("USER", 1, current_prompt, metadata="pinned initial_prompt")
+                self._log_conversation("USER", 1, current_prompt, metadata="pinned opener")
             # Clean (user, agent) pairs, deliberately without the
             # working-directory prefix the framework prepends to agent prompts.
             dialog_pairs: list[tuple[str, str]] = []
@@ -2523,11 +2543,10 @@ class Orchestrator:
                 self.result.iteration_count = turns_completed
                 logger.info("Simulation turn %s/%s", turns_completed, sim_config.max_turns)
 
-                prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
                 # Agent emits its own AgentStartEvent inside communicate().
                 agent_turn_attempted = True
                 turn_record = await self._communicate_with_retry(
-                    prompt=prompt_with_cwd,
+                    prompt=self._agent_prompt(current_prompt, sandbox_dir),
                     iteration=turns_completed,
                     operation_label=f"Agent communication (sim turn {turns_completed})",
                 )
@@ -2574,7 +2593,7 @@ class Orchestrator:
                     self._check_run_limits(iteration=turns_completed)
                 except BudgetExceededError:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
-                    if not criteria_checked_this_turn:
+                    if self.grade and not criteria_checked_this_turn:
                         # Partial-credit side effects only; this fallback site
                         # neither sets all_passed nor emits an event.
                         await self._run_dialog_criteria_check(judge_usage_accum)
@@ -2634,7 +2653,7 @@ class Orchestrator:
 
             # Final criteria check for end_of_dialog (or both) modes, or when
             # every_turn mode did not run a check for the final turn.
-            end_of_dialog_needed = (
+            end_of_dialog_needed = self.grade and (
                 sim_config.check_criteria in ("end_of_dialog", "both") or not criteria_checked_this_turn
             )
             if end_of_dialog_needed:
