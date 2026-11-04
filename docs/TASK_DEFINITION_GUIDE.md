@@ -248,7 +248,7 @@ trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
 
 `run_limits:` is the single namespace for every run-time cap: the **structural** caps that bound how
 long a task may run, and the **budget** caps that bound what it may spend. Any subset of fields is
-valid and an empty block is legal — every field defaults to "no limit".
+valid and an empty block is legal — omitted fields use the defaults below.
 
 ```yaml
 run_limits:
@@ -257,6 +257,7 @@ run_limits:
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
+  max_turn_retries: 0                 # no replay of a failed communicate() call
 
   # Budget caps
   max_total_tokens: 200000            # cumulative input + output
@@ -272,6 +273,7 @@ run_limits:
 | `expected_turns` | *unset* | `>= 1` | **Soft** target for visible turns (tool calls plus the final reply) summed over the whole task, a different unit from `max_turns`. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
+| `max_turn_retries` | *unset* | `>= 0` | Max retries after the first failed agent `communicate()` attempt, per single-shot or dialog turn. Unset keeps the error-category retry policy. `0` disables whole-turn replay; a positive value caps the category policy and cannot enable retries for a non-retryable error. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
@@ -280,6 +282,13 @@ run_limits:
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
 | `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+`max_turn_retries` controls the orchestrator on every agent backend. It does not
+control retries inside an agent or provider SDK, sandbox setup, or agent start.
+The failed attempt is still recorded when the agent supplies a partial turn. An
+exhausted retry limit propagates the error and stops the task before the next
+dialog question. Set it for a benchmark with
+`coder-eval run task.yaml -D run_limits.max_turn_retries=0`.
 
 If resolved `task_timeout` is larger than `turn_timeout`, `plan` and runtime emit
 a non-blocking warning: a larger `task_timeout` cannot extend the agent's single

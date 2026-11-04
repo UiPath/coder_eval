@@ -36,6 +36,30 @@ def _default_exp(run_limits: RunLimits | None = None) -> ExperimentDefinition:
 
 
 class TestRunLimitsResolver:
+    @pytest.mark.parametrize("variant_limit, expected", [(None, 2), (0, 0), (1, 1)])
+    def test_turn_retry_limit_inheritance_and_cli_override(self, variant_limit, expected):
+        from coder_eval.orchestration.overrides import apply_overrides
+
+        default_exp = _default_exp(RunLimits(max_turn_retries=2, turn_timeout=90))
+        task = _make_task(run_limits={"max_turns": 5})
+        variant_limits = {"max_usd": 1.0}
+        if variant_limit is not None:
+            variant_limits["max_turn_retries"] = variant_limit
+        exp = ExperimentDefinition(
+            experiment_id="e",
+            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(**variant_limits))],
+        )
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+
+        assert resolved.run_limits.max_turn_retries == expected
+        assert lineage["run_limits.max_turn_retries"].source == ("default" if variant_limit is None else "variant")
+        apply_overrides(resolved, {"run_limits.max_turn_retries": 0}, lineage=lineage)
+        assert resolved.run_limits.max_turn_retries == 0
+        assert resolved.run_limits.turn_timeout == 90
+        assert resolved.run_limits.max_turns == 5
+        assert resolved.run_limits.max_usd == 1.0
+        assert lineage["run_limits.max_turn_retries"].source == "cli"
+
     def test_default_experiment_provides_run_limits(self):
         default_exp = _default_exp(RunLimits(max_usd=1.0))
         task = _make_task()

@@ -92,6 +92,14 @@ The record is BUILT before `_end_turn_ok()` on every harness: a failure inside t
 reduction is a failed turn, and `_end_turn_ok` would already have cleared the rollback
 flag `discard_pending_turn` needs.
 
+`run_limits.max_turn_retries` bounds replay of the entire `communicate()` call at
+the shared orchestrator wrapper. Benchmarks can set it to zero when replay would
+change the measured trajectory. Unset preserves the existing error-category
+policy. The executor's total-attempt cap includes the first call and is checked
+before backoff, after the failure callback drains the partial. A larger cap cannot
+make a rejected error category retryable. Agent/provider internal retries and
+setup retries keep their own policies.
+
 Three exit paths converge on `finalize`, and it is idempotent on all of them, because the
 protocol allows EXACTLY ONE `AgentEndEvent` per `communicate()`: the clean return, the
 crash/timeout kernel, and the outer `except` that can fire *after* a normal finalize (a
