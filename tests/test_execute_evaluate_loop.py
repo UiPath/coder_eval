@@ -911,10 +911,10 @@ def test_primary_checker_failure_is_not_reclassified_by_secondary_diagnostic_fai
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "budget"])
 def test_finalize_grading_failure_does_not_replace_current_execution_fact(tmp_path: Path, kind: str) -> None:
-    from coder_eval.errors import BudgetExceededError, TaskTimeoutError
+    from coder_eval.errors import AgentConfigError, BudgetExceededError, TaskTimeoutError
 
     error = {
-        "error": RuntimeError("original execution error"),
+        "error": AgentConfigError("original execution error"),
         "timeout": TaskTimeoutError(30),
         "budget": BudgetExceededError("usd", actual=2, limit=1),
     }[kind]
@@ -925,7 +925,7 @@ def test_finalize_grading_failure_does_not_replace_current_execution_fact(tmp_pa
     }[kind]
     run_dir = tmp_path / "execution-and-grading-errors"
     with (
-        patch("coder_eval.agents.noop_agent.NoOpAgent.communicate", new=AsyncMock(side_effect=error)),
+        patch("coder_eval.agents.noop_agent.NoOpAgent.communicate", new=AsyncMock(side_effect=error)) as communicate,
         patch(
             "coder_eval.models.EvaluationResult.calculate_weighted_score",
             side_effect=ValueError("score computation incident"),
@@ -933,6 +933,7 @@ def test_finalize_grading_failure_does_not_replace_current_execution_fact(tmp_pa
     ):
         _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
 
+    communicate.assert_awaited_once()
     row = _row(_task_dir(run_dir))
     assert row["final_status"] == expected.value
     assert row["error_phase"] == "execution"
@@ -991,28 +992,29 @@ def test_failed_regrade_restores_the_immediate_verdict_not_the_original_backup(
 
 
 def test_resume_successfully_grades_an_execution_error_without_discarding_the_verdict(tmp_path: Path) -> None:
-    from coder_eval.errors import ReferenceTamperedError
+    from coder_eval.errors import AgentConfigError
 
     run_dir = tmp_path / "execution-error-resume"
     with patch(
         "coder_eval.agents.noop_agent.NoOpAgent.communicate",
-        new=AsyncMock(side_effect=ReferenceTamperedError("original agent failure")),
-    ):
+        new=AsyncMock(side_effect=AgentConfigError("original agent failure")),
+    ) as communicate:
         _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
-    task_dir = _task_dir(run_dir)
-    original = _row(task_dir)
-    assert original["final_status"] == FinalStatus.ERROR.value
-    assert original["error_phase"] == "execution"
-    assert original["weighted_score"] is None
+        task_dir = _task_dir(run_dir)
+        original = _row(task_dir)
+        assert original["final_status"] == FinalStatus.ERROR.value
+        assert original["error_phase"] == "execution"
+        assert original["weighted_score"] is None
 
-    _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"], expect_exit=1)
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"], expect_exit=1)
 
-    graded = _row(task_dir)
-    assert graded["final_status"] == FinalStatus.ERROR.value
-    assert graded["error_message"] == original["error_message"]
-    assert graded["weighted_score"] == 1.0
-    assert len(graded["success_criteria_results"]) == 2
-    assert graded["grading_error"] is None
+        graded = _row(task_dir)
+        assert graded["final_status"] == FinalStatus.ERROR.value
+        assert graded["error_message"] == original["error_message"]
+        assert graded["weighted_score"] == 1.0
+        assert len(graded["success_criteria_results"]) == 2
+        assert graded["grading_error"] is None
+    communicate.assert_awaited_once()
 
 
 @pytest.mark.parametrize("command", ["evaluate", "resume"])
