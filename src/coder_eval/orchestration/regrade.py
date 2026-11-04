@@ -574,28 +574,34 @@ def back_up_pre_grade_record(run_dir: Path) -> None:
         logger.warning("Could not preserve the pre-grade record at %s: %s", backup, e)
 
 
-def restore_pre_grade_record(run_dir: Path) -> bool:
-    """Put the ungraded ``task.json`` back after a grading crash.
+def restore_pre_grade_record(
+    run_dir: Path,
+    *,
+    prior_result: EvaluationResult | None = None,
+    grading_result: EvaluationResult | None = None,
+) -> bool:
+    """Restore the earlier verdict after a failed regrade, keeping new grading provenance.
 
-    ``Orchestrator._finalize_result`` writes ``task.json`` into its run dir
-    *before* returning, so by the time a caller sees ``FinalStatus.ERROR`` the
-    ERROR row is already on disk whenever the grade wrote into the run being
-    graded (always, on ``run --resume``). Both commands treat ERROR as complete,
-    so the row would be permanently un-regradeable — and a caller that only fixes
-    its in-memory result leaves ``run.json`` disagreeing with ``task.json``.
-
-    Returns whether the restore happened; there is nothing to restore when the
-    grade wrote elsewhere and the original was never replaced.
+    Prefer the validated immediate prior result; the immutable first backup can
+    predate a later valid verdict. The backup is never changed. Return whether a
+    prior record was restored.
     """
     source, backup = run_dir / TASK_JSON_FILENAME, run_dir / PRE_GRADE_JSON_FILENAME
-    if not backup.is_file() or backup.is_symlink() or source.is_symlink():
+    if source.is_symlink() or (prior_result is None and (not backup.is_file() or backup.is_symlink())):
         return False
     try:
-        text = backup.read_text(encoding="utf-8")
+        restored = prior_result.model_copy(deep=True) if prior_result is not None else None
+        text = restored.model_dump_json(indent=2) if restored is not None else backup.read_text(encoding="utf-8")
+        if grading_result is not None and grading_result.grading_error is not None:
+            if restored is None:
+                restored = EvaluationResult.model_validate_json(text)
+            restored.grading_error = grading_result.grading_error
+            restored.error_history = grading_result.error_history
+            text = restored.model_dump_json(indent=2)
         if source.is_file() and source.read_text(encoding="utf-8") == text:
             return False  # never overwritten; nothing to undo
         write_text_atomic(source, text)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         logger.warning("Could not restore the ungraded record at %s: %s", source, e)
         return False
     logger.info("Restored the ungraded record at %s after a grading failure.", source)

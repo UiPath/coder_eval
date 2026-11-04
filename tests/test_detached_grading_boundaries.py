@@ -17,6 +17,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +30,7 @@ from coder_eval.models import (
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
+    GradingErrorInfo,
     ResolvedTask,
     SandboxConfig,
     TaskDefinition,
@@ -433,9 +435,8 @@ class TestGradingCrashLeavesTheRowRegradeable:
     takes the ``else:`` arm — not the ``except`` arm the pre-existing test
     exercises by patching ``regrade_in_place`` to raise.
 
-    Both arms must leave ``task.json`` ungraded. ERROR is "complete" for both
-    commands, so an ERROR row written over a NOT_GRADED one can never be graded
-    again without hand-restoring ``task.execute.json``.
+    Explicit grader failures restore the earlier ungraded row with provenance.
+    Unclassified and execution-origin ERROR outcomes remain conservative facts.
     """
 
     @staticmethod
@@ -475,7 +476,12 @@ class TestGradingCrashLeavesTheRowRegradeable:
         assert restore_pre_grade_record(run_dir) is False
         assert victim.read_text(encoding="utf-8") == "keep me"
 
-    async def test_the_resume_error_arm_restores_and_folds_back_ungraded(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("phase", ["grading", "execution", None])
+    async def test_the_resume_error_arm_restores_and_folds_back_ungraded(
+        self,
+        tmp_path: Path,
+        phase: Literal["grading", "execution"] | None,
+    ) -> None:
         """The arm a real grading crash takes: `regrade_in_place` RETURNS an
         ERROR result instead of raising."""
         from coder_eval.cli.run_command import _grade_resumed_tasks
@@ -497,6 +503,10 @@ class TestGradingCrashLeavesTheRowRegradeable:
 
         async def _crash(**_kwargs) -> EvaluationResult:
             errored = _result(FinalStatus.ERROR)
+            errored.error_phase = phase
+            errored.error_message = "mock failure"
+            if phase == "grading":
+                errored.grading_error = GradingErrorInfo(message="mock failure", recorded_at=datetime(2020, 1, 1))
             (run_dir / TASK_JSON_FILENAME).write_text(errored.model_dump_json(indent=2), encoding="utf-8")
             return errored
 
@@ -508,13 +518,17 @@ class TestGradingCrashLeavesTheRowRegradeable:
 
         assert len(graded) == 1
         folded = graded[0][1].result
-        assert folded.final_status is FinalStatus.NOT_GRADED
-        assert "Grading errored during --resume" in (folded.error_message or "")
+        expected = FinalStatus.NOT_GRADED if phase == "grading" else FinalStatus.ERROR
+        assert folded.final_status is expected
+        if phase == "grading":
+            assert "Grading errored during --resume" in (folded.error_message or "")
+        else:
+            assert folded.error_message == "mock failure"
         # And the on-disk row too — fixing only the in-memory result leaves
         # run.json disagreeing with task.json, and task.json is what a later
         # --resume reads.
         on_disk = EvaluationResult.model_validate_json((run_dir / TASK_JSON_FILENAME).read_text(encoding="utf-8"))
-        assert on_disk.final_status is FinalStatus.NOT_GRADED
+        assert on_disk.final_status is expected
 
     async def test_an_unreadable_row_still_appears_as_ungraded(self, tmp_path: Path) -> None:
         """Dropping it removed it from run.json AND from `tasks_not_graded`,

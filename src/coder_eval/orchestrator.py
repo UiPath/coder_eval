@@ -46,6 +46,7 @@ from .models import (
     DirectRoute,
     EvaluationResult,
     FinalStatus,
+    GradingErrorInfo,
     JudgeCriterionResult,
     LiteLLMRoute,
     PostRunCommand,
@@ -356,6 +357,8 @@ class Orchestrator:
         # sets it to widen the egress allowlist for grading.
         self.before_grading: Callable[[], Awaitable[None]] | None = None
         self._grading_started = False
+        # Preserve primary and secondary diagnostic identities until outer classification.
+        self._grading_failures: list[tuple[Exception, GradingErrorInfo]] = []
         self.sandbox = sandbox
         self.variant_id = variant_id
         self.source_yaml = source_yaml
@@ -461,8 +464,8 @@ class Orchestrator:
         Rationale: .claude/notes/orchestration.md § The terminal-status chain
         """
         assert self.result is not None, "Result not initialized"
-        inherited = self.prior_result.final_status if self.prior_result is not None else None
-        if inherited is not None and inherited.is_execution_fact:
+        if self.prior_result is not None and self.prior_result.has_execution_failure:
+            inherited = self.prior_result.final_status
             logger.info(
                 "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
                 inherited.value,
@@ -575,62 +578,21 @@ class Orchestrator:
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
-            except TaskTimeoutError as e:
-                # Task-level timeout gets a dedicated status (not generic ERROR)
-                self.result.final_status = FinalStatus.TIMEOUT
-                self.result.error_message = str(e)
-
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component="orchestrator.task_timeout",
-                    agent_name=self._agent_name,
-                )
-
-                logger.error(f"Task timed out: {e}")
-
-                # Nothing else on this path recovers the in-flight turn: the
-                # cancel arrives as a BaseException, so it never reaches the retry
-                # executor's per-attempt hook.
-                await self._drain_killed_turn()
-            except BudgetExceededError as e:
-                # Map token-budget breaches and cost-budget breaches to distinct
-                # statuses so per-task records preserve the failure mode.
-                if e.budget_name == "usd":
-                    self.result.final_status = FinalStatus.COST_BUDGET_EXCEEDED
-                    component = "orchestrator.run_limits.cost"
+            except (TaskTimeoutError, BudgetExceededError) as e:
+                self._record_limit_error(e)
+                if isinstance(e, TaskTimeoutError):
+                    logger.error(f"Task timed out: {e}")
+                    await self._drain_killed_turn()
                 else:
-                    self.result.final_status = FinalStatus.TOKEN_BUDGET_EXCEEDED
-                    component = "orchestrator.run_limits.tokens"
-                self.result.error_message = str(e)
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component=component,
-                    agent_name=self._agent_name,
-                )
-                logger.warning(f"Run limit exceeded: {e}")
+                    logger.warning(f"Run limit exceeded: {e}")
             except Exception as e:
-                # Handle catastrophic errors
-                self.result.final_status = FinalStatus.ERROR
-                self.result.error_message = str(e)
-
                 # Determine which component failed (setup vs. iteration N)
                 if self.result.iteration_count == 0:
                     failed_component = "orchestrator.setup"
                 else:
                     failed_component = f"orchestrator.iteration_{self.result.iteration_count}"
 
-                # Capture detailed error context
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),  # Actual iteration attempt (1-indexed)
-                    component=failed_component,
-                    agent_name=self._agent_name,
-                )
+                self._record_error(e, component=failed_component)
 
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
@@ -664,7 +626,11 @@ class Orchestrator:
                     FinalStatus.TOKEN_BUDGET_EXCEEDED,
                     FinalStatus.COST_BUDGET_EXCEEDED,
                 }:
-                    self.result.error_log_tail = log_tail.get_text() or None
+                    tail = log_tail.get_text() or None
+                    if self.result.grading_error is not None:
+                        self.result.grading_error.log_tail = tail
+                    if self.prior_result is None or not self.prior_result.has_execution_failure:
+                        self.result.error_log_tail = tail
                 self._finalize_result(start_time)
                 if teardown_interrupt is not None:
                     raise teardown_interrupt
@@ -709,6 +675,24 @@ class Orchestrator:
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
+        self.result.error_phase = prior.error_phase
+        self.result.error_history = [incident.model_copy(deep=True) for incident in prior.error_history]
+        if prior.grading_error is not None:
+            self.result.error_history.append(prior.grading_error.model_copy(deep=True))
+        elif prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
+            self.result.error_history.append(
+                GradingErrorInfo(
+                    message=prior.error_message or "Grading failed",
+                    details=prior.error_details,
+                    log_tail=prior.error_log_tail,
+                    recorded_at=prior.completed_at or prior.started_at,
+                )
+            )
+        if prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
+            self.result.error_message = None
+            self.result.error_details = None
+            self.result.error_log_tail = None
+            self.result.error_phase = None
         self.result.sdk_options = prior.sdk_options
         self.result.agent_config = prior.agent_config
         self.result.expected_commands = prior.expected_commands
@@ -861,11 +845,7 @@ class Orchestrator:
         checked: CriteriaResults = []
         if runnable:
             await self._start_grading()
-            checked = await self.success_checker.check_all_async(
-                runnable,
-                reference_dir=self._reference_dir,
-                turn_records=self.result.iterations,
-            )
+            checked = await self._check_criteria(runnable)
 
         if len(checked) != len(runnable):
             raise ValueError(
@@ -881,10 +861,112 @@ class Orchestrator:
                 recovered.append(next(checked_iter))
         self.result.post_failure_criteria_results = recovered
 
+    def _grading_error_info(self, error: Exception, component: str) -> GradingErrorInfo:
+        assert self.result is not None
+        return GradingErrorInfo(
+            message=str(error),
+            details=create_error_context(
+                error=error,
+                task_id=self.task.task_id,
+                attempt=max(self.result.iteration_count, 1),
+                component=component,
+                agent_name=self._agent_name,
+            ),
+            recorded_at=datetime.now(),
+        )
+
+    async def _check_criteria(self, criteria: list[SuccessCriterion]) -> CriteriaResults:
+        assert self.success_checker is not None
+        assert self.result is not None
+        try:
+            return await self.success_checker.check_all_async(
+                criteria,
+                reference_dir=self._reference_dir,
+                turn_records=self.result.iterations,
+            )
+        except ReferenceTamperedError:
+            raise
+        except Exception as error:
+            self._grading_failures.append((error, self._grading_error_info(error, "orchestrator.grading")))
+            raise
+
+    def _publish_grading_failures(self, primary: Exception | None = None) -> bool:
+        assert self.result is not None
+        if not self._grading_failures:
+            return False
+        selected = next((pair for pair in self._grading_failures if pair[0] is primary), self._grading_failures[-1])
+        if self.result.grading_error is not None:
+            self.result.error_history.append(self.result.grading_error)
+        self.result.grading_error = selected[1]
+        self.result.error_history.extend(info for error, info in self._grading_failures if error is not selected[0])
+        self._grading_failures.clear()
+        return selected[0] is primary
+
+    def _record_limit_error(self, error: TaskTimeoutError | BudgetExceededError) -> None:
+        assert self.result is not None
+        if self.prior_result is not None or any(cause is error for cause, _ in self._grading_failures):
+            self._record_error(error, component="orchestrator.grading")
+            return
+        self.result.error_phase = "execution"
+        self._publish_grading_failures()
+        if isinstance(error, TaskTimeoutError):
+            self.result.final_status = FinalStatus.TIMEOUT
+            component = "orchestrator.task_timeout"
+        elif error.budget_name == "usd":
+            self.result.final_status = FinalStatus.COST_BUDGET_EXCEEDED
+            component = "orchestrator.run_limits.cost"
+        else:
+            self.result.final_status = FinalStatus.TOKEN_BUDGET_EXCEEDED
+            component = "orchestrator.run_limits.tokens"
+        self.result.error_message = str(error)
+        self.result.error_details = create_error_context(
+            error=error,
+            task_id=self.task.task_id,
+            attempt=max(self.result.iteration_count, 1),
+            component=component,
+            agent_name=self._agent_name,
+        )
+
+    def _record_error(self, error: Exception, *, component: str, grading: bool = False) -> None:
+        assert self.result is not None
+        if grading:
+            self._grading_failures.append((error, self._grading_error_info(error, component)))
+        checker_failure = self._publish_grading_failures(error)
+        is_grading = not isinstance(error, ReferenceTamperedError) and (
+            checker_failure or self.prior_result is not None
+        )
+        if is_grading and not checker_failure:
+            if self.result.grading_error is not None:
+                self.result.error_history.append(self.result.grading_error)
+            self.result.grading_error = self._grading_error_info(error, component)
+        if self.prior_result is not None and self.prior_result.has_execution_failure:
+            if not is_grading:
+                self.result.grading_error = self._grading_error_info(error, component)
+            self.result.final_status = self.prior_result.final_status
+            return
+        if is_grading and self.result.has_execution_failure:
+            return
+        self.result.final_status = FinalStatus.ERROR
+        self.result.error_phase = "grading" if is_grading else "execution"
+        self.result.error_message = str(error)
+        self.result.error_details = create_error_context(
+            error=error,
+            task_id=self.task.task_id,
+            attempt=max(self.result.iteration_count, 1),
+            component=component,
+            agent_name=self._agent_name,
+        )
+
     async def _start_grading(self) -> None:
         if self.before_grading is not None and not self._grading_started:
             self._grading_started = True
-            await self.before_grading()
+            try:
+                await self.before_grading()
+            except ReferenceTamperedError:
+                raise
+            except Exception as error:
+                self._grading_failures.append((error, self._grading_error_info(error, "orchestrator.before_grading")))
+                raise
 
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
@@ -942,15 +1024,7 @@ class Orchestrator:
         except ValueError as e:
             logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
             self.result.weighted_score = None
-            self.result.final_status = FinalStatus.ERROR
-            self.result.error_message = str(e)
-            self.result.error_details = create_error_context(
-                error=e,
-                task_id=self.task.task_id,
-                attempt=max(self.result.iteration_count, 1),
-                component="orchestrator.finalize.weighted_score",
-                agent_name=self._agent_name,
-            )
+            self._record_error(e, component="orchestrator.finalize.weighted_score", grading=True)
 
     def _finalize_regrade_timing(self) -> None:
         """On a re-grade, keep the AGENT run's timing and artifacts pointer.
@@ -2142,11 +2216,7 @@ class Orchestrator:
                 self.result.iteration_count = 1
             # Evaluate-only loads the reference too: include_reference judges
             # expect it populated even when no agent runs.
-            criteria_results = await self.success_checker.check_all_async(
-                self.task.success_criteria,
-                reference_dir=self._reference_dir,
-                turn_records=self.result.iterations,
-            )
+            criteria_results = await self._check_criteria(self.task.success_criteria)
             self.result.success_criteria_results = criteria_results
             return self._select_gate()
 
@@ -2220,11 +2290,7 @@ class Orchestrator:
         logger.debug("Checking success criteria")
         await self._start_grading()
         await self._verify_reference_integrity()
-        criteria_results = await self.success_checker.check_all_async(
-            self.task.success_criteria,
-            reference_dir=self._reference_dir,
-            turn_records=self.result.iterations,
-        )
+        criteria_results = await self._check_criteria(self.task.success_criteria)
         self.result.success_criteria_results = criteria_results
 
         # all_passed is single-sourced via the model gate; the counts below are
@@ -2301,11 +2367,7 @@ class Orchestrator:
                 + "here means that refusal was bypassed."
             )
         await self._verify_reference_integrity()
-        criteria_results = await self.success_checker.check_all_async(
-            self.task.success_criteria,
-            reference_dir=self._reference_dir,
-            turn_records=self.result.iterations,
-        )
+        criteria_results = await self._check_criteria(self.task.success_criteria)
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
         self.result.success_criteria_results = criteria_results
         self.result.calculate_weighted_score(self.task.success_criteria)

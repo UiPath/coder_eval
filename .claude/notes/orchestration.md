@@ -86,6 +86,36 @@ produces is under isolation.md § Detached grading and `Sandbox.adopt`).
 `tests/test_seed_from_prior_result.py` pins the status in a test of its own, apart from
 the loop over the real execution facts.
 
+### Grading incidents and execution facts
+
+`FinalStatus.is_execution_fact` is deliberately conservative and context-free.
+`EvaluationResult.has_execution_failure` is the result-aware predicate: only an
+explicit `ERROR` with `error_phase: grading` can be replaced by a new verdict.
+Unknown legacy ERROR, TIMEOUT, build and budget outcomes remain execution facts.
+No error-message matching or transcript inference is used.
+
+The orchestrator retains the exact exceptions thrown by criteria and the
+`before_grading` hook. A secondary diagnostic checker failure cannot replace the
+identity of the primary exception. Reference-integrity verification stays outside
+this boundary: an agent changing its answer key is an execution failure.
+
+`grading_error` is separate from the terminal execution error because both can
+exist at once. Regrading a crashed run may itself fail; the run keeps its original
+status, message, structured context and log tail while reporting the new grader
+incident. A later successful grade archives that incident in `error_history`.
+Final score calculation follows the same rule for an execution fault already
+recorded in the current run, not only a prior result.
+
+Explicit grading ERROR rows remain eligible for native resume's existing grading
+path even if a partial criteria vector or zero score was recorded. That path never
+replays the agent. Failed regrades preserve the earlier NOT_GRADED/SUCCESS/FAILURE
+record where applicable, adding grading provenance rather than discarding it.
+Restoration uses the validated immediate prior row; the first audit backup remains
+immutable and can predate a later valid verdict.
+Already explicit grading ERROR rows retain their new current grading incident and
+history; execution facts keep their original outcome. The CLI reports the current
+grader incident and exits non-zero before a misleading criteria-count error.
+
 ### The four grading sites
 
 `grade=False` is checked in exactly four places, and they do not behave alike:

@@ -28,6 +28,7 @@ from coder_eval.models import (
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
+    GradingErrorInfo,
     PostRunResult,
     SimulationTelemetry,
     TaskDefinition,
@@ -47,6 +48,8 @@ CARRIED = {
     "early_stop",
     "max_turns_exhausted",
     "error_message",
+    "error_phase",
+    "error_history",
     "error_details",
     "error_log_tail",
     "sdk_options",
@@ -68,6 +71,7 @@ CARRIED = {
 RECOMPUTED = {
     # The verdict itself: exactly what the grading pass produces.
     "final_status",
+    "grading_error",
     "weighted_score",
     "success_criteria_results",
     "post_failure_criteria_results",
@@ -119,6 +123,8 @@ def _prior() -> EvaluationResult:
         simulation=SimulationTelemetry(n_trials=3, replicate_index=2, stop_reason="stop_token", total_turns=4),
         max_turns_exhausted=True,
         error_message="prior message",
+        error_phase="execution",
+        error_history=[GradingErrorInfo(message="prior grader incident", recorded_at=datetime(2020, 1, 1))],
         error_details={"where": "prior"},
         error_log_tail="prior tail",
         sdk_options={"opt": "prior"},

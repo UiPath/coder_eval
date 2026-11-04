@@ -908,17 +908,29 @@ async def _grade_resumed_tasks(
                     f"{result.error_message}\n{grading_note}" if result.error_message else grading_note
                 )
         else:
-            if result.final_status is FinalStatus.ERROR:
+            if result.grading_error is not None and (
+                prior.has_execution_failure
+                or (prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading")
+            ):
+                console.print(
+                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.grading_error.message}); "
+                    + "recorded grading provenance while preserving execution facts."
+                )
+            elif result.grading_error is not None or (
+                result.final_status is FinalStatus.ERROR and result.error_phase == "grading"
+            ):
                 # A grading crash is not a verdict about the run, and
                 # _finalize_result has already written the ERROR task.json into
                 # this directory -- which is what a later --resume reads.
                 # Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
-                restore_pre_grade_record(rt.run_dir)
+                restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result)
                 console.print(
                     f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.error_message}); "
                     + "keeping the ungraded row so it stays re-gradeable."
                 )
                 prior.error_message = f"Grading errored during --resume: {result.error_message}"
+                prior.grading_error = result.grading_error
+                prior.error_history = result.error_history
                 result = prior
         graded.append(
             (

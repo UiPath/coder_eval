@@ -411,6 +411,8 @@ def _owes_a_grade(result: EvaluationResult) -> bool:
 
     Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
     """
+    if result.final_status is FinalStatus.ERROR and result.error_phase == "grading":
+        return True
     if result.weighted_score is not None or result.success_criteria_results:
         return False
     return result.final_status is FinalStatus.NOT_GRADED or result.iteration_count > 0

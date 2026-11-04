@@ -519,19 +519,30 @@ def _report_and_exit(
     # error. `inherited` says whether the terminal status describes THIS pass or was
     # carried over from the run being graded.
     # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
-    inherited = prior is not None and prior.final_status.is_execution_fact
+    inherited = prior is not None and prior.has_execution_failure
+
+    if result.grading_error is not None:
+        console.print(f"\n[red]✗ Evaluation error: {result.grading_error.message}[/red]")
+        if prior is not None:
+            if inherited or (prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading"):
+                if target.mode is EvaluateMode.RUN_DIR:
+                    _write_back(target.target, result, prepared_run_dir)
+                console.print("[yellow]⚠[/] Grading incident recorded; original execution facts are preserved.")
+            else:
+                restore_pre_grade_record(target.target, prior_result=prior, grading_result=result)
+                console.print("[yellow]⚠[/] Grading errored; prior verdict restored with grading provenance.")
+        raise typer.Exit(1)
 
     if result.final_status is FinalStatus.ERROR and not inherited:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
         if prior is not None:
-            # A grading-time crash is not a verdict about the run. Leaving ERROR
-            # on disk replaces a re-gradeable NOT_GRADED row with one BOTH
-            # commands treat as permanently complete.
-            restore_pre_grade_record(target.target)
-            console.print(
-                f"[yellow]⚠[/] Grading errored; {target.target / TASK_JSON_FILENAME} is left "
-                + "ungraded so the run stays re-gradeable."
-            )
+            # Restore explicit grader faults only; new execution and reference
+            # integrity failures must remain recorded as facts.
+            if result.error_phase == "grading":
+                restore_pre_grade_record(target.target, prior_result=prior, grading_result=result)
+                console.print("[yellow]⚠[/] Grading errored; the prior verdict is preserved.")
+            elif target.mode is EvaluateMode.RUN_DIR:
+                _write_back(target.target, result, prepared_run_dir)
         raise typer.Exit(1)
 
     # Display results
@@ -588,7 +599,7 @@ def _report_and_exit(
         )
         _write_back(target.target, result, prepared_run_dir)
 
-    if result.final_status.is_execution_fact:
+    if result.has_execution_failure:
         # The criteria tally is real -- it is why the table above still renders --
         # but it is not the row's outcome, and the exit code must agree with
         # run.json rather than with the tally.
