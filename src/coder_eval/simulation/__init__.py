@@ -23,7 +23,8 @@ from coder_eval.simulation.termination import DialogStopReason, evaluate_stop
 from coder_eval.simulation.user_simulator import SimulatorResult, UserSimulator
 
 
-type DialogUser = UserSimulator | ScriptedUser
+# A plain alias: CodeQL does not read a `type` statement as defining its `__all__` name.
+DialogUser = UserSimulator | ScriptedUser
 
 
 __all__ = [
