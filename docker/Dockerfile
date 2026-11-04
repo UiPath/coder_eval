@@ -34,13 +34,16 @@ ARG CLAUDE_CODE_VERSION=2.1.281
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+    && npm install -g --engine-strict @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Pi Node CLI, pinned — same rationale as the Claude Code pin above (the agent
 # binary is a dominant non-model driver of results; @latest would freeze
 # nondeterministically under layer caching). Node 22 + npm are already present.
+# --engine-strict (here and in docker/Dockerfile.runtime) turns a CLI pin whose
+# `engines.node` floor is above the installed Node into a build failure instead
+# of an EBADENGINE warning that installs anyway.
 ARG PI_VERSION=0.87.1
-RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
+RUN npm install -g --engine-strict @earendil-works/pi-coding-agent@${PI_VERSION}
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path.
 # Pinned for the same reason as the CLIs above: agents run `uv` themselves
@@ -87,7 +90,10 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # so an OpenCode env-auth run would authenticate once the CLI is baked; the CLI is
 # the remaining blocker.) Adding it means a pinned version that travels with the release
 # tag (as CLAUDE_CODE_VERSION / PI_VERSION do) plus an env_passthrough block; see
-# docs/agents/OPENCODE.md "Running in Docker".
+# docs/agents/OPENCODE.md "Running in Docker". A Node CLI baked here must also be
+# baked, at the same pin, into docker/Dockerfile.runtime, with a pin-parity test
+# in tests/test_image_from_dockerfiles.py — otherwise inject-mode tasks find no
+# CLI, as happened with Pi before it was added to the kit.
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which
