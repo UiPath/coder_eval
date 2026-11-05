@@ -851,13 +851,14 @@ async def _grade_resumed_tasks(
 
     Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
     """
+    from ..errors import GradingError
     from ..orchestration.regrade import (
         RegradeError,
         back_up_pre_grade_record,
         default_workspace,
         load_prior_result,
         regrade_in_place,
-        restore_pre_grade_record,
+        write_grading_incident,
     )
 
     graded: list[tuple[ResolvedTask, TaskResult]] = []
@@ -893,58 +894,17 @@ async def _grade_resumed_tasks(
                 replicate_index=rt.replicate_index,
                 allow_host_grading=allow_host_grading,
             )
-        except (RegradeError, OSError, RuntimeError, ValueError) as e:
-            console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
-            if prior is None:
-                # Dropping it removes it from run.json AND from tasks_not_graded,
-                # which is what the exit gate counts. Stand in a placeholder.
-                result = _unreadable_row_placeholder(rt, e)
-            else:
-                # APPEND, don't replace: a row carrying an execution fact already
-                # names its own cause, and overwriting published the wrong one
-                # while the on-disk record still named the right one.
+        except GradingError as error:
+            assert prior is not None
+            console.print(f"[yellow]⚠[/] Grading {escape(rt.task.task_id)} errored: {escape(str(error))}")
+            try:
+                result = write_grading_incident(rt.run_dir, prior, error)
+            except (OSError, RegradeError) as write_error:
+                console.print(f"[yellow]⚠[/] Could not record the grading incident: {escape(str(write_error))}")
                 result = prior
-                grading_note = f"Grading failed during --resume: {e}"
-                result.error_message = (
-                    f"{result.error_message}\n{grading_note}" if result.error_message else grading_note
-                )
-        else:
-            if result.grading_error is not None and prior.has_execution_failure:
-                incident = result.grading_error
-                if restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result):
-                    prior.grading_error = incident
-                    prior.error_history = result.error_history
-                    result = prior
-                    console.print(
-                        f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(incident.message)}); "
-                        + "recorded grading provenance while preserving execution facts."
-                    )
-                else:
-                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
-            elif result.grading_error is not None and (
-                prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading"
-            ):
-                console.print(
-                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(result.grading_error.message)}); "
-                    + "recorded grading provenance while preserving execution facts."
-                )
-            elif result.grading_error is not None or (
-                result.final_status is FinalStatus.ERROR and result.error_phase == "grading"
-            ):
-                # A grading crash is not a verdict about the run, and
-                # _finalize_result has already written the ERROR task.json into
-                # this directory -- which is what a later --resume reads.
-                # Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
-                if restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result):
-                    console.print(
-                        f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(result.error_message or '')}); "
-                        + "keeping the prior verdict so it stays re-gradeable."
-                    )
-                    prior.grading_error = result.grading_error
-                    prior.error_history = result.error_history
-                    result = prior
-                else:
-                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
+        except (RegradeError, OSError, RuntimeError, ValueError) as error:
+            console.print(f"[yellow]⚠[/] Could not grade {escape(rt.task.task_id)}: {escape(str(error))}")
+            result = _unreadable_row_placeholder(rt, error) if prior is None else prior
         graded.append(
             (
                 rt,

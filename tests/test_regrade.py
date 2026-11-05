@@ -1242,22 +1242,17 @@ class TestContainerGradeEmitsTelemetryHostSide:
         assert events[0][1]["Driver"] == "docker"
 
 
-def test_invalid_backup_does_not_overwrite_the_current_record_on_grading_failure(tmp_path: Path) -> None:
-    from datetime import datetime
+def test_incident_write_does_not_read_or_change_an_invalid_backup(tmp_path: Path) -> None:
+    from coder_eval.errors import GradingError
+    from coder_eval.orchestration.regrade import write_grading_incident
 
-    from coder_eval.models import GradingErrorInfo
-    from coder_eval.orchestration.regrade import restore_pre_grade_record
-
-    current = _result(
-        final_status=FinalStatus.ERROR,
-        grading_error=GradingErrorInfo(message="current grading incident", recorded_at=datetime(2020, 1, 1)),
-    )
+    prior = _result(final_status=FinalStatus.SUCCESS)
     source = tmp_path / TASK_JSON_FILENAME
-    source.write_text(current.model_dump_json())
-    original = source.read_bytes()
+    source.write_text(prior.model_dump_json())
     (tmp_path / PRE_GRADE_JSON_FILENAME).write_text("{broken record")
-
-    assert restore_pre_grade_record(tmp_path, grading_result=current) is False
-
-    assert source.read_bytes() == original
+    selected = write_grading_incident(
+        tmp_path, prior, GradingError(RuntimeError("New grading incident"), component="test.grading")
+    )
+    assert selected.final_status is FinalStatus.SUCCESS
+    assert selected.error_history[-1].message == "New grading incident"
     assert (tmp_path / PRE_GRADE_JSON_FILENAME).read_text() == "{broken record"

@@ -124,33 +124,33 @@ class TestCheckRunLimitsUnit:
     def test_input_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "input_tokens"
-        assert exc.value.actual == 2000
-        assert exc.value.limit == 1000
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "input_tokens"
+        assert error.actual == 2000
+        assert error.limit == 1000
 
     def test_output_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(output_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "output_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "output_tokens"
 
     def test_total_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=2500)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=1500, output_tokens=1500))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "total_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "total_tokens"
 
     def test_cost_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "usd"
-        assert exc.value.actual == pytest.approx(0.20)
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "usd"
+        assert error.actual == pytest.approx(0.20)
 
     def test_cost_skipped_when_no_cost_reported(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
@@ -180,16 +180,15 @@ class TestCheckRunLimitsUnit:
             _make_task(run_limits=RunLimits(max_input_tokens=1000, count_cached_input=True)), tmp_path
         )
         orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.actual == 1100
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.actual == 1100
 
     def test_cumulative_across_turns(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(iteration=1, input_tokens=600))
         orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
-        with pytest.raises(BudgetExceededError):
-            orch._check_run_limits(iteration=2)
+        assert isinstance(orch._check_run_limits(iteration=2), BudgetExceededError)
 
 
 async def _run_orchestrator(

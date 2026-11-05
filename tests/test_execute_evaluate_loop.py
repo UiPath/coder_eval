@@ -21,6 +21,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
+from coder_eval.errors import GradingError
 from coder_eval.models import FinalStatus
 
 
@@ -300,17 +301,18 @@ def test_run_resume_keeps_the_row_regradeable_when_grading_crashes(tmp_path: Pat
 
     with patch(
         "coder_eval.orchestration.regrade.regrade_in_place",
-        new=AsyncMock(side_effect=RuntimeError("checker exploded")),
+        new=AsyncMock(side_effect=GradingError(RuntimeError("checker exploded"), component="fixture.grading")),
     ):
         result = runner.invoke(app, ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
 
     assert result.exit_code != 0, "a resume that graded nothing must not report success"
     assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
-    # The reason is durable, not console-only. It lands in run.json rather than
-    # task.json: task.json stays the pristine execute record, which is what keeps
-    # the row re-gradeable below.
+    row = _row(_task_dir(run_dir))
+    assert row["error_history"][-1]["message"] == "checker exploded"
+    assert row["error_message"] is None
     summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    assert "checker exploded" in str(summary["task_results"])
+    assert summary["task_results"][0]["status"] == row["final_status"]
+    assert summary["task_results"][0]["weighted_score"] == row["weighted_score"]
 
     # And the row really is still re-gradeable.
     _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
@@ -781,7 +783,7 @@ def test_repaired_grading_error_reaches_a_verdict_without_replaying_execution(
     task_dir = _task_dir(run_dir)
     failed = _row(task_dir)
     assert failed["error_phase"] == "grading"
-    assert failed["grading_error"]["message"] == "offline judge unavailable"
+    assert failed["error_message"] == "offline judge unavailable"
     if verdict is FinalStatus.FAILURE:
         next(run_dir.glob("**/artifacts/**/proof.txt")).unlink()
 
@@ -797,7 +799,7 @@ def test_repaired_grading_error_reaches_a_verdict_without_replaying_execution(
     assert repaired["iterations"] == failed["iterations"]
     assert repaired["error_phase"] is None
     assert repaired["error_message"] is None
-    assert repaired["grading_error"] is None
+    assert "grading_error" not in repaired
     assert [error["message"] for error in repaired["error_history"]] == ["offline judge unavailable"]
 
 
@@ -818,14 +820,14 @@ def test_repeated_grading_errors_remain_auditable_and_can_be_repaired(tmp_path: 
         result = _invoke(["evaluate", str(task_dir)], expect_exit=1)
     failed = _row(task_dir)
     assert "second judge incident" in result.output
-    assert failed["grading_error"]["message"] == "second judge incident"
-    assert [error["message"] for error in failed["error_history"]] == ["first judge incident"]
+    assert failed["error_history"][-1]["message"] == "second judge incident"
+    assert [error["message"] for error in failed["error_history"]] == ["second judge incident"]
 
     _invoke(["evaluate", str(task_dir)])
 
     repaired = _row(task_dir)
     assert repaired["final_status"] == FinalStatus.SUCCESS.value
-    assert repaired["grading_error"] is None
+    assert "grading_error" not in repaired
     assert [error["message"] for error in repaired["error_history"]] == [
         "first judge incident",
         "second judge incident",
@@ -878,18 +880,18 @@ def test_failed_regrade_preserves_execution_fact_and_records_the_grader_incident
     assert failed["error_message"] == prior["error_message"]
     assert failed["error_details"] == prior["error_details"]
     assert failed["error_phase"] == phase
-    assert failed["grading_error"]["message"] == str(error)
+    assert failed["error_history"][-1]["message"] == str(error)
 
     _invoke(["evaluate", str(task_dir)], expect_exit=1)
 
     repaired = _row(task_dir)
     assert repaired["final_status"] == status.value
     assert repaired["error_message"] == prior["error_message"]
-    assert repaired["grading_error"] is None
+    assert "grading_error" not in repaired
     assert repaired["error_history"][-1]["message"] == str(error)
 
 
-def test_primary_checker_failure_is_not_reclassified_by_secondary_diagnostic_failure(tmp_path: Path) -> None:
+def test_checker_failure_does_not_start_agent_failure_diagnostics(tmp_path: Path) -> None:
     from coder_eval.errors import AgentCrashError, JudgeInfrastructureError
 
     run_dir = tmp_path / "two-checker-failures"
@@ -905,12 +907,12 @@ def test_primary_checker_failure_is_not_reclassified_by_secondary_diagnostic_fai
         _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
     failed = _row(_task_dir(run_dir))
     assert failed["error_phase"] == "grading"
-    assert failed["grading_error"]["message"] == "primary checker incident"
-    assert failed["error_history"][-1]["message"] == "secondary diagnostic incident"
+    assert failed["error_message"] == "primary checker incident"
+    assert failed["error_history"] == []
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "budget"])
-def test_unmeasured_execution_failure_does_not_attempt_score_calculation(tmp_path: Path, kind: str) -> None:
+def test_execution_failure_keeps_canonical_empty_score(tmp_path: Path, kind: str) -> None:
     from coder_eval.errors import AgentConfigError, BudgetExceededError, TaskTimeoutError
 
     error = {
@@ -924,25 +926,18 @@ def test_unmeasured_execution_failure_does_not_attempt_score_calculation(tmp_pat
         "budget": FinalStatus.COST_BUDGET_EXCEEDED,
     }[kind]
     run_dir = tmp_path / "execution-and-grading-errors"
-    with (
-        patch("coder_eval.agents.noop_agent.NoOpAgent.communicate", new=AsyncMock(side_effect=error)) as communicate,
-        patch(
-            "coder_eval.models.EvaluationResult.calculate_weighted_score",
-            side_effect=ValueError("score computation incident"),
-        ) as calculate,
-    ):
+    with patch("coder_eval.agents.noop_agent.NoOpAgent.communicate", new=AsyncMock(side_effect=error)) as communicate:
         _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
 
     communicate.assert_awaited_once()
-    calculate.assert_not_called()
     row = _row(_task_dir(run_dir))
     assert row["final_status"] == expected.value
     assert row["error_phase"] == "execution"
     assert row["error_message"] == str(error)
     assert row["error_details"]["error_message"] == str(error)
-    assert row["weighted_score"] is None
+    assert row["weighted_score"] == 0.0
     assert not row["success_criteria_results"]
-    assert row["grading_error"] is None
+    assert "grading_error" not in row
 
 
 @pytest.mark.parametrize("kind", ["timeout", "budget"])
@@ -957,7 +952,7 @@ def test_checker_origin_timeout_or_budget_exception_is_a_grading_error(tmp_path:
     row = _row(_task_dir(run_dir))
     assert row["final_status"] == FinalStatus.ERROR.value
     assert row["error_phase"] == "grading"
-    assert row["grading_error"]["message"] == str(error)
+    assert row["error_message"] == str(error)
 
 
 @pytest.mark.parametrize("verdict", [FinalStatus.SUCCESS, FinalStatus.FAILURE])
@@ -990,7 +985,7 @@ def test_failed_regrade_restores_the_immediate_verdict_not_the_original_backup(
     assert restored["final_status"] == verdict.value
     assert restored["weighted_score"] == immediate["weighted_score"]
     assert restored["success_criteria_results"] == immediate["success_criteria_results"]
-    assert restored["grading_error"]["message"] == "later grading incident"
+    assert restored["error_history"][-1]["message"] == "later grading incident"
     assert (task_dir / "task.execute.json").read_bytes() == original_backup
 
 
@@ -1016,7 +1011,7 @@ def test_resume_successfully_grades_an_execution_error_without_discarding_the_ve
         assert graded["error_message"] == original["error_message"]
         assert graded["weighted_score"] == 1.0
         assert len(graded["success_criteria_results"]) == 2
-        assert graded["grading_error"] is None
+        assert "grading_error" not in graded
     communicate.assert_awaited_once()
 
 
@@ -1042,4 +1037,4 @@ def test_new_reference_failure_during_regrade_remains_an_execution_fact(tmp_path
     assert row["final_status"] == FinalStatus.ERROR.value
     assert row["error_phase"] == "execution"
     assert row["error_message"] == "new answer-key integrity violation"
-    assert row["grading_error"] is None
+    assert "grading_error" not in row

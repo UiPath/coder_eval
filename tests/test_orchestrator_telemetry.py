@@ -11,7 +11,6 @@ import pytest
 
 from coder_eval.models import (
     AgentKind,
-    CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
@@ -68,13 +67,9 @@ def _finalize_and_capture(orch):
     return mock_track
 
 
-@pytest.mark.parametrize("measured_score", [0.0, 0.75])
-def test_success_emits_task_end(tmp_path, measured_score):
+def test_success_emits_task_end(tmp_path):
     tu = TokenUsage(uncached_input_tokens=100, output_tokens=50)
     orch = _bootstrap(tmp_path, final_status=FinalStatus.SUCCESS, iterations=2, total_token_usage=tu)
-    orch.result.success_criteria_results = [
-        CriterionResult(criterion_type="file_exists", description="x", score=measured_score)
-    ]
     mock_track = _finalize_and_capture(orch)
 
     mock_track.assert_called_once()
@@ -85,8 +80,7 @@ def test_success_emits_task_end(tmp_path, measured_score):
     assert props["TaskId"] != "tele_task"
     assert props["VariantId"] == hash_identifier("v1")
     assert props["Status"] == "SUCCESS"
-    # Measured zero and nonzero verdicts both retain a numeric Score.
-    assert props["Score"] == measured_score
+    # Score carries the score finalize computed (0.0 here — empty criteria results).
     assert props["Score"] == orch.result.weighted_score
     assert isinstance(props["Score"], float)
     assert props["Iterations"] == 2
@@ -131,12 +125,12 @@ def test_token_counts_are_not_emitted(tmp_path):
     assert "TotalTokens" not in props
 
 
-def test_unmeasured_score_is_omitted_and_duration_is_numeric(tmp_path):
+def test_none_score_and_duration_default_to_zero(tmp_path):
     orch = _bootstrap(tmp_path, final_status=FinalStatus.SUCCESS, score=None, duration=None)
     mock_track = _finalize_and_capture(orch)
     _, props = mock_track.call_args.args
-    assert orch.result.weighted_score is None
-    assert "Score" not in props
+    # calculate_weighted_score writes 0.0 when criteria didn't run.
+    assert props["Score"] == 0.0
     assert isinstance(props["DurationMs"], int)
 
 

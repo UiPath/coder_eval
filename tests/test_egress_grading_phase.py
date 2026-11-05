@@ -120,10 +120,9 @@ async def test_failed_before_grading_hook_records_a_grading_incident(tmp_path: P
 
     assert result.final_status is FinalStatus.ERROR
     assert result.error_phase == "grading"
-    assert result.grading_error is not None
-    assert result.grading_error.message == "grading egress unavailable"
-    assert result.grading_error.details is not None
-    assert result.grading_error.details["component"] == "orchestrator.before_grading"
+    assert result.error_message == "grading egress unavailable"
+    assert result.error_details is not None
+    assert result.error_details["component"] == "orchestrator.before_grading"
 
 
 @pytest.mark.asyncio
@@ -154,7 +153,7 @@ async def test_reference_tampering_remains_an_execution_fact_after_regrading(tmp
     prior = await orch.run()
     assert prior.final_status is FinalStatus.ERROR
     assert prior.error_phase == "execution"
-    assert prior.grading_error is None
+    assert prior.error_history == []
     workspace = tmp_path / "retained-workspace"
     workspace.mkdir()
     (workspace / "proof.txt").write_text("proof")

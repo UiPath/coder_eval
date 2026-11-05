@@ -71,7 +71,6 @@ CARRIED = {
 RECOMPUTED = {
     # The verdict itself: exactly what the grading pass produces.
     "final_status",
-    "grading_error",
     "weighted_score",
     "success_criteria_results",
     "post_failure_criteria_results",

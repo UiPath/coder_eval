@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 from rich.markup import escape
 
+from ..errors import GradingError, ReferenceTamperedError
 from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
 from ..harbor.atif_hydrate import seed_from_atif_trajectory
 from ..harbor.atif_models import Trajectory
@@ -17,7 +18,6 @@ from ..logging_config import setup_logging
 from ..models import (
     AgentKind,
     EvaluationResult,
-    FinalStatus,
     PreservationMode,
     TaskDefinition,
     TemplateDirSource,
@@ -31,10 +31,10 @@ from ..orchestration.regrade import (
     grading_sandbox_config,
     load_prior_result,
     regrade_in_place,
-    restore_pre_grade_record,
     stamp_host_grading,
     task_from_prior,
     verify_reference_unchanged,
+    write_grading_incident,
 )
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
@@ -458,10 +458,15 @@ def run_evaluation(
             sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
         task_dir = task_file.parent.resolve() if task_file is not None else None
         sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
-        if grade_in_place:
-            await asyncio.to_thread(sandbox.adopt, graded_dir)
-        else:
-            await asyncio.to_thread(sandbox.setup)
+        try:
+            if grade_in_place:
+                await asyncio.to_thread(sandbox.adopt, graded_dir)
+            else:
+                await asyncio.to_thread(sandbox.setup)
+        except ReferenceTamperedError:
+            raise
+        except Exception as error:
+            raise GradingError(error, component="evaluate.sandbox") from error
         orchestrator = Orchestrator(
             task=task,
             run_dir=prepared_run_dir,
@@ -488,6 +493,17 @@ def run_evaluation(
 
     try:
         result = asyncio.run(_setup_and_run())
+    except GradingError as error:
+        console.print(f"[red]✗ Evaluation error: {escape(str(error))}[/red]")
+        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
+            try:
+                write_grading_incident(target.target, prior, error)
+            except (OSError, RegradeError) as write_error:
+                console.print(f"[yellow]⚠[/] Could not record the grading incident: {escape(str(write_error))}")
+            else:
+                _refresh_run_summary(target.target, prepared_run_dir)
+                console.print("[yellow]⚠[/] Grading incident recorded; the prior verdict is unchanged.")
+        raise typer.Exit(1) from error
     except (RegradeError, RuntimeError) as e:
         # Rendered like the three sibling handlers above: unwrapped, these
         # operator-facing messages arrived as the tail of a stack trace. RuntimeError
@@ -521,32 +537,10 @@ def _report_and_exit(
     # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     inherited = prior is not None and prior.has_execution_failure
 
-    if result.grading_error is not None:
-        console.print(f"\n[red]✗ Evaluation error: {escape(result.grading_error.message)}[/red]")
-        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
-            if not inherited and prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
-                _write_back(target.target, result, prepared_run_dir)
-                console.print("[yellow]⚠[/] Grading incident recorded; original execution facts are preserved.")
-            elif restore_pre_grade_record(target.target, prior_result=prior, grading_result=result):
-                _refresh_run_summary(target.target, prepared_run_dir)
-                console.print("[yellow]⚠[/] Grading errored; prior verdict restored with grading provenance.")
-            else:
-                console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
-        raise typer.Exit(1)
-
     if result.has_execution_failure and not inherited:
         console.print(f"\n[red]✗ Evaluation error: {escape(result.error_message or '')}[/red]")
         if prior is not None and target.mode is EvaluateMode.RUN_DIR:
-            # Restore explicit grader faults only; new execution and reference
-            # integrity failures must remain recorded as facts.
-            if result.error_phase == "grading":
-                if restore_pre_grade_record(target.target, prior_result=prior, grading_result=result):
-                    _refresh_run_summary(target.target, prepared_run_dir)
-                    console.print("[yellow]⚠[/] Grading errored; the prior verdict is preserved.")
-                else:
-                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
-            else:
-                _write_back(target.target, result, prepared_run_dir)
+            _write_back(target.target, result, prepared_run_dir)
         raise typer.Exit(1)
 
     # Display results

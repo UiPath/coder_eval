@@ -403,7 +403,7 @@ async def test_terminal_agent_error_records_safe_artifact_evidence_without_resco
 
     assert result.final_status == "ERROR"
     assert result.error_message == str(terminal_error)
-    assert result.weighted_score is None
+    assert result.weighted_score == 0.0
     assert result.success_criteria_results == []
     assert len(result.post_failure_criteria_results) == 4
     agent_dependent, artifact, command, judge = result.post_failure_criteria_results
@@ -420,7 +420,7 @@ async def test_terminal_agent_error_records_safe_artifact_evidence_without_resco
 
     persisted = EvaluationResult.model_validate_json((run_dir / "task.json").read_text())
     assert persisted.final_status == "ERROR"
-    assert persisted.weighted_score is None
+    assert persisted.weighted_score == 0.0
     assert [r.evaluation_status for r in persisted.post_failure_criteria_results] == [
         "not_evaluated",
         "evaluated",
@@ -508,7 +508,7 @@ async def test_read_only_run_command_is_graded_after_a_terminal_agent_error(tmp_
     # The evidence is additive: the run is still the failure it was.
     assert result.final_status == "ERROR"
     assert result.error_message == str(terminal_error)
-    assert result.weighted_score is None
+    assert result.weighted_score == 0.0
     assert result.success_criteria_results == []
 
 
@@ -551,12 +551,14 @@ async def test_post_failure_checker_error_preserves_terminal_agent_error(
 
     assert result.final_status == "ERROR"
     assert result.error_message == str(terminal_error)
-    assert result.weighted_score is None
+    assert result.weighted_score == 0.0
     assert len(result.post_failure_criteria_results) == 1
     unavailable = result.post_failure_criteria_results[0]
     assert unavailable.evaluation_status == "not_evaluated"
     assert expected_type in (unavailable.details or "")
     assert expected_message in (unavailable.details or "")
+    assert len(result.error_history) == 1
+    assert result.error_history[0].message == expected_message
 
 
 @pytest.mark.asyncio
@@ -585,7 +587,7 @@ async def test_task_timeout_during_post_failure_grading_preserves_agent_error(tm
 
     assert result.final_status == "ERROR"
     assert result.error_message == str(terminal_error)
-    assert result.weighted_score is None
+    assert result.weighted_score == 0.0
     assert len(result.post_failure_criteria_results) == 1
     unavailable = result.post_failure_criteria_results[0]
     assert unavailable.evaluation_status == "not_evaluated"

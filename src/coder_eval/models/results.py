@@ -626,10 +626,6 @@ class EvaluationResult(BaseModel):
         default=None,
         description="Origin of the terminal error. Absent legacy ERROR rows remain execution facts.",
     )
-    grading_error: GradingErrorInfo | None = Field(
-        default=None,
-        description="Current grading failure, including when an earlier execution failure remains authoritative.",
-    )
     error_history: list[GradingErrorInfo] = Field(
         default_factory=list,
         description="Prior grading incidents retained after another grading pass starts, plus secondary diagnostics.",
@@ -726,11 +722,9 @@ class EvaluationResult(BaseModel):
 
     @property
     def has_execution_failure(self) -> bool:
-        """Execution facts stay terminal, including unfinished dialogs with a grading incident."""
+        """Execution facts stay terminal; explicitly grading-origin ERROR rows are repairable."""
         return self.final_status.is_execution_fact and not (
-            self.final_status is FinalStatus.ERROR
-            and self.error_phase == "grading"
-            and not (self.simulation is not None and self.simulation.stop_reason == "error")
+            self.final_status is FinalStatus.ERROR and self.error_phase == "grading"
         )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:

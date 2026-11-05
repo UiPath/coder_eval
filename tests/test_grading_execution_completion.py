@@ -1,6 +1,5 @@
 """Grading repair cannot complete skipped execution or erase its limits."""
 
-import asyncio
 import json
 import socket
 import subprocess
@@ -15,10 +14,8 @@ from coder_eval.cli import app
 from coder_eval.errors import ReferenceTamperedError
 from coder_eval.errors.judge import JudgeInfrastructureError
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.models import EvaluationResult, NoneAgentConfig, PreservationMode, TaskDefinition, TokenUsage
-from coder_eval.orchestration.regrade import default_workspace
+from coder_eval.models import EvaluationResult, NoneAgentConfig, TokenUsage
 from coder_eval.orchestrator import Orchestrator
-from coder_eval.sandbox import Sandbox
 from coder_eval.simulation.user_simulator import UserSimulator
 from coder_eval.streaming.callbacks import CompositeStreamCallback
 from coder_eval.streaming.collector import EventCollector
@@ -166,8 +163,8 @@ def test_grader_fault_cannot_mask_configured_budget(tmp_path, monkeypatch, cli, 
     task_json, before = saved(run)
     assert before["final_status"] == status
     assert before["error_phase"] == "execution"
-    assert before["grading_error"] is not None
-    assert before["weighted_score"] is None
+    assert before["error_history"][-1]["message"] == "Synthetic grader failure"
+    assert before["weighted_score"] == 0.0
     repair(cli, command, path, run, task_json)
     after = json.loads(task_json.read_text(encoding="utf-8"))
     assert after["final_status"] == status
@@ -189,43 +186,6 @@ def test_interrupted_every_turn_dialog_stays_execution_error(tmp_path, monkeypat
     after = json.loads(task_json.read_text(encoding="utf-8"))
     assert after["final_status"] == "ERROR"
     assert after["iterations"] == before["iterations"]
-
-
-@pytest.mark.parametrize("command", ["resume", "evaluate"])
-def test_historical_interrupted_dialog_is_refused_unchanged(tmp_path, monkeypatch, cli, command):
-    path = task(tmp_path, dialog="every_turn")
-    run = tmp_path / "run"
-    fail_one_grade(monkeypatch)
-    cli(["run", str(path), "--run-dir", str(run)])
-    task_json, row = saved(run)
-    row.update(final_status="ERROR", error_phase="grading", weighted_score=None, success_criteria_results=[])
-    task_json.write_text(json.dumps(row), encoding="utf-8")
-    before = task_json.read_bytes()
-    result = repair(cli, command, path, run, task_json)
-    assert result.exit_code == 1
-    assert "dialog" in result.output.lower()
-    assert task_json.read_bytes() == before
-
-
-@pytest.mark.parametrize("command", ["resume", "evaluate"])
-@pytest.mark.parametrize(
-    "budget,status", [("max_total_tokens", "TOKEN_BUDGET_EXCEEDED"), ("max_usd", "COST_BUDGET_EXCEEDED")]
-)
-def test_historical_grading_error_rechecks_recorded_usage(tmp_path, monkeypatch, cli, command, budget, status):
-    path = task(tmp_path, budget=budget)
-    run = tmp_path / "run"
-    fail_one_grade(monkeypatch)
-    cli(["run", str(path), "--run-dir", str(run)])
-    task_json, row = saved(run)
-    row.update(final_status="ERROR", error_phase="grading", weighted_score=None, success_criteria_results=[])
-    task_json.write_text(json.dumps(row), encoding="utf-8")
-    result = repair(cli, command, path, run, task_json)
-    assert result.exit_code == 1
-    after = json.loads(task_json.read_text(encoding="utf-8"))
-    assert after["final_status"] == status
-    assert after["error_phase"] == "execution"
-    assert after["iterations"] == row["iterations"]
-    assert after["weighted_score"] is None
 
 
 @pytest.mark.parametrize("dialog,turns", [(None, 1), ("end_of_dialog", 3)])
@@ -252,40 +212,7 @@ def test_reference_tampering_is_not_reclassified_as_grading_or_budget(tmp_path, 
     _, row = saved(run)
     assert row["final_status"] == "ERROR"
     assert row["error_phase"] == "execution"
-    assert row["grading_error"] is None
-
-
-@pytest.mark.parametrize("budget", [None, "max_total_tokens"])
-def test_direct_orchestrator_preserves_historical_interrupted_dialog(tmp_path, monkeypatch, cli, budget):
-    path = task(tmp_path, dialog="every_turn", budget=budget)
-    run = tmp_path / "run"
-    fail_one_grade(monkeypatch)
-    cli(["run", str(path), "--run-dir", str(run)])
-    task_json, row = saved(run)
-    row.update(final_status="ERROR", error_phase="grading", weighted_score=None, success_criteria_results=[])
-    prior = EvaluationResult.model_validate(row)
-    definition = TaskDefinition.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
-    sandbox = Sandbox(definition.sandbox, definition.task_id)
-
-    async def grade_directly():
-        await asyncio.to_thread(sandbox.adopt, default_workspace(task_json.parent, prior))
-        return await Orchestrator(
-            task=definition,
-            run_dir=tmp_path / "direct-grade",
-            sandbox=sandbox,
-            task_file=path,
-            variant_id="fixture",
-            preservation_mode=PreservationMode.NONE,
-            prior_result=prior,
-        ).run()
-
-    result = asyncio.run(grade_directly())
-    assert result.final_status.value == "ERROR"
-    assert result.error_phase == prior.error_phase
-    assert result.error_message == prior.error_message
-    assert result.error_details == prior.error_details
-    assert result.iterations == prior.iterations
-    assert result.weighted_score == 1.0
+    assert "grading_error" not in row
 
 
 @pytest.mark.parametrize(
@@ -310,7 +237,7 @@ def test_final_scoring_fault_keeps_measured_criteria_and_budget_primary(tmp_path
     assert row["final_status"] == status
     assert row["error_phase"] == "execution"
     assert "budget exceeded" in row["error_message"]
-    assert row["grading_error"]["message"] == "Synthetic final scoring incident"
+    assert row["error_history"][-1]["message"] == "Synthetic final scoring incident"
     assert len(row["success_criteria_results"]) == 1
     assert row["success_criteria_results"][0]["score"] == 1.0
     assert row["weighted_score"] is None
@@ -328,3 +255,44 @@ def test_cli_guard_allows_platform_socketpair_and_refuses_external_connections(c
     for address in (("127.0.0.1", 9), ("192.0.2.1", 443)):
         with socket.socket() as sock, pytest.raises(AssertionError, match="must not start processes"):
             sock.connect(address)
+
+
+@pytest.mark.parametrize(
+    "budget,status",
+    [
+        ("max_total_tokens", "TOKEN_BUDGET_EXCEEDED"),
+        ("max_usd", "COST_BUDGET_EXCEEDED"),
+    ],
+)
+@pytest.mark.parametrize("dialog", [None, "every_turn"])
+def test_actual_budget_is_settled_before_checker(tmp_path, monkeypatch, cli, budget, status, dialog):
+    instances = []
+    entered = []
+    original = Orchestrator.__init__
+
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        instances.append(self)
+
+    monkeypatch.setattr(Orchestrator, "__init__", init)
+
+    async def checker(self, *args, **kwargs):
+        result = instances[-1].result
+        entered.append((result.final_status.value, result.error_phase, result.error_message))
+        raise JudgeInfrastructureError("Intentional checker outage after actual agent usage")
+
+    monkeypatch.setattr(SuccessChecker, "check_all_async", checker)
+    path = task(tmp_path, dialog=dialog, budget=budget)
+    run = tmp_path / "run"
+    outcome = cli(["run", str(path), "--run-dir", str(run)])
+    assert outcome.exit_code == 1
+    _, after = saved(run)
+    assert len(entered) == 1
+    assert entered[0][0:2] == (status, "execution")
+    assert "budget exceeded" in entered[0][2]
+    assert after["final_status"] == status and after["error_phase"] == "execution"
+    assert after["error_message"] == entered[0][2]
+    assert len(after["iterations"]) == 1 and after["iteration_count"] == 1
+    assert any(
+        item["message"] == "Intentional checker outage after actual agent usage" for item in after["error_history"]
+    )

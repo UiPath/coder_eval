@@ -5,9 +5,11 @@ import json
 
 import pytest
 
+from coder_eval.errors import GradingError
 from coder_eval.errors.judge import JudgeInfrastructureError
 from coder_eval.models import EvaluationResult, FinalStatus, SimulationTelemetry
-from coder_eval.orchestration.regrade import restore_pre_grade_record
+from coder_eval.orchestration.regrade import write_grading_incident
+from coder_eval.sandbox import Sandbox
 from tests.test_evaluate_format_harbor import _TASK_YAML, _write_trajectory
 from tests.test_grading_execution_completion import cli as cli
 from tests.test_grading_execution_completion import fail_one_grade, repair, saved, task
@@ -46,7 +48,7 @@ def test_failed_grade_preserves_execution_fact_and_measurement(tmp_path, monkeyp
         assert not faults
     else:
         assert len(faults) == 1
-        assert after["grading_error"]["message"] == "Synthetic grader failure"
+        assert after["error_history"][-1]["message"] == "Synthetic grader failure"
     summary = json.loads((run / "run.json").read_text(encoding="utf-8"))
     projected = summary["task_results"][0]
     assert projected["status"] == after["final_status"]
@@ -83,7 +85,7 @@ def test_harbor_grading_failure_cannot_write_to_workdir(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("command", ["resume", "evaluate"])
-def test_grader_message_markup_cannot_interrupt_restoration(tmp_path, monkeypatch, cli, command):
+def test_grader_message_markup_cannot_interrupt_incident_write(tmp_path, monkeypatch, cli, command):
     path = task(tmp_path)
     run = tmp_path / "run"
     cli(["execute", str(path), "--run-dir", str(run)])
@@ -97,43 +99,44 @@ def test_grader_message_markup_cannot_interrupt_restoration(tmp_path, monkeypatc
     after = json.loads(task_json.read_text(encoding="utf-8"))
     assert after["final_status"] == "NOT_GRADED"
     assert after["weighted_score"] is None
-    assert after["grading_error"]["message"] == message
+    assert after["error_history"][-1]["message"] == message
 
 
 @pytest.mark.parametrize("command", ["resume", "evaluate"])
-def test_failed_restore_does_not_fold_or_announce_prior_verdict(tmp_path, monkeypatch, cli, command):
+def test_failed_incident_write_preserves_prior_verdict(tmp_path, monkeypatch, cli, command):
     path = task(tmp_path)
     run = tmp_path / "run"
     cli(["execute", str(path), "--run-dir", str(run)])
     task_json, before = saved(run)
     fail_one_grade(monkeypatch)
-    monkeypatch.setattr("coder_eval.orchestration.regrade.restore_pre_grade_record", lambda *a, **k: False)
-    evaluate_module = importlib.import_module("coder_eval.cli.evaluate_command")
-    monkeypatch.setattr(evaluate_module, "restore_pre_grade_record", lambda *a, **k: False)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Synthetic incident write failure")
+
+    monkeypatch.setattr("coder_eval.orchestration.regrade.write_text_atomic", fail_write)
     result = repair(cli, command, path, run, task_json)
     assert result.exit_code == 1
-    assert "Could not restore" in result.output
-    assert "prior verdict restored" not in result.output
+    assert "Could not record the grading incident" in result.output
+    assert "incident recorded" not in result.output
     after = json.loads(task_json.read_text(encoding="utf-8"))
     summary = json.loads((run / "run.json").read_text(encoding="utf-8"))
-    if command == "resume":
-        assert after["final_status"] == "ERROR"
-    else:
-        assert after == before
+    assert after == before
     assert summary["task_results"][0]["status"] == after["final_status"]
     assert summary["task_results"][0]["weighted_score"] == after["weighted_score"]
 
 
-def test_restore_helper_intentional_noop_remains_false(tmp_path, cli):
+def test_incident_writer_preserves_its_prior_argument(tmp_path, cli):
     path = task(tmp_path)
     run = tmp_path / "run"
     cli(["execute", str(path), "--run-dir", str(run)])
     task_json, row = saved(run)
     prior = EvaluationResult.model_validate(row)
-    task_json.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
-    before = task_json.read_bytes()
-    assert restore_pre_grade_record(task_json.parent, prior_result=prior) is False
-    assert task_json.read_bytes() == before
+    before = prior.model_dump()
+    error = GradingError(RuntimeError("New grading incident"), component="test.grading")
+    selected = write_grading_incident(task_json.parent, prior, error)
+    assert prior.model_dump() == before
+    assert selected.error_history[-1].message == "New grading incident"
+    assert selected.final_status == prior.final_status
 
 
 def test_all_status_phase_and_dialog_combinations_keep_execution_facts():
@@ -155,6 +158,101 @@ def test_all_status_phase_and_dialog_combinations_keep_execution_facts():
                     else SimulationTelemetry(n_trials=1, replicate_index=0, total_turns=1, stop_reason=stop),
                 )
                 expected = status.value in facts
-                if status is FinalStatus.ERROR and phase == "grading" and stop != "error":
+                if status is FinalStatus.ERROR and phase == "grading":
                     expected = False
                 assert result.has_execution_failure is expected, (status, phase, stop)
+
+
+@pytest.mark.parametrize("initial", ["execute", "run"])
+@pytest.mark.parametrize("same_output", [False, True])
+def test_failed_evaluate_writes_only_prior_with_one_incident(tmp_path, monkeypatch, cli, initial, same_output):
+    path = task(tmp_path)
+    run = tmp_path / "run"
+    assert cli([initial, str(path), "--run-dir", str(run)]).exit_code == 0
+    target, before = saved(run)
+    # This immutable first audit copy may legitimately predate a newer verdict.
+    stale = dict(before, final_status="FAILURE", weighted_score=0.0)
+    (target.parent / "task.execute.json").write_text(json.dumps(stale))
+    protected = {
+        key: before[key]
+        for key in (
+            "final_status",
+            "weighted_score",
+            "success_criteria_results",
+            "iterations",
+            "error_message",
+            "error_details",
+            "error_log_tail",
+            "error_phase",
+            "started_at",
+            "duration_seconds",
+            "sandbox_path",
+            "iteration_count",
+        )
+    }
+    writes = []
+    for module_name in (
+        "coder_eval.orchestrator",
+        "coder_eval.orchestration.regrade",
+        "coder_eval.cli.evaluate_command",
+        "coder_eval.cli.run_command",
+    ):
+        module = importlib.import_module(module_name)
+        original = getattr(module, "write_text_atomic", None)
+        if original is None:
+            continue
+
+        def write(path_arg, text_arg, *args, _original=original, **kwargs):
+            if path_arg == target:
+                writes.append(json.loads(text_arg))
+            return _original(path_arg, text_arg, *args, **kwargs)
+
+        monkeypatch.setattr(module, "write_text_atomic", write)
+    fail_one_grade(monkeypatch, JudgeInfrastructureError("[/synthetic_bad_closing_tag]"))
+    result = cli(
+        ["evaluate", str(target.parent), "--run-dir", str(target.parent if same_output else tmp_path / "grade")]
+    )
+    assert result.exit_code == 1
+    assert "MarkupError" not in result.output
+    after = json.loads(target.read_text())
+    assert len(writes) == 1, "A failed regrade must not write an intermediate failed verdict"
+    assert {key: after[key] for key in protected} == protected
+    assert {key: writes[0][key] for key in protected} == protected
+    assert len(after["error_history"]) == len(before.get("error_history", [])) + 1
+    assert after["error_history"][-1]["message"] == "[/synthetic_bad_closing_tag]"
+    assert "grading_error" not in after
+    assert json.loads((target.parent / "task.execute.json").read_text()) == stale
+
+
+def test_copy_setup_fault_preserves_prior_and_records_one_incident(tmp_path, monkeypatch, cli):
+    path = task(tmp_path)
+    run = tmp_path / "run"
+    assert cli(["run", str(path), "--run-dir", str(run)]).exit_code == 0
+    target, before = saved(run)
+    writes = []
+    for name in ("coder_eval.orchestrator", "coder_eval.orchestration.regrade", "coder_eval.cli.evaluate_command"):
+        module = importlib.import_module(name)
+        original = getattr(module, "write_text_atomic", None)
+        if original is None:
+            continue
+
+        def write(path_arg, text_arg, *args, _original=original, **kwargs):
+            if path_arg == target:
+                writes.append(json.loads(text_arg))
+            return _original(path_arg, text_arg, *args, **kwargs)
+
+        monkeypatch.setattr(module, "write_text_atomic", write)
+
+    def failed_setup(self):
+        raise RuntimeError("Intentional copy-grading setup failure")
+
+    monkeypatch.setattr(Sandbox, "setup", failed_setup)
+    outcome = cli(["evaluate", str(target.parent), "--copy", "--run-dir", str(tmp_path / "grade")])
+    assert outcome.exit_code == 1
+    after = json.loads(target.read_text())
+    assert len(writes) == 1
+    assert {k: v for k, v in after.items() if k != "error_history"} == {
+        k: v for k, v in before.items() if k != "error_history"
+    }
+    assert after["error_history"][:-1] == before["error_history"]
+    assert after["error_history"][-1]["message"] == "Intentional copy-grading setup failure"

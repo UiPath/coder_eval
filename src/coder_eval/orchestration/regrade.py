@@ -22,14 +22,17 @@ import logging
 import os
 import shutil
 import tempfile
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Any, TypedDict
 
+from coder_eval.errors import GradingError, ReferenceTamperedError
+from coder_eval.errors.retry import create_error_context
 from coder_eval.models import (
     IN_CONTAINER_ENV,
     EvaluationResult,
-    FinalStatus,
+    GradingErrorInfo,
     PreservationMode,
     ResolvedTask,
     SandboxConfig,
@@ -52,6 +55,7 @@ from coder_eval.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_DIRNAME = "artifacts"
+CONTAINER_GRADING_FAILURE_KEY = "_container_grading_attempt_failed"
 
 
 class RegradeError(Exception):
@@ -575,38 +579,47 @@ def back_up_pre_grade_record(run_dir: Path) -> None:
         logger.warning("Could not preserve the pre-grade record at %s: %s", backup, e)
 
 
-def restore_pre_grade_record(
-    run_dir: Path,
-    *,
-    prior_result: EvaluationResult | None = None,
-    grading_result: EvaluationResult | None = None,
-) -> bool:
-    """Restore the earlier verdict after a failed regrade, keeping new grading provenance.
+def _grading_incident(prior: EvaluationResult, error: GradingError) -> GradingErrorInfo:
+    incident = error.incident or GradingErrorInfo(
+        message=str(error),
+        details=create_error_context(
+            error=error.cause,
+            task_id=prior.task_id,
+            attempt=max(prior.iteration_count, 1),
+            component=error.component,
+            agent_name=prior.agent_type,
+        ),
+        recorded_at=datetime.now(),
+    )
+    incident = incident.model_copy(deep=True)
+    if incident.details is not None:
+        incident.details.pop(CONTAINER_GRADING_FAILURE_KEY, None)
+    return incident
 
-    Prefer the validated immediate prior result; the immutable first backup can
-    predate a later valid verdict. The backup is never changed. Return whether a
-    prior record was restored.
-    """
-    source, backup = run_dir / TASK_JSON_FILENAME, run_dir / PRE_GRADE_JSON_FILENAME
-    if source.is_symlink() or (prior_result is None and (not backup.is_file() or backup.is_symlink())):
-        return False
-    try:
-        restored = prior_result.model_copy(deep=True) if prior_result is not None else None
-        text = restored.model_dump_json(indent=2) if restored is not None else backup.read_text(encoding="utf-8")
-        if grading_result is not None and grading_result.grading_error is not None:
-            if restored is None:
-                restored = EvaluationResult.model_validate_json(text)
-            restored.grading_error = grading_result.grading_error
-            restored.error_history = grading_result.error_history
-            text = restored.model_dump_json(indent=2)
-        if source.is_file() and source.read_text(encoding="utf-8") == text:
-            return False  # never overwritten; nothing to undo
-        write_text_atomic(source, text)
-    except (OSError, ValueError) as e:
-        logger.warning("Could not restore the ungraded record at %s: %s", source, e)
-        return False
-    logger.info("Restored the ungraded record at %s after a grading failure.", source)
-    return True
+
+def write_grading_incident(run_dir: Path, prior: EvaluationResult, error: GradingError) -> EvaluationResult:
+    """Append one failed grading attempt to the prior row and atomically write it."""
+    from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
+
+    target = run_dir / TASK_JSON_FILENAME
+    if target.is_symlink():
+        raise RegradeError(f"Refusing to update symlink {target}")
+    selected = prior.model_copy(deep=True)
+    selected.error_history.append(_grading_incident(prior, error))
+    write_text_atomic(target, selected.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE))
+    return selected
+
+
+def container_grading_failure_record(
+    prior: EvaluationResult, error: GradingError, container_contract: dict[str, Any]
+) -> EvaluationResult:
+    """Serialize a failed grading attempt only for the private container transport."""
+    transport = prior.model_copy(deep=True)
+    incident = _grading_incident(prior, error)
+    incident.details = {**(incident.details or {}), CONTAINER_GRADING_FAILURE_KEY: True}
+    transport.error_history.append(incident)
+    transport.environment_info["container_contract"] = container_contract
+    return transport
 
 
 def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = False) -> SandboxConfig:
@@ -919,6 +932,13 @@ async def _grade_in_container(
             # ALWAYS, not only on success: the scratch dir dies with this `with`,
             # and everything that explains a failure lives in it.
             _fold_back_container_logs(container_run_dir, run_dir)
+        incident = result.error_history[-1] if result.error_history else None
+        if incident is not None and (incident.details or {}).get(CONTAINER_GRADING_FAILURE_KEY) is True:
+            error = GradingError(RuntimeError(incident.message), component="regrade.container")
+            error.incident = incident.model_copy(deep=True)
+            assert error.incident.details is not None
+            error.incident.details.pop(CONTAINER_GRADING_FAILURE_KEY)
+            raise error
         # Fold the grade back into the row the caller asked about.
         # `back_up_pre_grade_record` already preserved task.execute.json.
         _fold_back_container_grade(container_run_dir, run_dir, task.task_id)
@@ -975,13 +995,6 @@ async def regrade_in_place(
             f"task {task.task_id!r} has no `success_criteria` and cannot be graded (it would silently "
             + "score SUCCESS at weighted_score 0.0). Add at least one criterion before re-grading it."
         )
-    if (
-        prior.final_status is FinalStatus.ERROR
-        and prior.error_phase == "grading"
-        and prior.simulation is not None
-        and prior.simulation.stop_reason == "error"
-    ):
-        raise RegradeError("The recorded dialog did not finish execution; detached grading cannot complete it.")
 
     # Graded INSIDE a container of the same image, dispatched before anything else
     # here — the reference check included — so the container performs every step
@@ -1026,7 +1039,12 @@ async def regrade_in_place(
         task_id=task.task_id,
         task_dir=task_file.parent.resolve() if task_file is not None else None,
     )
-    await asyncio.to_thread(sandbox.adopt, workspace)
+    try:
+        await asyncio.to_thread(sandbox.adopt, workspace)
+    except ReferenceTamperedError:
+        raise
+    except Exception as error:
+        raise GradingError(error, component="regrade.sandbox") from error
 
     orchestrator = Orchestrator(
         task=task,

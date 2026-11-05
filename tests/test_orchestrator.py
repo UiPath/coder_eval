@@ -2311,15 +2311,16 @@ def test_finalize_result_logs_summary_on_timeout(tmp_path, caplog):
     assert "iterations=0" in summary_records[0].getMessage()
 
 
-def test_finalize_result_logs_unmeasured_score_when_criteria_not_run(tmp_path, caplog):
+def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
     import logging as _logging
     import time
     from unittest.mock import patch
 
     from coder_eval.models import FinalStatus
 
-    # Declared criteria with no verdict stay unmeasured, including ERROR rows.
-    # The summary distinguishes an unavailable score from a real zero.
+    # ERROR + empty criteria: calculate_weighted_score writes 0.0 onto the
+    # result, so the summary line ends up with score=0.000 and duration
+    # computed from start_time. Exercises the ERROR status path end-to-end.
     orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.ERROR, iterations=0)
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
@@ -2330,9 +2331,7 @@ def test_finalize_result_logs_unmeasured_score_when_criteria_not_run(tmp_path, c
     summary_records = [r for r in caplog.records if "Task finished:" in r.getMessage()]
     assert len(summary_records) == 1
     msg = summary_records[0].getMessage()
-    assert "score=n/a" in msg
-    assert orch.result.weighted_score is None
-    assert orch.result.success_criteria_results == []
+    assert "score=0.000" in msg
     assert "duration=" in msg
 
 

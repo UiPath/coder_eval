@@ -94,33 +94,31 @@ explicit `ERROR` with `error_phase: grading` can be replaced by a new verdict.
 Unknown legacy ERROR, TIMEOUT, build and budget outcomes remain execution facts.
 No error-message matching or transcript inference is used.
 
-The orchestrator retains the exact exceptions thrown by criteria and the
-`before_grading` hook. A secondary diagnostic checker failure cannot replace the
-identity of the primary exception. Reference-integrity verification stays outside
-this boundary: an agent changing its answer key is an execution failure.
+Execution limits are settled immediately after each recorded turn, before grading.
+The limit error is raised after grading returns, preserving partial-credit results.
+A grading crash cannot hide the already-settled execution fact. A real task watchdog
+keeps its phase: a fresh run times out execution, while a detached grading attempt
+times out grading. A checker merely raising a timeout or budget exception is not a
+watchdog or an agent limit.
 
-A grading crash can interrupt execution before its normal budget check or remaining
-dialog turns. Only that exceptional path rechecks the recorded run limits; an exceeded
-budget stays primary and the grader incident stays secondary. An interrupted dialog
-remains an execution fact, including when an older record calls it a grading ERROR.
-Completed single-shot and end-of-dialog grading failures remain repairable.
+Grading sites wrap failures in one typed error. Reference-integrity failures pass
+through unchanged. A per-turn dialog grade that prevents the remaining execution
+writes an execution-phase ERROR; a completed single-shot or end-only grade writes
+a repairable grading-phase ERROR. No dialog telemetry heuristic is needed to decide
+which one a new record means.
 
-`grading_error` is separate from the terminal execution error because both can
-exist at once. Regrading a crashed run may itself fail; the run keeps its original
-status, message, structured context and log tail while reporting the new grader
-incident. A later successful grade archives that incident in `error_history`.
-Final score calculation follows the same rule for an execution fault already
-recorded in the current run, not only a prior result.
+Current failure details remain in the primary error fields. Secondary and repaired
+grading incidents belong in `error_history`. A failed detached grade does not write
+an authoritative result, transcript or HTML verdict: its caller appends the incident
+to a deep copy of the immediate prior row and writes that selected row once. The
+first execute audit copy remains immutable and is never used as a rollback source.
+The Docker path may serialize a failed attempt to its private scratch transport;
+its explicit incident marker is consumed before any authoritative write or fold-back.
 
-Explicit grading ERROR rows remain eligible for native resume's existing grading
-path even if a partial criteria vector or zero score was recorded. That path never
-replays the agent. Failed regrades preserve the earlier NOT_GRADED/SUCCESS/FAILURE
-record where applicable, adding grading provenance rather than discarding it.
-Restoration uses the validated immediate prior row; the first audit backup remains
-immutable and can predate a later valid verdict.
-Already explicit grading ERROR rows retain their new current grading incident and
-history; execution facts keep their original outcome. The CLI reports the current
-grader incident and exits non-zero before a misleading criteria-count error.
+Explicit grading ERROR rows owe a grade even if a partial vector or zero score was
+recorded. Otherwise resume eligibility and scoring keep their existing semantics:
+a graded empty vector scores zero, and execute leaves the score unset. No additional
+execution-error rows are automatically scheduled because their vector is empty.
 
 ### The four grading sites
 
