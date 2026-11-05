@@ -2554,6 +2554,9 @@ class Orchestrator:
                     turn_record.messages.insert(0, pending_user_turn)
                     pending_user_turn = None
                 self.result.iterations.append(turn_record)
+                # Retain the agent fact even when the script's stop wins below.
+                if turn_record.max_turns_exhausted:
+                    self.result.max_turns_exhausted = True
                 self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
@@ -2616,7 +2619,6 @@ class Orchestrator:
                 self._check_expected_turns(iteration=turns_completed)
 
                 if turn_record.max_turns_exhausted:
-                    self.result.max_turns_exhausted = True
                     stop_reason = DialogStopReason.AGENT_MAX_TURNS
                     logger.warning(
                         "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",

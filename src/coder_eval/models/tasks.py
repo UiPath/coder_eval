@@ -397,10 +397,11 @@ class Dataset(BaseModel):
     stable row identifier and becomes a suffix on the task_id
     ("<task_id>/<row.id>").
 
-    Row values are substituted into the task's ``initial_prompt`` and into
-    string fields of each ``success_criteria`` entry using ``${row.<field>}``
-    syntax. Substitution happens in ``task_loader.expand_dataset`` before
-    variant resolution, so variants cannot override the dataset.
+    Row values are substituted into the task's ``initial_prompt``, each
+    ``simulation.turns`` entry, and string fields of each ``success_criteria``
+    entry using ``${row.<field>}`` syntax. Substitution happens in
+    ``task_loader.expand_dataset`` before variant resolution, so variants
+    cannot override the dataset.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -644,7 +645,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default=None,
         description=(
             "Optional dataset to fan out this task into one sub-task per row. "
-            "Row values substitute into initial_prompt and success_criteria via ${row.<field>}. "
+            "Row values substitute into initial_prompt, simulation.turns, and success_criteria via ${row.<field>}. "
             "Expansion happens before variant resolution, so variants cannot override the dataset."
         ),
     )

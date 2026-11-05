@@ -21,6 +21,7 @@ from coder_eval.models import (
     AgentKind,
     EvaluationResult,
     FileExistsCriterion,
+    FileMatchesRegexCriterion,
     FinalStatus,
     RunLimits,
     SandboxConfig,
@@ -31,6 +32,7 @@ from coder_eval.models import (
     parse_agent_config,
     simulator_cost_usd,
 )
+from coder_eval.orchestration.task_loader import expand_dataset
 from coder_eval.orchestrator import Orchestrator
 from tests.fixtures.mock_agent import MockAgent
 
@@ -122,6 +124,27 @@ async def test_turns_reach_the_agent_verbatim_and_in_order_within_one_session(tm
     assert created[0].prompts == TURNS
     assert [turn.user_input for turn in result.iterations] == TURNS
     assert [turn.messages[0].text for turn in result.iterations] == TURNS
+
+
+async def test_dataset_turns_reach_each_row_agent_after_substitution(tmp_path, monkeypatch):
+    created = _install_agent(monkeypatch)
+    data = _task(
+        turns=["Question: ${row.question}", "Next: ${row.followup}"],
+        sandbox=SandboxConfig(driver="tempdir", python=None),
+    ).model_dump()
+    data["dataset"] = {
+        "rows": [
+            {"id": "r1", "question": "ALPHA", "followup": "ONE"},
+            {"id": "r2", "question": "BETA", "followup": "TWO"},
+        ]
+    }
+    task = TaskDefinition.model_validate(data)
+
+    for row in expand_dataset(task, tmp_path):
+        await Orchestrator(task=row, run_dir=tmp_path / row.row_id, variant_id="default").run()
+
+    assert [agent.prompts for agent in created] == [["Question: ALPHA", "Next: ONE"], ["Question: BETA", "Next: TWO"]]
+    assert task.simulation.turns == ["Question: ${row.question}", "Next: ${row.followup}"]
 
 
 async def test_each_turn_keeps_the_working_directory_prefix_unless_the_task_opts_out(tmp_path, monkeypatch):
@@ -313,12 +336,23 @@ async def test_a_failed_turn_ends_the_script_and_later_turns_are_never_sent(tmp_
     assert TURNS[1] in [turn.user_input for turn in result.iterations], "the turn that failed stays on record"
 
 
-async def test_an_agent_that_runs_out_of_its_own_turns_ends_the_script(tmp_path, monkeypatch):
-    created = _install_agent(monkeypatch, exhaust_on_call=1)
+@pytest.mark.parametrize("exhaust_on_call", [1, len(TURNS)])
+@pytest.mark.parametrize("grade", [True, False])
+async def test_an_agent_that_runs_out_of_its_own_turns_ends_the_script(tmp_path, monkeypatch, exhaust_on_call, grade):
+    created = _install_agent(monkeypatch, exhaust_on_call=exhaust_on_call)
+    task = _task(
+        sandbox=SandboxConfig(driver="tempdir", python=None),
+        success_criteria=[
+            FileMatchesRegexCriterion(path="not-created.txt", pattern="required", description="Missing file")
+        ],
+    )
 
-    result = await _run(tmp_path, _task())
+    result = await _run(tmp_path, task, grade=grade)
 
-    assert created[0].prompts == TURNS[:1]
+    assert created[0].prompts == TURNS[:exhaust_on_call]
+    assert result.iterations[-1].max_turns_exhausted is True
     assert result.max_turns_exhausted is True
+    assert result.final_status == (FinalStatus.MAX_TURNS_EXHAUSTED if grade else FinalStatus.NOT_GRADED)
     assert result.simulation is not None
-    assert result.simulation.stop_reason == "agent_max_turns"
+    assert result.simulation.stop_reason == ("agent_max_turns" if exhaust_on_call < len(TURNS) else "script_exhausted")
+    assert json.loads((tmp_path / "run" / "task.json").read_text())["max_turns_exhausted"] is True
