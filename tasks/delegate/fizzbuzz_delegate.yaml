@@ -1,6 +1,6 @@
 task_id: "fizzbuzz_delegate"
 description: "Classic FizzBuzz implementation, run through the Delegate agent."
-initial_prompt: "Create and test a local Python helper for a UiPath automation that uses Python Scope and Invoke Python Method. Put the FizzBuzz behavior in a callable main() and call main() when the script is executed directly. Write a Python script named fizzbuzz.py that prints the numbers from 1 to 30, one per line. For multiples of 3 print 'Fizz' instead of the number, for multiples of 5 print 'Buzz', and for multiples of both print 'FizzBuzz'. Then run it with: python fizzbuzz.py"
+initial_prompt: "Write a Python script named fizzbuzz.py that prints the numbers from 1 to 30, one per line. For multiples of 3 print 'Fizz' instead of the number, for multiples of 5 print 'Buzz', and for multiples of both print 'FizzBuzz'. Then run it with: python fizzbuzz.py"
 tags: [smoke, basic, pure-python, delegate]
 
 run_limits:
