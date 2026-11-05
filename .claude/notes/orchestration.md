@@ -87,6 +87,40 @@ produces is under isolation.md § Detached grading and `Sandbox.adopt`).
 `tests/test_seed_from_prior_result.py` pins the status in a test of its own, apart from
 the loop over the real execution facts.
 
+### Grading incidents and execution facts
+
+`FinalStatus.is_execution_fact` is deliberately conservative and context-free.
+`EvaluationResult.has_execution_failure` is the result-aware predicate: only an
+explicit `ERROR` with `error_phase: grading` can be replaced by a new verdict.
+Unknown legacy ERROR, TIMEOUT, build and budget outcomes remain execution facts.
+No error-message matching or transcript inference is used.
+
+Execution limits are settled immediately after each recorded turn, before grading.
+The limit error is raised after grading returns, preserving partial-credit results.
+A grading crash cannot hide the already-settled execution fact. A real task watchdog
+keeps its phase: a fresh run times out execution, while a detached grading attempt
+times out grading. A checker merely raising a timeout or budget exception is not a
+watchdog or an agent limit.
+
+Grading sites wrap failures in one typed error. Reference-integrity failures pass
+through unchanged. A per-turn dialog grade that prevents the remaining execution
+writes an execution-phase ERROR; a completed single-shot or end-only grade writes
+a repairable grading-phase ERROR. No dialog telemetry heuristic is needed to decide
+which one a new record means.
+
+Current failure details remain in the primary error fields. Secondary and repaired
+grading incidents belong in `error_history`. A failed detached grade does not write
+an authoritative result, transcript or HTML verdict: its caller appends the incident
+to a deep copy of the immediate prior row and writes that selected row once. The
+first execute audit copy remains immutable and is never used as a rollback source.
+The Docker path may serialize a failed attempt to its private scratch transport;
+its explicit incident marker is consumed before any authoritative write or fold-back.
+
+Explicit grading ERROR rows owe a grade even if a partial vector or zero score was
+recorded. Otherwise resume eligibility and scoring keep their existing semantics:
+a graded empty vector scores zero, and execute leaves the score unset. No additional
+execution-error rows are automatically scheduled because their vector is empty.
+
 ### The four grading sites
 
 `grade=False` is checked in exactly four places, and they do not behave alike:

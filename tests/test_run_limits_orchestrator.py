@@ -229,33 +229,33 @@ class TestCheckRunLimitsUnit:
     def test_input_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "input_tokens"
-        assert exc.value.actual == 2000
-        assert exc.value.limit == 1000
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "input_tokens"
+        assert error.actual == 2000
+        assert error.limit == 1000
 
     def test_output_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(output_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "output_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "output_tokens"
 
     def test_total_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=2500)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=1500, output_tokens=1500))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "total_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "total_tokens"
 
     def test_cost_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "usd"
-        assert exc.value.actual == pytest.approx(0.20)
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "usd"
+        assert error.actual == pytest.approx(0.20)
 
     def test_cost_skipped_when_no_cost_reported(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
@@ -285,16 +285,15 @@ class TestCheckRunLimitsUnit:
             _make_task(run_limits=RunLimits(max_input_tokens=1000, count_cached_input=True)), tmp_path
         )
         orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.actual == 1100
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.actual == 1100
 
     def test_cumulative_across_turns(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(iteration=1, input_tokens=600))
         orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
-        with pytest.raises(BudgetExceededError):
-            orch._check_run_limits(iteration=2)
+        assert isinstance(orch._check_run_limits(iteration=2), BudgetExceededError)
 
 
 async def _run_orchestrator(
@@ -467,11 +466,12 @@ class TestCostDataAvailableFlag:
 class TestSimulationBudgetAbort:
     """The simulation arm raises BudgetExceededError mid-dialog and records telemetry."""
 
-    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path):
+    @pytest.mark.parametrize("grade", [True, False])
+    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path, grade):
         """A budget breach in _simulation_dialog_loop must:
         - raise BudgetExceededError to the caller (Orchestrator.run),
         - set stop_reason=RUN_LIMIT_EXCEEDED in the finally block's SimulationTelemetry,
-        - run end-of-dialog criteria for partial credit.
+        - run end-of-dialog criteria for partial credit only when grading is enabled.
         """
         from coder_eval.models import SimulationConfig
 
@@ -486,6 +486,7 @@ class TestSimulationBudgetAbort:
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
+        orch.grade = grade
         # The agent's first turn reports tokens above the budget.
         turn = _make_turn(input_tokens=200, output_tokens=10)
         mock_agent = AsyncMock()
@@ -515,8 +516,9 @@ class TestSimulationBudgetAbort:
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
 
-        # End-of-dialog criteria must have run for partial credit before the raise.
-        assert len(orch.result.success_criteria_results) == 1
+        assert len(orch.result.success_criteria_results) == (1 if grade else 0)
+        assert mock_checker.check_all_async.await_count == (1 if grade else 0)
+        assert orch.result.final_status is FinalStatus.TOKEN_BUDGET_EXCEEDED
         # Finally block must have written telemetry with the dedicated stop_reason.
         assert orch.result.simulation is not None
         assert orch.result.simulation.stop_reason == "run_limit_exceeded"

@@ -160,6 +160,15 @@ The authoritative per-replicate record.
 
 **Errors** (populated on failure): `error_message`, `error_details`,
 `error_log_tail` (carries the Docker build-log tail for `BUILD_FAILED`).
+`error_phase` is `"execution"`, `"grading"` or absent. An absent phase on legacy
+`ERROR` rows is conservative: grading does not erase the execution outcome.
+The current primary failure uses `error_message`, `error_details` and
+`error_log_tail`. `error_history` retains secondary grading incidents and earlier
+repaired grading failures (`message`, structured `details`, `log_tail`,
+`recorded_at`). Only explicitly grading-origin `ERROR` can become a fresh verdict;
+execution `ERROR`, `TIMEOUT`, build and budget failures retain their original cause.
+A failed regrade keeps the immediate prior verdict and appends one incident without
+overwriting its criteria or judge artifacts.
 
 **Config/environment:** `environment_info`, `agent_config`, `sdk_options` (the
 options the agent sent to its SDK; the shape depends on the agent: a raw

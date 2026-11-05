@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 from rich.markup import escape
 
+from ..errors import GradingError, ReferenceTamperedError
 from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
 from ..harbor.atif_hydrate import seed_from_atif_trajectory
 from ..harbor.atif_models import Trajectory
@@ -17,7 +18,6 @@ from ..logging_config import setup_logging
 from ..models import (
     AgentKind,
     EvaluationResult,
-    FinalStatus,
     PreservationMode,
     TaskDefinition,
     TemplateDirSource,
@@ -31,10 +31,10 @@ from ..orchestration.regrade import (
     grading_sandbox_config,
     load_prior_result,
     regrade_in_place,
-    restore_pre_grade_record,
     stamp_host_grading,
     task_from_prior,
     verify_reference_unchanged,
+    write_grading_incident,
 )
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
@@ -458,10 +458,15 @@ def run_evaluation(
             sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
         task_dir = task_file.parent.resolve() if task_file is not None else None
         sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
-        if grade_in_place:
-            await asyncio.to_thread(sandbox.adopt, graded_dir)
-        else:
-            await asyncio.to_thread(sandbox.setup)
+        try:
+            if grade_in_place:
+                await asyncio.to_thread(sandbox.adopt, graded_dir)
+            else:
+                await asyncio.to_thread(sandbox.setup)
+        except ReferenceTamperedError:
+            raise
+        except Exception as error:
+            raise GradingError(error, component="evaluate.sandbox") from error
         orchestrator = Orchestrator(
             task=task,
             run_dir=prepared_run_dir,
@@ -488,6 +493,17 @@ def run_evaluation(
 
     try:
         result = asyncio.run(_setup_and_run())
+    except GradingError as error:
+        console.print(f"[red]✗ Evaluation error: {escape(str(error))}[/red]")
+        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
+            try:
+                write_grading_incident(target.target, prior, error)
+            except (OSError, RegradeError) as write_error:
+                console.print(f"[yellow]⚠[/] Could not record the grading incident: {escape(str(write_error))}")
+            else:
+                _refresh_run_summary(target.target, prepared_run_dir)
+                console.print("[yellow]⚠[/] Grading incident recorded; the prior verdict is unchanged.")
+        raise typer.Exit(1) from error
     except (RegradeError, RuntimeError) as e:
         # Rendered like the three sibling handlers above: unwrapped, these
         # operator-facing messages arrived as the tail of a stack trace. RuntimeError
@@ -519,19 +535,12 @@ def _report_and_exit(
     # error. `inherited` says whether the terminal status describes THIS pass or was
     # carried over from the run being graded.
     # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
-    inherited = prior is not None and prior.final_status.is_execution_fact
+    inherited = prior is not None and prior.has_execution_failure
 
-    if result.final_status is FinalStatus.ERROR and not inherited:
-        console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
-        if prior is not None:
-            # A grading-time crash is not a verdict about the run. Leaving ERROR
-            # on disk replaces a re-gradeable NOT_GRADED row with one BOTH
-            # commands treat as permanently complete.
-            restore_pre_grade_record(target.target)
-            console.print(
-                f"[yellow]⚠[/] Grading errored; {target.target / TASK_JSON_FILENAME} is left "
-                + "ungraded so the run stays re-gradeable."
-            )
+    if result.has_execution_failure and not inherited:
+        console.print(f"\n[red]✗ Evaluation error: {escape(result.error_message or '')}[/red]")
+        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
+            _write_back(target.target, result, prepared_run_dir)
         raise typer.Exit(1)
 
     # Display results
@@ -588,7 +597,7 @@ def _report_and_exit(
         )
         _write_back(target.target, result, prepared_run_dir)
 
-    if result.final_status.is_execution_fact:
+    if result.has_execution_failure:
         # The criteria tally is real -- it is why the table above still renders --
         # but it is not the row's outcome, and the exit code must agree with
         # run.json rather than with the tally.

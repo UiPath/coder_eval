@@ -529,6 +529,15 @@ class EarlyStopInfo(BaseModel):
     )
 
 
+class GradingErrorInfo(BaseModel):
+    """One failed grading pass, independent of the agent's execution outcome."""
+
+    message: str
+    details: dict[str, Any] | None = None
+    log_tail: str | None = None
+    recorded_at: datetime
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -614,6 +623,14 @@ class EvaluationResult(BaseModel):
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if evaluation failed")
+    error_phase: Literal["execution", "grading"] | None = Field(
+        default=None,
+        description="Origin of the terminal error. Absent legacy ERROR rows remain execution facts.",
+    )
+    error_history: list[GradingErrorInfo] = Field(
+        default_factory=list,
+        description="Prior grading incidents retained after another grading pass starts, plus secondary diagnostics.",
+    )
     error_details: dict[str, Any] | None = Field(
         default=None, description="Detailed error context from error_handling module"
     )
@@ -703,6 +720,13 @@ class EvaluationResult(BaseModel):
             "None on a full run — 'early_stop is not None' is itself the stopped-early flag."
         ),
     )
+
+    @property
+    def has_execution_failure(self) -> bool:
+        """Execution facts stay terminal; explicitly grading-origin ERROR rows are repairable."""
+        return self.final_status.is_execution_fact and not (
+            self.final_status is FinalStatus.ERROR and self.error_phase == "grading"
+        )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.

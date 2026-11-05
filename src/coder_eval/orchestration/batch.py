@@ -396,21 +396,20 @@ class ResumePartition(NamedTuple):
 
 
 def _owes_a_grade(result: EvaluationResult) -> bool:
-    """Whether a finalized row was executed but never scored.
+    """Whether a finalized row is eligible for grading-only resume.
 
-    EVIDENCE, not label: ``NOT_GRADED`` is the ordinary shape, but an ``execute``
-    row that also tripped a run limit carries an execution-fact status and no
-    verdict at all. A row with a criteria vector or a score HAS been graded,
-    whatever its status.
+    An ERROR with ``error_phase="grading"`` always qualifies, even with a score
+    or partial criteria. Otherwise, a score or criteria vector means grading is
+    complete.
 
-    The test is NOT_GRADED **or** executed, and the second half is what excludes
-    the synthetic rows: an ERROR / BUILD_FAILED record for a container that died
-    before producing task.json carries no verdict either, and routing those into
-    grading replaced the real diagnostic with a wrong-cause grading error. A
-    NOT_GRADED row qualifies on the first half alone, however few iterations it ran.
+    An unscored NOT_GRADED row qualifies regardless of iteration count. Other
+    unscored rows qualify only after execution began; synthetic startup failures
+    with no iterations do not.
 
     Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
     """
+    if result.final_status is FinalStatus.ERROR and result.error_phase == "grading":
+        return True
     if result.weighted_score is not None or result.success_criteria_results:
         return False
     return result.final_status is FinalStatus.NOT_GRADED or result.iteration_count > 0
@@ -419,17 +418,13 @@ def _owes_a_grade(result: EvaluationResult) -> bool:
 def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = True) -> ResumePartition:
     """Split resolved tasks over what ``--resume`` still owes each one.
 
-    A task is already-complete when its task.json exists, parses, and carries a
-    final_status — written atomically at end-of-run, so any parseable file with a
-    status is finished. Everything else, including failed-to-parse, re-runs.
+    A parseable task.json with a final_status records a finalized task attempt.
+    Missing or unreadable records, or records without a status, re-run.
 
-    **"Finished" is relative to the resuming command, not absolute.** Under
-    ``grade=True`` a row that was executed but never scored goes to ``to_grade``
-    instead of being called complete, where the caller runs the criteria against
-    the trajectory already on disk rather than paying for the agent again.
-
-    The asymmetry is only for a row that was NEVER scored: FAILURE and ERROR rows
-    that DO carry a verdict stay complete under both commands.
+    Under ``grade=True``, executed-but-unscored rows and grading-phase ERROR
+    rows go to ``to_grade``. Grading-phase ERROR qualifies even with a score or
+    partial criteria. The caller grades the saved trajectory without replaying
+    the agent. Other rows with a verdict stay complete under both commands.
 
     Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
 
