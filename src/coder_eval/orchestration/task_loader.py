@@ -372,7 +372,8 @@ def expand_dataset(
     Each expanded task has its task_id rewritten to
     ``"<original_task_id>/<row_id>"``, its ``dataset`` cleared (preventing
     re-expansion downstream), and ``${row.<field>}`` substituted in
-    ``initial_prompt`` and every string leaf of ``success_criteria``.
+    ``initial_prompt``, each ``simulation.turns`` entry, and every string leaf
+    of ``success_criteria``.
 
     Row ids are validated against a safe pattern, since they become directory
     names under the run dir.
@@ -436,6 +437,9 @@ def expand_dataset(
         data = task.model_dump(exclude_unset=True)
         if isinstance(data.get("initial_prompt"), str):
             data["initial_prompt"] = _substitute_row_in_str(data["initial_prompt"], row)
+        simulation = data.get("simulation")
+        if isinstance(simulation, dict) and isinstance(simulation.get("turns"), list):
+            simulation["turns"] = _substitute_row_in_tree(simulation["turns"], row)
         if isinstance(data.get("success_criteria"), list):
             data["success_criteria"] = [_substitute_row_in_tree(c, row) for c in data["success_criteria"]]
         data["suite_id"] = task.task_id

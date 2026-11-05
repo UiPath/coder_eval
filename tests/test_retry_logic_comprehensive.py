@@ -17,6 +17,24 @@ from coder_eval.errors.retry import get_retry_delay, should_retry
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_attempts", [1, 2])
+async def test_attempt_cap_has_no_terminal_backoff(max_attempts):
+    operation = AsyncMock(side_effect=AgentCrashError("transient crash"))
+    on_error = AsyncMock()
+    with patch("asyncio.sleep", new_callable=AsyncMock) as sleep, pytest.raises(AgentCrashError):
+        await execute_with_retry(
+            operation,
+            "capped operation",
+            {"task_id": "capped", "component": "agent"},
+            max_attempts=max_attempts,
+            on_attempt_error=on_error,
+        )
+    assert operation.await_count == max_attempts
+    assert on_error.await_count == max_attempts
+    assert sleep.await_count == max_attempts - 1
+
+
+@pytest.mark.asyncio
 async def test_execute_with_retry_stops_on_non_retryable():
     """Test that non-retryable errors (auth) fail immediately.
 

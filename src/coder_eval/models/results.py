@@ -432,6 +432,7 @@ class SimulationTelemetry(BaseModel):
     stop_reason: Literal[
         "criteria_passed",
         "stop_token",
+        "script_exhausted",
         "max_turns",
         "agent_max_turns",
         "budget",
@@ -447,7 +448,7 @@ class SimulationTelemetry(BaseModel):
         description=(
             "Resolved model that played the simulated user, captured so a persisted "
             "task.json is self-describing and its cost prices from a fact rather than "
-            "from the run's route."
+            "from the run's route. None when the user was scripted (``simulation.turns``)."
         ),
     )
 
