@@ -700,8 +700,9 @@ class _ClaudeTurnState:
             self._agent._reprice_for_litellm(usage, self.effective_model)
         return usage
 
+    @property
     def model_used(self) -> str | None:
-        """The turn's comparison-facing model: the resolved route model on Bedrock, else the SDK's.
+        """The model recorded on ``AgentEndEvent.model_used``: the resolved route model on Bedrock, else the SDK's.
 
         On Bedrock the SDK reports a friendly alias (``claude-sonnet-5``) for the
         inference profile the run was pinned to (``eu.anthropic.claude-sonnet-5``).
@@ -768,7 +769,7 @@ class _ClaudeTurnState:
                 iteration=self.iteration,
                 user_input=self.user_input,
                 agent_output=agent_output,
-                model_used=self.model_used(),
+                model_used=self.model_used,
                 assistant_turn_count=self.assistant_turn_count,
                 messages=list(self.sdk_messages),
                 num_turns=self.num_turns,
