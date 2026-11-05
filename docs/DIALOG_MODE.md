@@ -13,7 +13,8 @@ back requirements until asked.
 
 Dialog mode replaces the single-shot loop with a conversation between the coding agent and a
 **simulated user** — a second LLM driven by a persona and a goal. It is the only way to measure the
-behaviors that only exist in conversation.
+behaviors that only exist in conversation. To replay a fixed list of authored questions instead of
+simulating a user, see [Scripted dialogs](#scripted-dialogs).
 
 ## When to use it
 
@@ -71,7 +72,8 @@ The mechanics:
 **Agent-kind constraint.** The *subject* agent can be any registered kind — the dialog driver only
 calls the agent's `communicate()`, so Codex and plugin agents work. The *simulator*, however, is
 always a Claude Code agent. A dialog run therefore needs the `claude` CLI on `PATH` and working
-Anthropic or Bedrock credentials **even when the agent under test is not Claude**.
+Anthropic or Bedrock credentials **even when the agent under test is not Claude**. A
+[scripted dialog](#scripted-dialogs) has no simulator and needs neither.
 
 **Early stop is not available here.** [Criterion-level `stop_early:` arming](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
 is single-shot-only; an armed criterion alongside `simulation.enabled` is a hard error at resolution
@@ -81,6 +83,62 @@ Use `stop_on_criteria_pass` (below) for the dialog equivalent.
 Every field's default and constraint lives in one place — the
 [Task Definition Guide's simulation section](TASK_DEFINITION_GUIDE.md#simulation-multi-turn-user-dialog).
 This page deliberately does not restate them.
+
+## Scripted dialogs
+
+Sometimes the conversation itself is the benchmark: a fixed list of authored questions, asked in
+order within one session, whose answers you read afterwards. A simulated user would paraphrase them
+and add an LLM call per turn. Set `turns` instead of `persona` and `goal`, and the dialog replays the
+list verbatim:
+
+```yaml
+task_id: onboarding-questions
+description: Ask the same three questions in one session and keep each answer.
+agent:
+  type: codex                          # Any agent: a script needs no `claude` CLI or credentials of its own.
+working_directory_prefix: false        # Send each turn exactly as written.
+simulation:
+  enabled: true
+  turns:
+    - "What does the knowledge base say about onboarding?"
+    - "And about reimbursements?"
+    - "Summarize both answers in two sentences."
+  max_turns: 3                         # Must be at least len(turns).
+success_criteria:
+  - type: llm_judge
+    description: "Each answer is grounded in the knowledge base"
+    prompt: "Read the DIALOG block and grade whether every answer is grounded in the knowledge base."
+    include_dialog: true
+```
+
+What changes against a simulated dialog:
+
+- **One session, no simulator.** Every turn goes to the same agent instance, so the agent keeps its
+  context from turn to turn. No LLM plays the user: no `claude` CLI, no credentials, no simulator
+  route, and `simulation.simulator_model` is `null` with zero simulator tokens.
+- **`turns[0]` is the first prompt.** The task sets no `initial_prompt` or `initial_prompt_file`, so
+  there is one source of truth. Turns are sent byte for byte when `working_directory_prefix: false`;
+  by default each still carries the `Your working directory is: …` line in front.
+- **The script ends the dialog.** After the last turn the dialog stops with
+  `stop_reason: script_exhausted`, whatever the criteria say. Nothing in a script reads a criteria
+  result, so `stop_on_criteria_pass` and `check_criteria: every_turn` / `both` make no sense for it,
+  and neither do `persona`, `goal`, `constraints`, `model` or `stop_token`: each must keep its
+  default, or the task is rejected at load time. `max_turns` is derived from the script length
+  (1–100 turns), so an authored script needs no second dialog-length setting. Variant prompt
+  overrides and mutations are rejected; replace `simulation.turns` to change the script.
+- **A failed turn ends the dialog.** A turn that still fails after its retries, exhausts
+  `run_limits.max_turns` or breaches a `run_limits` budget stops the script. Later turns are not sent,
+  and the turns that ran stay on the record.
+- **It runs without grading.** `coder-eval execute` accepts a scripted dialog and finalizes it
+  `NOT_GRADED`; `coder-eval evaluate <run_dir>` grades it later. Criteria are checked once, after the
+  last turn.
+
+Each exchange is one entry in `iterations` of `task.json` (see [TurnRecord](REPORT_SCHEMA.md#turnrecord)):
+that turn's `user_input` (the prompt as the agent received it), `agent_output`, `commands`,
+`token_usage` and timings, with the authored turn as `messages[0]`. `agent_output` is the agent's own
+rendering of its reply: Claude Code's is a tagged transcript, and its SDK result text is also in
+`result_summary.result`. `n_trials: N` repeats the whole script N times, each in its own session, to
+measure variance.
 
 ## Designing the persona and goal
 
@@ -121,15 +179,17 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
 2. **`stop_on_criteria_pass`** (`criteria_passed`) — every success criterion passes. Requires
    per-turn checking (`check_criteria: every_turn` or `both`); pairing it with the default
    `end_of_dialog` is rejected at load time, since there would be nothing to check against.
-3. **`max_turns`** (`max_turns`) — the hard cap on exchanges.
-4. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
+3. **Script exhausted** (`script_exhausted`) — a [scripted dialog](#scripted-dialogs) has had its
+   last turn answered. It takes the place of `max_turns` there.
+4. **`max_turns`** (`max_turns`) — the hard cap on exchanges.
+5. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
    dialog ends and the task is **still scored** — unlike
    [`run_limits.max_total_tokens`](TASK_DEFINITION_GUIDE.md#run-limits), which covers the subject
    agent only and aborts.
-5. **`run_limits.max_turns`** (`agent_max_turns`): the agent used up its own model-call cap inside
+6. **`run_limits.max_turns`** (`agent_max_turns`): the agent used up its own model-call cap inside
    one exchange. That cap restarts on every exchange, so this reason means one exchange ran long, not
    that the dialog ran out of exchanges.
-6. **`stop_token`** (`stop_token`) — only if none of the above fired is the simulator asked for
+7. **`stop_token`** (`stop_token`) — only if none of the above fired is the simulator asked for
    another message; the sentinel token in *that fresh utterance* ends the dialog. This is the
    workhorse in practice — the simulator decides, in character, that it got what it wanted — but it
    is evaluated **last**, so a turn that trips `max_turns` or the budget never gets the chance to
@@ -192,8 +252,9 @@ with them. That guard is what keeps a chatty simulator from poisoning the grade.
 Budget roughly `max_turns × n_trials` agent turns per (task, variant) — the worst case, since the
 dialog usually stops on the stop token first. On top of that:
 
-- **Simulator tokens**, one generation per turn. Small next to the agent's, but not free, and they
-  are reported separately as `simulation.simulator_input_tokens` / `simulator_output_tokens`.
+- **Simulator tokens**, one generation per turn (none in a scripted dialog). Small next to the
+  agent's, but not free, and they are reported separately as `simulation.simulator_input_tokens` /
+  `simulator_output_tokens`.
 - **Criterion cost**, multiplied by turn count under `check_criteria: every_turn` or `both`.
 
 Cap it with [`run_limits`](TASK_DEFINITION_GUIDE.md#run-limits) — but note the accounting boundary:
@@ -217,9 +278,9 @@ variants:
       persona: "A terse, impatient user who gives one-line answers."
 ```
 
-Productive axes: persona (terse vs. chatty, technical vs. not), how much the goal withholds, and
-`n_trials` as a cost/confidence trade. See [A/B Experiments](AB_EXPERIMENTS.md) for the full
-experiment layer.
+A variant's `turns` replaces the task's script as a whole. Productive axes: persona (terse vs.
+chatty, technical vs. not), how much the goal withholds, and `n_trials` as a cost/confidence trade.
+See [A/B Experiments](AB_EXPERIMENTS.md) for the full experiment layer.
 
 ## Security posture
 

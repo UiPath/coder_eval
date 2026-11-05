@@ -52,6 +52,48 @@ class TestExpandDatasetNoDataset:
         assert expanded[0] is task  # same object, no copy
 
 
+class TestExpandDatasetScripted:
+    @staticmethod
+    def _task(turns: list[str], rows: list[dict[str, Any]]) -> TaskDefinition:
+        data = _base_task_dict()
+        del data["initial_prompt"]
+        data["simulation"] = {"enabled": True, "turns": turns, "max_turns": len(turns)}
+        data["success_criteria"] = []
+        data["dataset"] = {"rows": rows}
+        return TaskDefinition(**data)
+
+    def test_scalar_values_preserve_whitespace_and_original_task(self, tmp_path: Path) -> None:
+        turns = ["  ${row.text}\n", "${row.number}/${row.flag}/${row.optional}"]
+        task = self._task(turns, [{"id": "r1", "text": "ALPHA", "number": 3, "flag": True, "optional": None}])
+        before = task.model_dump()
+
+        expanded = expand_dataset(task, tmp_path)
+
+        assert expanded[0].simulation.turns == ["  ALPHA\n", "3/True/"]
+        assert task.model_dump() == before
+
+    def test_unknown_field_in_later_turn_is_rejected(self, tmp_path: Path) -> None:
+        task = self._task(["First", "${row.missing}"], [{"id": "r1"}])
+        with pytest.raises(KeyError, match=r"row\.missing"):
+            expand_dataset(task, tmp_path)
+
+    @pytest.mark.parametrize("value", [{"nested": "value"}, ["nested"]])
+    def test_non_scalar_turn_value_is_rejected(self, tmp_path: Path, value: Any) -> None:
+        task = self._task(["First", "${row.value}"], [{"id": "r1", "value": value}])
+        with pytest.raises(TypeError, match="must be a scalar"):
+            expand_dataset(task, tmp_path)
+
+    def test_empty_substitution_keeps_existing_turn_validation(self, tmp_path: Path) -> None:
+        task = self._task(["First", "${row.value}"], [{"id": "r1", "value": None}])
+        with pytest.raises(ValueError, match="every turn must be a non-empty string"):
+            expand_dataset(task, tmp_path)
+
+    def test_no_dataset_keeps_scripted_task_unchanged(self, tmp_path: Path) -> None:
+        task = self._task(["First", "Literal ${row.value}"], [{"id": "r1"}])
+        task.dataset = None
+        assert expand_dataset(task, tmp_path)[0] is task
+
+
 class TestExpandDatasetInline:
     def test_expands_rows_with_substitution(self, tmp_path: Path) -> None:
         task = _make_task_with_dataset(

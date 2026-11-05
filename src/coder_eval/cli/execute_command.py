@@ -239,7 +239,8 @@ def execute_command(
     Not supported here: --junit-xml (no verdicts to report), --allow-host-grading
     (nothing is graded, so there is no host-grading decision to make — pass it to
     `coder-eval run --resume` or `coder-eval evaluate` instead), and simulation
-    tasks (their turn-continuation logic reads criteria results).
+    tasks with an LLM-simulated user (their turn-continuation logic reads criteria
+    results). A scripted dialog (`simulation.turns`) is supported.
 
     Examples:
 

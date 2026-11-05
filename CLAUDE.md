@@ -107,8 +107,8 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   [Sandbox Configuration](docs/TASK_DEFINITION_GUIDE.md#sandbox-configuration).
 - **Container isolation**: `driver: docker` runs one container per task — see
   [Docker Isolation](docs/DOCKER_ISOLATION.md).
-- **Dialog mode**: `simulation/` drives a multi-turn LLM user — see
-  [Dialog Mode](docs/DIALOG_MODE.md).
+- **Dialog mode**: `simulation/` drives a multi-turn dialog. The user is an LLM or an
+  authored script (`simulation.turns`) — see [Dialog Mode](docs/DIALOG_MODE.md).
 
 ## Success Criteria
 
@@ -275,7 +275,7 @@ Tasks are YAML. Full reference: [Task Definition Guide](docs/TASK_DEFINITION_GUI
 | Task YAML, criteria, run limits, sandbox | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) |
 | Variants across the same tasks (A/B) | [A/B Experiments](docs/AB_EXPERIMENTS.md) |
 | Dataset fan-out and suite thresholds | [Bring Your Own Dataset](docs/DATASETS.md) |
-| Multi-turn user simulation | [Dialog Mode](docs/DIALOG_MODE.md) |
+| Multi-turn user simulation, scripted turns | [Dialog Mode](docs/DIALOG_MODE.md) |
 | `driver: docker`, custom images | [Docker Isolation](docs/DOCKER_ISOLATION.md) |
 | Run/report JSON consumed downstream | [Report Schema](docs/REPORT_SCHEMA.md) |
 

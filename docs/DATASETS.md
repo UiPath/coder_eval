@@ -71,10 +71,11 @@ Each line is one JSON object — the same shape as an inline row:
 
 ## Substituting row values
 
-`${row.<field>}` placeholders are replaced with that row's value in exactly two places:
+`${row.<field>}` placeholders are replaced with that row's value in:
 
-1. the task's `initial_prompt`, and
-2. every **string leaf** of every `success_criteria` entry (at any nesting depth).
+1. the task's `initial_prompt`,
+2. each scripted `simulation.turns` entry, and
+3. every **string leaf** of every `success_criteria` entry (at any nesting depth).
 
 Nothing else is substituted — not the task-level `description`, not `pre_run`, not `sandbox`. Keep
 row-varying data in the prompt and the criteria. (A *criterion's* own `description` is a string leaf

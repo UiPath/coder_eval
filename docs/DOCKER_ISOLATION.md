@@ -108,7 +108,7 @@ call a model, and adds nothing for the parts that do not:
 
 | Source | Hosts added |
 |---|---|
-| API backend (`API_BACKEND`), only when a `claude-code` agent, an enabled `simulation:`, or an `llm_judge` / `agent_judge` criterion uses it | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the host of the forwarded `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`) |
+| API backend (`API_BACKEND`), only when a `claude-code` agent, an enabled `simulation:` with a simulated user (not scripted `turns`), or an `llm_judge` / `agent_judge` criterion uses it | `direct`: `api.anthropic.com:443`, `platform.claude.com:443` (Claude Code OAuth refresh). `bedrock`: `bedrock-runtime.<AWS_REGION>.amazonaws.com:443`, `bedrock.<AWS_REGION>.amazonaws.com:443`. `litellm`: the host of the forwarded `LITELLM_BASE_URL` (a `localhost` value becomes `host.docker.internal`) |
 | Agent | codex: the host of the forwarded `CODEX_BASE_URL`, else `api.openai.com:443`. antigravity: `generativelanguage.googleapis.com:443`. pi: the host of the `provider/` prefix of `agent.model` (`openrouter`, `anthropic`, `openai`, `google`; anything else or no model gives `openrouter.ai:443`). claude-code, opencode, delegate, none: nothing beyond the backend row |
 | `system_one_judge` criteria | the host of each `base_url` (default `api.typesafe.ai:443`) |
 | `egress_allowlist` | your entries |
