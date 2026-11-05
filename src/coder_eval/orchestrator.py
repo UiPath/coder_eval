@@ -615,8 +615,9 @@ class Orchestrator:
                 if teardown_interrupt is not None:
                     raise teardown_interrupt
 
-        if self.prior_result is not None and self._grading_failure is not None:
-            raise self._grading_failure
+        grading_failure = self._grading_failure
+        if self.prior_result is not None and grading_failure is not None:
+            raise grading_failure
         return self.result
 
     async def _run_watched_evaluation(self, *, task_timeout: int | None, start_time: float) -> bool:
@@ -1235,11 +1236,11 @@ class Orchestrator:
         assert self.result is not None
         limits = self.task.run_limits
         if limits is None:
-            return
+            return None
 
         usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
         if not usages:
-            return
+            return None
 
         input_tokens = sum(u.uncached_input_tokens for u in usages)
         if limits.count_cache_creation:
@@ -1283,7 +1284,7 @@ class Orchestrator:
                         self.task.task_id,
                     )
                     self._cost_budget_skipped_logged = True
-                return
+                return None
             total_cost = sum(costs)
             if total_cost > limits.max_usd:
                 return BudgetExceededError(
@@ -1293,6 +1294,7 @@ class Orchestrator:
                     task_id=self.task.task_id,
                     iteration=iteration,
                 )
+        return None
 
     def _check_expected_turns(self, *, iteration: int) -> None:
         """Emit a one-shot warning if visible turns exceed expected_turns.
