@@ -20,6 +20,8 @@ from coder_eval.errors import TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     EvaluationResult,
+    ExperimentDefinition,
+    ExperimentVariant,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
     FinalStatus,
@@ -32,6 +34,8 @@ from coder_eval.models import (
     parse_agent_config,
     simulator_cost_usd,
 )
+from coder_eval.orchestration.experiment import _apply_prompt_overrides
+from coder_eval.orchestration.regrade import task_from_prior
 from coder_eval.orchestration.task_loader import expand_dataset
 from coder_eval.orchestrator import Orchestrator
 from tests.fixtures.mock_agent import MockAgent
@@ -356,3 +360,49 @@ async def test_an_agent_that_runs_out_of_its_own_turns_ends_the_script(tmp_path,
     assert result.simulation is not None
     assert result.simulation.stop_reason == ("agent_max_turns" if exhaust_on_call < len(TURNS) else "script_exhausted")
     assert json.loads((tmp_path / "run" / "task.json").read_text())["max_turns_exhausted"] is True
+
+
+@pytest.mark.parametrize("exhaust_on_call", [None, 9])
+@pytest.mark.parametrize("grade", [True, False])
+async def test_nine_turn_script_needs_no_dialog_cap_and_roundtrips(tmp_path, monkeypatch, exhaust_on_call, grade):
+    turns = [f"Exact question {i}" for i in range(9)]
+    created = _install_agent(monkeypatch, exhaust_on_call=exhaust_on_call)
+    task = _task(
+        turns=turns,
+        simulation=SimulationConfig(enabled=True, turns=turns),
+        sandbox=SandboxConfig(driver="tempdir", python=None),
+        success_criteria=[
+            FileMatchesRegexCriterion(path="not-created.txt", pattern="required", description="Missing file")
+        ],
+    )
+    result = await _run(tmp_path, task, grade=grade)
+    assert len(created) == 1 and created[0].prompts == turns
+    assert result.iteration_count == len(result.iterations) == 9
+    assert result.simulation.stop_reason == "script_exhausted"
+    exhausted = exhaust_on_call == 9
+    assert result.iterations[-1].max_turns_exhausted is exhausted
+    assert result.max_turns_exhausted is exhausted
+    expected = FinalStatus.MAX_TURNS_EXHAUSTED if exhausted else FinalStatus.FAILURE
+    assert result.final_status == (expected if grade else FinalStatus.NOT_GRADED)
+    stored = json.loads((tmp_path / "run" / "task.json").read_text(encoding="utf-8"))
+    assert stored["max_turns_exhausted"] is exhausted
+    restored = TaskDefinition.model_validate(stored["task_config"]["resolved"])
+    detached, _ = task_from_prior(result, tmp_path / "run")
+    assert restored.simulation.turns == detached.simulation.turns == turns
+    assert restored.simulation.max_turns == detached.simulation.max_turns == 9
+
+
+async def test_disabled_script_still_runs_the_overridden_normal_prompt(tmp_path, monkeypatch):
+    created = _install_agent(monkeypatch)
+    task = _task(
+        initial_prompt="original",
+        simulation=SimulationConfig(enabled=False, turns=TURNS),
+        sandbox=SandboxConfig(driver="tempdir", python=None),
+    )
+    variant = ExperimentVariant(variant_id="review", initial_prompt="normal replacement")
+    experiment = ExperimentDefinition(experiment_id="review", variants=[variant])
+    _apply_prompt_overrides(task, experiment, variant, {})
+    result = await _run(tmp_path, task, grade=False)
+    assert created[0].prompts == ["normal replacement"]
+    assert result.simulation is None
+    assert result.final_status == FinalStatus.NOT_GRADED

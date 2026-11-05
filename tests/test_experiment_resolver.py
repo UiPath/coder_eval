@@ -16,6 +16,7 @@ from coder_eval.models import (
     TemplateDirSource,
 )
 from coder_eval.orchestration.experiment import _apply_prompt_overrides, resolve_task_for_variant
+from coder_eval.orchestration.task_loader import resolve_variant_initial_prompt_file
 
 
 def _make_task(agent: dict | None = None, **kwargs) -> TaskDefinition:
@@ -667,6 +668,33 @@ class TestPromptMutations:
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         # defaults prefix first, then variant suffix
         assert resolved.initial_prompt == "DEFAULT\n\nbase\n\nVARIANT"
+
+    @pytest.mark.parametrize("kind", ["inline", "file", "default-mutation", "variant-mutation"])
+    def test_scripted_prompt_overrides_refuse_before_mutation(self, tmp_path, kind):
+        task = _make_task(
+            agent={"type": "claude-code"},
+            initial_prompt=None,
+            simulation={"enabled": True, "turns": ["first", "second"]},
+        )
+        variant = ExperimentVariant(variant_id="review")
+        defaults = None
+        if kind == "inline":
+            variant.initial_prompt = "replacement"
+        elif kind == "file":
+            (tmp_path / "prompt.txt").write_text("replacement")
+            variant.initial_prompt_file = "prompt.txt"
+            resolve_variant_initial_prompt_file(variant, tmp_path)
+        elif kind == "default-mutation":
+            defaults = ExperimentDefaults(prompt_mutations=[PromptPrefix(content="prefix")])
+        else:
+            variant.prompt_mutations = [PromptPrefix(content="prefix")]
+        experiment = ExperimentDefinition(experiment_id="review", defaults=defaults, variants=[variant])
+        before = task.model_dump()
+        lineage = {}
+        with pytest.raises(ValueError, match=r"simulation\.turns"):
+            _apply_prompt_overrides(task, experiment, variant, lineage)
+        assert task.model_dump() == before
+        assert lineage == {}
 
     def test_variant_initial_prompt_overrides_task_prompt(self):
         default_exp = _make_default_experiment()

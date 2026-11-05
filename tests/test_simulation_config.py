@@ -216,11 +216,24 @@ class TestScriptedTurns:
         recorded = SimulationConfig(**_scripted_kwargs()).model_dump()
         assert SimulationConfig(**recorded).turns == ["First question.", "Second question."]
 
-    def test_more_turns_than_max_turns_is_rejected_rather_than_truncated(self):
-        turns = [f"Question {i}." for i in range(9)]
+    @pytest.mark.parametrize("count", [1, 9, 100])
+    @pytest.mark.parametrize("specified", [None, 1, 100])
+    def test_script_length_sets_the_dialog_length(self, count, specified):
+        kwargs = _scripted_kwargs(turns=[f"Question {i}." for i in range(count)])
+        if specified is not None:
+            kwargs["max_turns"] = specified
+        cfg = SimulationConfig(**kwargs)
+        assert cfg.max_turns == count
+        assert SimulationConfig.model_validate(cfg.model_dump()).max_turns == count
+
+    @pytest.mark.parametrize("invalid", [0, 101, 1.5, "invalid"])
+    def test_raw_dialog_limit_still_validates_before_derivation(self, invalid):
         with pytest.raises(ValidationError, match="max_turns"):
-            SimulationConfig(**_scripted_kwargs(turns=turns))
-        assert SimulationConfig(**_scripted_kwargs(turns=turns, max_turns=9)).max_turns == 9
+            SimulationConfig(**_scripted_kwargs(max_turns=invalid))
+
+    def test_script_keeps_the_existing_effective_upper_bound(self):
+        with pytest.raises(ValidationError, match="turns"):
+            SimulationConfig(**_scripted_kwargs(turns=["question"] * 101))
 
     def test_token_budget_and_trials_still_apply_to_a_script(self):
         cfg = SimulationConfig(**_scripted_kwargs(max_total_tokens=50_000, n_trials=3))

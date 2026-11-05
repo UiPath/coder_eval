@@ -123,8 +123,9 @@ What changes against a simulated dialog:
   `stop_reason: script_exhausted`, whatever the criteria say. Nothing in a script reads a criteria
   result, so `stop_on_criteria_pass` and `check_criteria: every_turn` / `both` make no sense for it,
   and neither do `persona`, `goal`, `constraints`, `model` or `stop_token`: each must keep its
-  default, or the task is rejected at load time. `max_turns` must be at least `len(turns)`; a longer
-  script is rejected, never truncated.
+  default, or the task is rejected at load time. `max_turns` is derived from the script length
+  (1–100 turns), so an authored script needs no second dialog-length setting. Variant prompt
+  overrides and mutations are rejected; replace `simulation.turns` to change the script.
 - **A failed turn ends the dialog.** A turn that still fails after its retries, exhausts
   `run_limits.max_turns` or breaches a `run_limits` budget stops the script. Later turns are not sent,
   and the turns that ran stay on the record.

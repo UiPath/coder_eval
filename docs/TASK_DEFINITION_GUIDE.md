@@ -1760,7 +1760,7 @@ simulation:
 | `persona` | *required* | Who the simulator is roleplaying. Required unless `turns` is set. |
 | `goal` | *required* | What the simulated user wants. Required unless `turns` is set. |
 | `constraints` | `[]` | Behavioral rules the simulator must follow. |
-| `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). At least `len(turns)` when `turns` is set. |
+| `max_turns` | `8` | Hard cap on simulated user↔agent exchanges (1–100); derived from `len(turns)` for scripts. |
 | `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
@@ -1806,17 +1806,16 @@ simulation:
   turns:
     - "What does the knowledge base say about onboarding?"
     - "And about reimbursements?"
-  max_turns: 8                         # Must be at least len(turns).
 working_directory_prefix: false        # Send each turn byte for byte.
 ```
 
 - `turns[0]` is the first prompt, so the task sets no `initial_prompt` / `initial_prompt_file`. Each turn is sent as written (whitespace and newlines included) and must not be blank.
-- `persona`, `goal`, `constraints`, `model`, `stop_token`, `stop_on_criteria_pass` and `check_criteria` have nothing to do in a script, so each must keep its default; a different value is rejected at load time. `max_turns` must be at least `len(turns)`: a longer script is rejected, never truncated.
+- `persona`, `goal`, `constraints`, `model`, `stop_token`, `stop_on_criteria_pass` and `check_criteria` have nothing to do in a script, so each must keep its default; a different value is rejected at load time. `max_turns` is derived from the 1–100 authored turns, so no second length setting is needed. Variant prompt overrides and mutations are rejected; replace `simulation.turns` instead.
 - The dialog ends after the last turn with `stop_reason: script_exhausted`, whatever the criteria say. Criteria are checked once, after the last turn. `simulator_model` is `null` and the simulator token counts are `0`.
 - A turn that still fails after its retries (a crash or a timeout), exhausts `run_limits.max_turns` (`agent_max_turns`) or breaches a `run_limits` budget ends the dialog: later turns are not sent, and what ran is recorded.
 - `coder-eval execute` accepts a scripted dialog and finalizes it `NOT_GRADED`; `coder-eval evaluate` grades it afterwards from the recorded run.
 - `max_total_tokens` and `n_trials` work as for a simulated dialog. `run_limits.task_timeout` bounds the whole dialog; `run_limits.turn_timeout` bounds each turn.
-- `${row.<field>}` placeholders of a [`dataset`](#dataset) are not substituted into `turns`.
+- `${row.<field>}` placeholders of a [`dataset`](#dataset) are substituted into each scripted turn.
 
 Worked example, and where to read each turn's answer: [Dialog Mode → Scripted dialogs](DIALOG_MODE.md#scripted-dialogs).
 

@@ -173,11 +173,12 @@ class SimulationConfig(BaseModel):
         strategy="replace",  # a later layer's script wholesale-replaces an earlier one's
         default=None,
         min_length=1,
+        max_length=100,
         description=(
             "Scripted user turns, sent verbatim and in order within ONE agent session. turns[0] is the "
             "first prompt, so the task sets no initial_prompt. No simulator runs: persona, goal, "
             "constraints, model, stop_token, stop_on_criteria_pass and check_criteria must keep their "
-            "defaults, and max_turns must be at least len(turns). The dialog ends after the last turn "
+            "defaults. max_turns is derived from len(turns). The dialog ends after the last turn "
             "with stop_reason='script_exhausted'."
         ),
     )
@@ -225,7 +226,7 @@ class SimulationConfig(BaseModel):
         default=8,
         ge=1,
         le=100,
-        description="Hard cap on simulated user<->agent exchanges within a single dialog.",
+        description="Hard cap on simulated user<->agent exchanges; derived from len(turns) for scripted users.",
     )
     stop_token: str = Field(
         default=DEFAULT_SIMULATION_STOP_TOKEN,
@@ -307,11 +308,7 @@ class SimulationConfig(BaseModel):
         ]
         if changed:
             raise ValueError(f"simulation.turns scripts the user, so these must keep their defaults: {changed}")
-        if len(self.turns) > self.max_turns:
-            raise ValueError(
-                f"simulation.turns has {len(self.turns)} entries but max_turns is {self.max_turns} — "
-                + f"raise max_turns to at least {len(self.turns)}."
-            )
+        self.max_turns = len(self.turns)
         return self
 
     @model_validator(mode="after")

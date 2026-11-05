@@ -657,9 +657,9 @@ paths are shared.
 - **The fields a script ignores are compared by value, not by `model_fields_set`.**
   `evaluate` rebuilds the task from a full `model_dump()`, which marks every field as set,
   so a "was it set" test would reject every recorded scripted task.
-- **`max_turns >= len(turns)` is validated, not derived.** Deriving the cap from the list
-  would let a variant that swaps the script inherit the task's stale cap, and truncating a
-  script silently would score a different conversation than the one authored.
+- **Script length owns the dialog length.** Derive `max_turns` after simulation config
+  validation, including merged variant scripts, so a replacement cannot inherit a stale cap.
+  Prompt overrides are rejected before mutation because a script owns every user turn.
 - **No criteria steer a script.** `check_criteria` and `stop_on_criteria_pass` stay at their
   defaults, so the one criteria check is the end-of-dialog verdict. That is also why
   `execute` can accept it: nothing the dialog does depends on a verdict it lacks.
