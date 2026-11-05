@@ -1881,6 +1881,7 @@ class Orchestrator:
         run_limits = self.task.run_limits
         turn_timeout = run_limits.turn_timeout if run_limits else None
         max_turns = run_limits.max_turns if run_limits else None
+        max_turn_retries = run_limits.max_turn_retries if run_limits else None
 
         agent_callback: StreamCallback | None = None
         if self.stream_callback is not None:
@@ -1980,6 +1981,7 @@ class Orchestrator:
                     "component": "agent",
                     "agent_name": self._agent_name,
                 },
+                max_attempts=max_turn_retries + 1 if max_turn_retries is not None else None,
                 on_attempt_error=_on_attempt_failure,
             )
         assert turn_record is not None  # execute_with_retry returns the turn or raises

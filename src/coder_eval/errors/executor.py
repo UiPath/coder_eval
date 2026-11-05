@@ -31,7 +31,8 @@ async def execute_with_retry(
         operation: Async callable taking no arguments -- pass state by closure.
         operation_name: Human-readable name, for logging only.
         context: Requires ``task_id``; ``component`` and ``agent_name`` are optional.
-        max_attempts: Overrides the safety limit of 10.
+        max_attempts: Total attempt cap, including the first attempt. Defaults to
+            the safety limit of 10; the error-category policy can stop earlier.
         on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` invoked
             after every failed attempt, including the final non-retryable one, and
             before the backoff. Its own exceptions are logged and swallowed so they
@@ -91,7 +92,7 @@ async def execute_with_retry(
             config = RETRY_CONFIG.get(category, RetryConfig())
 
             # Check if we should retry (handles both non-retryable categories and exhausted attempts)
-            if not should_retry(category, attempt):
+            if not should_retry(category, attempt) or attempt + 1 >= max_attempts:
                 if config.max_retries == 0:
                     logger.error(f"[{task_id}] {operation_name} failed (non-retryable): {category.value} - {e}")
                 else:
@@ -105,8 +106,9 @@ async def execute_with_retry(
 
             # Enhanced warning with actionable tip
             tip = get_error_tip(category)
+            attempt_limit = min(config.max_retries + 1, max_attempts)
             message = (
-                f"[{task_id}] {operation_name} failed (attempt {attempt + 1}/{config.max_retries + 1}): "
+                f"[{task_id}] {operation_name} failed (attempt {attempt + 1}/{attempt_limit}): "
                 f"{category.value} - {e}. Retrying in {delay:.1f}s...\n  💡 Tip: {tip}"
             )
             logger.warning(message)

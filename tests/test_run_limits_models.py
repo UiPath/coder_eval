@@ -34,6 +34,7 @@ class TestRunLimitsValidation:
         assert rl.max_turns is None
         assert rl.task_timeout is None
         assert rl.turn_timeout is None
+        assert rl.max_turn_retries is None
         assert rl.max_input_tokens is None
         assert rl.max_output_tokens is None
         assert rl.max_total_tokens is None
@@ -74,6 +75,16 @@ class TestRunLimitsValidation:
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
             RunLimits(turn_timeout=9)
         RunLimits(turn_timeout=10)
+
+    @pytest.mark.parametrize("value", [0, 1, 100, None])
+    def test_max_turn_retries_roundtrip(self, value):
+        limits = RunLimits(max_turn_retries=value)
+        assert RunLimits.model_validate_json(limits.model_dump_json()).max_turn_retries == value
+
+    @pytest.mark.parametrize("value", [-1, 1.5])
+    def test_max_turn_retries_rejects_invalid_count(self, value):
+        with pytest.raises(ValidationError, match="max_turn_retries"):
+            RunLimits(max_turn_retries=value)
 
     def test_token_lower_bound(self):
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
