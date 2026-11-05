@@ -12,7 +12,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.models import AgentKind, BedrockRoute, DirectRoute, parse_agent_config
 
 
 def test_claude_agent_initialization():
@@ -1943,6 +1943,39 @@ class TestClaudeTurnState:
         tool_ends = [e for e in events if isinstance(e, ToolEndEvent)]
         assert len(tool_ends) == 1
         assert tool_ends[0].status == ToolEndStatus.OK
+
+    @pytest.mark.parametrize(
+        ("route", "effective_model", "expected"),
+        [
+            pytest.param(
+                BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-5"),
+                "eu.anthropic.claude-sonnet-5",
+                "eu.anthropic.claude-sonnet-5",
+                id="bedrock-records-route-model",
+            ),
+            pytest.param(
+                BedrockRoute(region="eu-north-1"),
+                None,
+                "claude-sonnet-5",
+                id="bedrock-without-resolved-model-falls-back-to-sdk",
+            ),
+            pytest.param(DirectRoute(), "sonnet", "claude-sonnet-5", id="direct-records-sdk-model"),
+        ],
+    )
+    def test_model_used_on_agent_end(self, route, effective_model, expected):
+        from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, TextBlock
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE), route=route)
+        state, events = self._state(agent)
+        state.effective_model = effective_model
+
+        state.on_assistant_message(AssistantMessage([TextBlock("done")], message_id="m1", model="claude-sonnet-5"))
+        state.finalize(AgentEndStatus.COMPLETED)
+
+        (end,) = [e for e in events if isinstance(e, AgentEndEvent)]
+        assert end.model_used == expected
+        assert state.sdk_messages[0].model == "claude-sonnet-5"
 
 
 class TestAgentBaseHelpers:
