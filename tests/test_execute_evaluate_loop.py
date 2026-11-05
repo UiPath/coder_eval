@@ -910,7 +910,7 @@ def test_primary_checker_failure_is_not_reclassified_by_secondary_diagnostic_fai
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "budget"])
-def test_finalize_grading_failure_does_not_replace_current_execution_fact(tmp_path: Path, kind: str) -> None:
+def test_unmeasured_execution_failure_does_not_attempt_score_calculation(tmp_path: Path, kind: str) -> None:
     from coder_eval.errors import AgentConfigError, BudgetExceededError, TaskTimeoutError
 
     error = {
@@ -929,17 +929,20 @@ def test_finalize_grading_failure_does_not_replace_current_execution_fact(tmp_pa
         patch(
             "coder_eval.models.EvaluationResult.calculate_weighted_score",
             side_effect=ValueError("score computation incident"),
-        ),
+        ) as calculate,
     ):
         _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
 
     communicate.assert_awaited_once()
+    calculate.assert_not_called()
     row = _row(_task_dir(run_dir))
     assert row["final_status"] == expected.value
     assert row["error_phase"] == "execution"
     assert row["error_message"] == str(error)
     assert row["error_details"]["error_message"] == str(error)
-    assert row["grading_error"]["message"] == "score computation incident"
+    assert row["weighted_score"] is None
+    assert not row["success_criteria_results"]
+    assert row["grading_error"] is None
 
 
 @pytest.mark.parametrize("kind", ["timeout", "budget"])

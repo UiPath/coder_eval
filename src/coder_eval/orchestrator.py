@@ -401,6 +401,7 @@ class Orchestrator:
 
         # Result tracking
         self.result: EvaluationResult | None = None
+        self._seeded_run_limit_error: BudgetExceededError | None = None
 
         # Per-run private COPY of task.reference.directory, staged in _setup and
         # removed in _cleanup; criteria address it as $REFERENCE_DIR. A copy, not
@@ -688,7 +689,11 @@ class Orchestrator:
                     recorded_at=prior.completed_at or prior.started_at,
                 )
             )
-        if prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
+        if (
+            prior.final_status is FinalStatus.ERROR
+            and prior.error_phase == "grading"
+            and not prior.has_execution_failure
+        ):
             self.result.error_message = None
             self.result.error_details = None
             self.result.error_log_tail = None
@@ -904,7 +909,9 @@ class Orchestrator:
 
     def _record_limit_error(self, error: TaskTimeoutError | BudgetExceededError) -> None:
         assert self.result is not None
-        if self.prior_result is not None or any(cause is error for cause, _ in self._grading_failures):
+        if error is not self._seeded_run_limit_error and (
+            self.prior_result is not None or any(cause is error for cause, _ in self._grading_failures)
+        ):
             self._record_error(error, component="orchestrator.grading")
             return
         self.result.error_phase = "execution"
@@ -932,8 +939,21 @@ class Orchestrator:
         if grading:
             self._grading_failures.append((error, self._grading_error_info(error, component)))
         checker_failure = self._publish_grading_failures(error)
-        is_grading = not isinstance(error, ReferenceTamperedError) and (
-            checker_failure or self.prior_result is not None
+        if checker_failure and self.prior_result is None:
+            try:
+                self._check_run_limits(iteration=self.result.iteration_count)
+            except BudgetExceededError as limit_error:
+                self._record_limit_error(limit_error)
+                return
+        interrupted_dialog = (
+            self.prior_result is None
+            and self.result.simulation is not None
+            and self.result.simulation.stop_reason == DialogStopReason.ERROR.value
+        )
+        is_grading = (
+            not isinstance(error, ReferenceTamperedError)
+            and not interrupted_dialog
+            and (checker_failure or self.prior_result is not None)
         )
         if is_grading and not checker_failure:
             if self.result.grading_error is not None:
@@ -1014,7 +1034,7 @@ class Orchestrator:
         assert self.result is not None
         assert self.task.agent is not None
         try:
-            if self.grade:
+            if self.grade and (self.result.success_criteria_results or not self.task.success_criteria):
                 self.result.calculate_weighted_score(self.task.success_criteria)
             else:
                 # Explicit None, NOT the 0.0 written for an empty results list —
@@ -2214,6 +2234,16 @@ class Orchestrator:
             # carries the real count — do not flatten it.
             if self.prior_result is None:
                 self.result.iteration_count = 1
+            elif (
+                self.prior_result.final_status is FinalStatus.ERROR
+                and self.prior_result.error_phase == "grading"
+                and not self.prior_result.has_execution_failure
+            ):
+                try:
+                    self._check_run_limits(iteration=self.result.iteration_count)
+                except BudgetExceededError as error:
+                    self._seeded_run_limit_error = error
+                    raise
             # Evaluate-only loads the reference too: include_reference judges
             # expect it populated even when no agent runs.
             criteria_results = await self._check_criteria(self.task.success_criteria)

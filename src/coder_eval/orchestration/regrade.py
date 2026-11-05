@@ -29,6 +29,7 @@ from typing import Any, TypedDict
 from coder_eval.models import (
     IN_CONTAINER_ENV,
     EvaluationResult,
+    FinalStatus,
     PreservationMode,
     ResolvedTask,
     SandboxConfig,
@@ -974,6 +975,13 @@ async def regrade_in_place(
             f"task {task.task_id!r} has no `success_criteria` and cannot be graded (it would silently "
             + "score SUCCESS at weighted_score 0.0). Add at least one criterion before re-grading it."
         )
+    if (
+        prior.final_status is FinalStatus.ERROR
+        and prior.error_phase == "grading"
+        and prior.simulation is not None
+        and prior.simulation.stop_reason == "error"
+    ):
+        raise RegradeError("The recorded dialog did not finish execution; detached grading cannot complete it.")
 
     # Graded INSIDE a container of the same image, dispatched before anything else
     # here — the reference check included — so the container performs every step

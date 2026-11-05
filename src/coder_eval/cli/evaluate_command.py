@@ -522,26 +522,30 @@ def _report_and_exit(
     inherited = prior is not None and prior.has_execution_failure
 
     if result.grading_error is not None:
-        console.print(f"\n[red]✗ Evaluation error: {result.grading_error.message}[/red]")
-        if prior is not None:
-            if inherited or (prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading"):
-                if target.mode is EvaluateMode.RUN_DIR:
-                    _write_back(target.target, result, prepared_run_dir)
+        console.print(f"\n[red]✗ Evaluation error: {escape(result.grading_error.message)}[/red]")
+        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
+            if not inherited and prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
+                _write_back(target.target, result, prepared_run_dir)
                 console.print("[yellow]⚠[/] Grading incident recorded; original execution facts are preserved.")
-            else:
-                restore_pre_grade_record(target.target, prior_result=prior, grading_result=result)
+            elif restore_pre_grade_record(target.target, prior_result=prior, grading_result=result):
+                _refresh_run_summary(target.target, prepared_run_dir)
                 console.print("[yellow]⚠[/] Grading errored; prior verdict restored with grading provenance.")
+            else:
+                console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
         raise typer.Exit(1)
 
-    if result.final_status is FinalStatus.ERROR and not inherited:
-        console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
-        if prior is not None:
+    if result.has_execution_failure and not inherited:
+        console.print(f"\n[red]✗ Evaluation error: {escape(result.error_message or '')}[/red]")
+        if prior is not None and target.mode is EvaluateMode.RUN_DIR:
             # Restore explicit grader faults only; new execution and reference
             # integrity failures must remain recorded as facts.
             if result.error_phase == "grading":
-                restore_pre_grade_record(target.target, prior_result=prior, grading_result=result)
-                console.print("[yellow]⚠[/] Grading errored; the prior verdict is preserved.")
-            elif target.mode is EvaluateMode.RUN_DIR:
+                if restore_pre_grade_record(target.target, prior_result=prior, grading_result=result):
+                    _refresh_run_summary(target.target, prepared_run_dir)
+                    console.print("[yellow]⚠[/] Grading errored; the prior verdict is preserved.")
+                else:
+                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
+            else:
                 _write_back(target.target, result, prepared_run_dir)
         raise typer.Exit(1)
 

@@ -726,9 +726,11 @@ class EvaluationResult(BaseModel):
 
     @property
     def has_execution_failure(self) -> bool:
-        """Precise execution-fact test; only an explicitly grading-origin ERROR is recoverable."""
+        """Execution facts stay terminal, including unfinished dialogs with a grading incident."""
         return self.final_status.is_execution_fact and not (
-            self.final_status is FinalStatus.ERROR and self.error_phase == "grading"
+            self.final_status is FinalStatus.ERROR
+            and self.error_phase == "grading"
+            and not (self.simulation is not None and self.simulation.stop_reason == "error")
         )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:

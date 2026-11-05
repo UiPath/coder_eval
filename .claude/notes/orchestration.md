@@ -99,6 +99,12 @@ The orchestrator retains the exact exceptions thrown by criteria and the
 identity of the primary exception. Reference-integrity verification stays outside
 this boundary: an agent changing its answer key is an execution failure.
 
+A grading crash can interrupt execution before its normal budget check or remaining
+dialog turns. Only that exceptional path rechecks the recorded run limits; an exceeded
+budget stays primary and the grader incident stays secondary. An interrupted dialog
+remains an execution fact, including when an older record calls it a grading ERROR.
+Completed single-shot and end-of-dialog grading failures remain repairable.
+
 `grading_error` is separate from the terminal execution error because both can
 exist at once. Regrading a crashed run may itself fail; the run keeps its original
 status, message, structured context and log tail while reporting the new grader

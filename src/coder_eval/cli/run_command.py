@@ -14,6 +14,7 @@ from typing import Any
 
 import click
 import typer
+from rich.markup import escape
 from tqdm import tqdm
 
 from ..config import Settings, settings
@@ -908,12 +909,23 @@ async def _grade_resumed_tasks(
                     f"{result.error_message}\n{grading_note}" if result.error_message else grading_note
                 )
         else:
-            if result.grading_error is not None and (
-                prior.has_execution_failure
-                or (prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading")
+            if result.grading_error is not None and prior.has_execution_failure:
+                incident = result.grading_error
+                if restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result):
+                    prior.grading_error = incident
+                    prior.error_history = result.error_history
+                    result = prior
+                    console.print(
+                        f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(incident.message)}); "
+                        + "recorded grading provenance while preserving execution facts."
+                    )
+                else:
+                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
+            elif result.grading_error is not None and (
+                prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading"
             ):
                 console.print(
-                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.grading_error.message}); "
+                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(result.grading_error.message)}); "
                     + "recorded grading provenance while preserving execution facts."
                 )
             elif result.grading_error is not None or (
@@ -923,15 +935,16 @@ async def _grade_resumed_tasks(
                 # _finalize_result has already written the ERROR task.json into
                 # this directory -- which is what a later --resume reads.
                 # Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
-                restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result)
-                console.print(
-                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.error_message}); "
-                    + "keeping the ungraded row so it stays re-gradeable."
-                )
-                prior.error_message = f"Grading errored during --resume: {result.error_message}"
-                prior.grading_error = result.grading_error
-                prior.error_history = result.error_history
-                result = prior
+                if restore_pre_grade_record(rt.run_dir, prior_result=prior, grading_result=result):
+                    console.print(
+                        f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({escape(result.error_message or '')}); "
+                        + "keeping the prior verdict so it stays re-gradeable."
+                    )
+                    prior.grading_error = result.grading_error
+                    prior.error_history = result.error_history
+                    result = prior
+                else:
+                    console.print("[yellow]⚠[/] Could not restore the prior verdict; failed grading record retained.")
         graded.append(
             (
                 rt,

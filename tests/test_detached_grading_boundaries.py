@@ -521,7 +521,9 @@ class TestGradingCrashLeavesTheRowRegradeable:
         expected = FinalStatus.NOT_GRADED if phase == "grading" else FinalStatus.ERROR
         assert folded.final_status is expected
         if phase == "grading":
-            assert "Grading errored during --resume" in (folded.error_message or "")
+            assert folded.error_message is None
+            assert folded.grading_error is not None
+            assert folded.grading_error.message == "mock failure"
         else:
             assert folded.error_message == "mock failure"
         # And the on-disk row too — fixing only the in-memory result leaves
@@ -529,6 +531,8 @@ class TestGradingCrashLeavesTheRowRegradeable:
         # --resume reads.
         on_disk = EvaluationResult.model_validate_json((run_dir / TASK_JSON_FILENAME).read_text(encoding="utf-8"))
         assert on_disk.final_status is expected
+        assert on_disk.error_message == folded.error_message
+        assert on_disk.grading_error == folded.grading_error
 
     async def test_an_unreadable_row_still_appears_as_ungraded(self, tmp_path: Path) -> None:
         """Dropping it removed it from run.json AND from `tasks_not_graded`,
