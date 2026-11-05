@@ -4,6 +4,7 @@ import asyncio
 import json
 import socket
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -52,8 +53,21 @@ def cli(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Completion tests must not start processes or connect to a provider")
 
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    connect = socket.socket.connect
+
+    def no_external_connect(sock, address):
+        # Only the stdlib socket pair may connect Windows asyncio's self-pipe.
+        if (
+            isinstance(address, tuple)
+            and address[0] in {"127.0.0.1", "::1"}
+            and sys._getframe(1).f_code is socket._fallback_socketpair.__code__
+        ):
+            return connect(sock, address)
+        return forbidden()
+
+    monkeypatch.setattr(socket.socket, "connect", no_external_connect)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr("coder_eval.cli.run_helpers.settings.telemetry_enabled", False)
     monkeypatch.setattr("coder_eval.orchestrator.get_version_info", lambda *a, **k: {})
     monkeypatch.setattr("coder_eval.orchestration.batch.get_version_info", lambda *a, **k: {})
     monkeypatch.setattr("coder_eval.config.Settings.validate_api_keys", lambda *a, **k: None)
@@ -300,3 +314,17 @@ def test_final_scoring_fault_keeps_measured_criteria_and_budget_primary(tmp_path
     assert len(row["success_criteria_results"]) == 1
     assert row["success_criteria_results"][0]["score"] == 1.0
     assert row["weighted_score"] is None
+
+
+def test_cli_guard_allows_platform_socketpair_and_refuses_external_connections(cli):
+    # Exercise the fallback Windows uses even on a host with native socketpair.
+    reader, writer = socket._fallback_socketpair()
+    try:
+        writer.sendall(b"local")
+        assert reader.recv(5) == b"local"
+    finally:
+        reader.close()
+        writer.close()
+    for address in (("127.0.0.1", 9), ("192.0.2.1", 443)):
+        with socket.socket() as sock, pytest.raises(AssertionError, match="must not start processes"):
+            sock.connect(address)
