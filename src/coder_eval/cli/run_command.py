@@ -977,25 +977,28 @@ async def _apply_resume(
 
 
 def _reject_simulation_under_execute(resolved: list[ResolvedTask], *, grade: bool) -> None:
-    """Refuse a simulation task under ``execute`` rather than degrading it.
+    """Refuse a simulated-user task under ``execute`` rather than degrading it.
 
     The dialog loop reads criteria results to decide whether to keep talking, so
     an ungraded dialog would quietly change its own stopping behaviour and
     produce a trajectory that is not the one `run` would have produced. A
+    scripted dialog (``simulation.turns``) never reads them and is accepted. A
     resolution-time config error (exit 2), sitting with the other
     resolution-time validations, and it names the offending tasks.
     """
     if grade:
         return
     simulated = sorted(
-        rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
+        rt.task.task_id
+        for rt in resolved
+        if rt.task.simulation is not None and rt.task.simulation.enabled and not rt.task.simulation.is_scripted
     )
     if simulated:
         raise typer.BadParameter(
-            "`coder-eval execute` does not support simulation tasks (their turn-continuation "
-            + "logic depends on criteria results): "
+            "`coder-eval execute` does not support simulation tasks with an LLM-simulated user (their "
+            + "turn-continuation logic depends on criteria results): "
             + ", ".join(simulated)
-            + ". Use `coder-eval run` for these."
+            + ". Use `coder-eval run` for these, or script the user with `simulation.turns`."
         )
 
 

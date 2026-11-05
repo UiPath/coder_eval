@@ -96,7 +96,7 @@ degraded:
 | --- | --- |
 | `--junit-xml` | A JUnit report reports verdicts, and there are none. |
 | `--allow-host-grading` | It decides how an executed-but-ungraded row is *graded*, and `execute` grades nothing. |
-| Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
+| Simulation tasks with an LLM-simulated user | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. A [scripted dialog](DIALOG_MODE.md#scripted-dialogs) (`simulation.turns`) reads none and is accepted. |
 
 `stop_early:` blocks are also inert here: early stop exists to cut a run once the
 criteria decide the outcome, and under `execute` the full trajectory is the deliverable.

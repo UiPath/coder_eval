@@ -14,6 +14,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Task YAML Structure](#task-yaml-structure)
   - [dataset](#dataset)
   - [skip](#skip)
+  - [working_directory_prefix](#working_directory_prefix)
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
@@ -41,6 +42,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
 - [Simulation (Multi-Turn User Dialog)](#simulation-multi-turn-user-dialog)
+  - [Scripted dialogs](#scripted-dialogs)
 - [Command Telemetry](#command-telemetry)
 - [Complete Example](#complete-example)
 
@@ -52,6 +54,7 @@ Every task is a YAML file with this top-level structure:
 task_id: "my_task"                    # Unique identifier (required)
 description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
+working_directory_prefix: true        # Optional: false sends prompts byte for byte (see below)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
 skip: false                           # Optional: quarantine this task (see below)
@@ -117,6 +120,14 @@ skip: true
 Pair it with a comment naming the blocker — a ticket link, an upstream issue — so the next reader
 knows what has to change before it can come back. Run quarantined tasks on demand with
 `coder-eval run --include-skipped`; CI leaves the flag off, so they stay excluded there.
+
+### `working_directory_prefix`
+
+By default the runner puts `Your working directory is: <sandbox path>` and a blank line in front of
+every prompt it sends to the agent: `initial_prompt` in a single-shot task, and each user turn in a
+[simulated or scripted dialog](#simulation-multi-turn-user-dialog). `working_directory_prefix: false`
+sends the prompt exactly as authored, byte for byte. Use it when the prompt text is itself under test,
+as with the fixed questions of a [scripted dialog](#scripted-dialogs). The default is `true`.
 
 ## Tags
 
@@ -1712,7 +1723,7 @@ The shipped `experiments/*.yaml` use this to drop sandbox-scoped npm dirs (intro
 
 ## Simulation (Multi-Turn User Dialog)
 
-Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
+Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal), or with a [scripted user](#scripted-dialogs) that replays authored turns. Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
 
 > This section is the field reference. For when to use dialog mode, how to design a persona and
 > goal, trials and variance, grading, and cost, see **[Dialog Mode](DIALOG_MODE.md)**.
@@ -1721,7 +1732,7 @@ Optional `simulation` block. When present and enabled, the orchestrator replaces
 simulation:
   enabled: true                        # Master switch; when false, simulation is skipped entirely.
 
-  # Persona and goal (required).
+  # Persona and goal (required for a simulated user; a scripted one sets `turns` instead).
   persona: |
     A non-technical business analyst who knows the outcome they want
     but not how automation works. Mildly impatient.
@@ -1754,10 +1765,11 @@ simulation:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | When false, simulation is skipped; task runs in single-shot mode. |
-| `persona` | *required* | Who the simulator is roleplaying. |
-| `goal` | *required* | What the simulated user wants. |
+| `turns` | *unset* | Scripted user turns, sent verbatim and in order in one session. Replaces the simulator — see [Scripted dialogs](#scripted-dialogs). |
+| `persona` | *required* | Who the simulator is roleplaying. Required unless `turns` is set. |
+| `goal` | *required* | What the simulated user wants. Required unless `turns` is set. |
 | `constraints` | `[]` | Behavioral rules the simulator must follow. |
-| `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). |
+| `max_turns` | `8` | Hard cap on simulated user↔agent exchanges (1–100); derived from `len(turns)` for scripts. |
 | `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
@@ -1769,16 +1781,17 @@ The simulator runs as a tools-disabled Claude Code agent on its own resolved `Ap
 
 **Semantics:**
 
-- The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
+- The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2. (A scripted dialog has no `initial_prompt`: `turns[0]` opens it.)
 - `max_turns` caps exchanges. Each exchange also gets a fresh `run_limits.max_turns` of model API calls, so the worst case per trial is the product of the two. Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 
 **Termination precedence** (evaluated after each exchange, first match wins): `run_limits` breach →
-`stop_on_criteria_pass` → `max_turns` → `max_total_tokens` → `stop_token`. The stop token is checked
-**last**, on the simulator's next utterance, which is only solicited if nothing above fired — so a
-turn that hits `max_turns` or the token budget ends the dialog before the simulator can emit it.
-A raising simulator call ends the dialog with `stop_reason: error`.
+`stop_on_criteria_pass` → script exhausted (`turns` only) → `max_turns` → `max_total_tokens` →
+`stop_token`. The stop token is checked **last**, on the simulator's next utterance, which is only
+solicited if nothing above fired — so a turn that hits `max_turns` or the token budget ends the
+dialog before the simulator can emit it. A raising simulator call ends the dialog with
+`stop_reason: error`.
 
 > **`simulation.max_total_tokens` vs. `run_limits.max_total_tokens`.** This one covers the **whole
 > dialog** (simulator + agent) and ends the conversation gracefully with `stop_reason='budget'`, so
@@ -1789,6 +1802,31 @@ A raising simulator call ends the dialog with `stop_reason: error`.
 **Grading simulated dialogs.** When a task uses `simulation:`, set `include_dialog: true` on any `llm_judge` / `agent_judge` criterion. Without it, the judge sees only the agent's outputs and may flag a fabricated-but-conceded premise as a hallucination by the agent. The dialog block is rendered with a rubric guard telling the judge to treat any claim made only by the simulated user as possibly invented, and not to penalize the agent for going along with it unless the grading prompt contradicts it.
 
 **Experiment variants** can override any simulation field (persona, goal, constraints, n_trials, etc.) by setting a partial `simulation:` block on a variant — it is shallow-merged onto the task's simulation block. Useful experiment axes: simulator persona (terse vs. chatty), goal withholding, and n_trials for budget/quality tradeoffs.
+
+### Scripted dialogs
+
+Set `turns` instead of `persona` and `goal` to replay a fixed list of authored user turns, in order,
+within ONE agent session. No LLM plays the user, so the dialog needs no `claude` CLI, no credentials
+and no simulator route, and the user side costs nothing.
+
+```yaml
+simulation:
+  enabled: true
+  turns:
+    - "What does the knowledge base say about onboarding?"
+    - "And about reimbursements?"
+working_directory_prefix: false        # Send each turn byte for byte.
+```
+
+- `turns[0]` is the first prompt, so the task sets no `initial_prompt` / `initial_prompt_file`. Each turn is sent as written (whitespace and newlines included) and must not be blank.
+- `persona`, `goal`, `constraints`, `model`, `stop_token`, `stop_on_criteria_pass` and `check_criteria` have nothing to do in a script, so each must keep its default; a different value is rejected at load time. `max_turns` is derived from the 1–100 authored turns, so no second length setting is needed. Variant prompt overrides and mutations are rejected; replace `simulation.turns` instead.
+- The dialog ends after the last turn with `stop_reason: script_exhausted`, whatever the criteria say. Criteria are checked once, after the last turn. `simulator_model` is `null` and the simulator token counts are `0`.
+- A turn that still fails after its retries (a crash or a timeout), exhausts `run_limits.max_turns` (`agent_max_turns`) or breaches a `run_limits` budget ends the dialog: later turns are not sent, and what ran is recorded.
+- `coder-eval execute` accepts a scripted dialog and finalizes it `NOT_GRADED`; `coder-eval evaluate` grades it afterwards from the recorded run.
+- `max_total_tokens` and `n_trials` work as for a simulated dialog. `run_limits.task_timeout` bounds the whole dialog; `run_limits.turn_timeout` bounds each turn.
+- `${row.<field>}` placeholders of a [`dataset`](#dataset) are substituted into each scripted turn.
+
+Worked example, and where to read each turn's answer: [Dialog Mode → Scripted dialogs](DIALOG_MODE.md#scripted-dialogs).
 
 ## Command Telemetry
 
