@@ -361,11 +361,12 @@ class TestCostDataAvailableFlag:
 class TestSimulationBudgetAbort:
     """The simulation arm raises BudgetExceededError mid-dialog and records telemetry."""
 
-    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path):
+    @pytest.mark.parametrize("grade", [True, False])
+    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path, grade):
         """A budget breach in _simulation_dialog_loop must:
         - raise BudgetExceededError to the caller (Orchestrator.run),
         - set stop_reason=RUN_LIMIT_EXCEEDED in the finally block's SimulationTelemetry,
-        - run end-of-dialog criteria for partial credit.
+        - run end-of-dialog criteria for partial credit only when grading is enabled.
         """
         from coder_eval.models import SimulationConfig
 
@@ -380,6 +381,7 @@ class TestSimulationBudgetAbort:
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
+        orch.grade = grade
         # The agent's first turn reports tokens above the budget.
         turn = _make_turn(input_tokens=200, output_tokens=10)
         mock_agent = AsyncMock()
@@ -409,8 +411,9 @@ class TestSimulationBudgetAbort:
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
 
-        # End-of-dialog criteria must have run for partial credit before the raise.
-        assert len(orch.result.success_criteria_results) == 1
+        assert len(orch.result.success_criteria_results) == (1 if grade else 0)
+        assert mock_checker.check_all_async.await_count == (1 if grade else 0)
+        assert orch.result.final_status is FinalStatus.TOKEN_BUDGET_EXCEEDED
         # Finally block must have written telemetry with the dedicated stop_reason.
         assert orch.result.simulation is not None
         assert orch.result.simulation.stop_reason == "run_limit_exceeded"

@@ -2674,7 +2674,9 @@ class Orchestrator:
                 # ensures end-of-dialog criteria still run for partial credit.
                 if limit_error is not None:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
-                    if not criteria_checked_this_turn:
+                    if self.grade and not criteria_checked_this_turn:
+                        # Partial-credit side effects only; this fallback site
+                        # neither sets all_passed nor emits an event.
                         await self._run_dialog_criteria_check(judge_usage_accum)
                     raise limit_error
 
