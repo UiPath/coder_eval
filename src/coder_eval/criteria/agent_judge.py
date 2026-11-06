@@ -269,9 +269,9 @@ def _build_agent_config(
         deep=True,
     )
     # SECURITY: the floor is present even when the user supplied their own list.
+    # Set-union is idempotent and order-independent.
     config.ignore_patterns = list({*config.ignore_patterns, *JUDGE_SECURITY_IGNORE_FLOOR})
-    # SECURITY/contract: the judge MUST be able to call its verdict tool, so the
-    # tool name is forced in regardless of the user's override.
+    # SECURITY/contract: force the verdict tool even when the user overrides tools.
     config.allowed_tools = list({*(config.allowed_tools or []), SUBMIT_VERDICT_MCP_TOOL_NAME})
     return config
 

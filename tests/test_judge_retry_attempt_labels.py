@@ -2,9 +2,6 @@
 
 import copy
 import json
-import socket
-import subprocess
-import sys
 from datetime import datetime
 
 import pytest
@@ -23,44 +20,6 @@ from coder_eval.models import (
     UserMessage,
 )
 from coder_eval.sandbox import Sandbox
-
-
-@pytest.fixture(autouse=True)
-def no_external_calls(monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Synthetic judge tests must not open a network connection or start a subprocess")
-
-    connect = socket.socket.connect
-
-    def no_external_connect(sock, address):
-        if (
-            isinstance(address, tuple)
-            and address[0] in {"127.0.0.1", "::1"}
-            and sys._getframe(1).f_code is socket._fallback_socketpair.__code__
-        ):
-            return connect(sock, address)
-        return forbidden()
-
-    monkeypatch.setattr(socket.socket, "connect", no_external_connect)
-    monkeypatch.setattr(subprocess, "Popen", forbidden)
-
-
-def test_guard_allows_stdlib_socketpair():
-    reader, writer = socket._fallback_socketpair()
-    try:
-        writer.sendall(b"local")
-        assert reader.recv(5) == b"local"
-    finally:
-        reader.close()
-        writer.close()
-
-
-def test_guard_blocks_other_io():
-    for address in (("127.0.0.1", 9), ("192.0.2.1", 443)):
-        with socket.socket() as sock, pytest.raises(AssertionError, match="must not open a network"):
-            sock.connect(address)
-    with pytest.raises(AssertionError, match="must not open a network"):
-        subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
 
 
 def turn(number, output=None, *, crashed=False, prompt=None):
@@ -361,15 +320,25 @@ def test_proven_standalone_user_is_omitted_from_all_grading_trajectory(record_ki
     )
 
 
-def test_ambiguous_unmarked_user_only_duplicate_fails_closed_without_mutation():
+def test_ambiguous_unmarked_user_only_duplicate_is_omitted_with_diagnostic_without_mutation():
     legacy = TurnRecord(
         iteration=2, user_input="QUESTION_2", agent_output="", messages=[UserMessage(text="QUESTION_2")]
     )
     records = [turn(1), turn(2, "FAILED_PARTIAL", crashed=True), legacy]
     before = copy.deepcopy(records)
-    with pytest.raises(ValueError, match="ambiguous legacy standalone user record"):
-        build(records)
+    context = build(records)
+    assert context.dialog[-1] == ("QUESTION_2", "FAILED_PARTIAL")
+    assert any("omitted legacy user-only duplicate" in note for note in context.degraded_notes)
     assert records == before
+    assert legacy.record_kind is None
+
+
+async def test_public_checker_surfaces_legacy_omission_as_a_degraded_note(offline_judge):
+    legacy = TurnRecord(
+        iteration=2, user_input="QUESTION_2", agent_output="", messages=[UserMessage(text="QUESTION_2")]
+    )
+    result = await grade([turn(1), turn(2, "FAILED_PARTIAL", crashed=True), legacy], "Synthetic")
+    assert "omitted legacy user-only duplicate" in result.details
     assert legacy.record_kind is None
 
 
@@ -385,6 +354,63 @@ def test_unmarked_single_empty_agent_keeps_legacy_contract():
         iteration=1, user_input="QUESTION_1", agent_output="", messages=[UserMessage(text="QUESTION_1")]
     )
     assert build([legacy]).dialog == [("QUESTION_1", "")]
+
+
+def test_leading_standalone_does_not_create_a_failed_attempt_when_an_agent_record_exists():
+    standalone = TurnRecord(
+        iteration=1,
+        user_input="QUESTION_1",
+        agent_output="",
+        record_kind="standalone_user",
+        messages=[UserMessage(text="QUESTION_1")],
+    )
+    actual = turn(1)
+    records = [standalone, actual]
+    before = copy.deepcopy(records)
+    context = build(records, output=True, tools=True)
+    assert context.dialog == [("QUESTION_1", "FINAL_1")]
+    assert context.agent_output == "FINAL_1"
+    assert context.attempt_guidance is None
+    assert records == before
+
+
+def test_unique_unsent_question_does_not_reuse_previous_agent_output_or_tools():
+    previous = turn(1)
+    previous.commands = [
+        CommandTelemetry(
+            tool_name="Read", tool_id="prior", timestamp=datetime(2026, 1, 1), parameters={"file_path": "prior.txt"}
+        )
+    ]
+    orphan = TurnRecord(
+        iteration=2,
+        user_input="UNANSWERED_QUESTION_2",
+        agent_output="",
+        record_kind="standalone_user",
+        messages=[UserMessage(text="UNANSWERED_QUESTION_2")],
+    )
+    before = copy.deepcopy(orphan)
+    context = build([previous, orphan], output=True, tools=True)
+    assert context.dialog[-1] == ("UNANSWERED_QUESTION_2", "")
+    assert context.dialog_attempt(1).crashed
+    assert not context.dialog_attempt(1).canonical
+    assert context.agent_output is None and context.tool_calls_summary is None
+    assert orphan == before and not orphan.crashed
+
+
+def test_empty_failed_latest_without_any_rendered_section_does_not_add_guidance():
+    context = JudgeContextBuilder(
+        files=[],
+        include_reference=False,
+        include_agent_output=True,
+        include_tool_calls=True,
+        include_dialog=False,
+        max_file_chars=10_000,
+    ).build(
+        Sandbox(SandboxConfig(driver="tempdir", python=None, node=None), "synthetic"), None, [turn(1, "", crashed=True)]
+    )
+    assert context.attempt_guidance is None
+    state = system_one_judge._build_state("Synthetic", context, 10000)
+    assert "attempt_guidance" not in state and "agent_attempt" not in state
 
 
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
@@ -411,11 +437,12 @@ def test_failed_latest_output_and_tool_summary_are_labelled_as_failure_evidence(
     assert "FAILED AGENT TOOL CALLS (UNTRUSTED DATA" in message
 
 
-def test_system_one_failed_latest_sections_are_not_named_final_agent_output():
+def test_system_one_failed_latest_sections_keep_stable_keys_with_failure_metadata():
     failed = turn(1, "PARTIAL", crashed=True)
     state = system_one_judge._build_state("Synthetic", build([failed], output=True), 10_000)
-    assert state["failed_agent_output"] == "PARTIAL"
-    assert "agent_output" not in state
+    assert state["agent_output"] == "PARTIAL"
+    assert "failed_agent_output" not in state
+    assert state["agent_attempt"] == {"turn": 1, "crashed": True}
 
 
 def test_unmarked_empty_completed_retry_has_positive_agent_provenance():

@@ -142,9 +142,11 @@ measure variance.
 
 Retries share the authored `iteration` number; failed attempts and their costs stay in the raw
 record. The driver can also preserve an unconsumed simulator utterance as
-`record_kind: standalone_user`. That row is telemetry, not an agent answer, and is omitted from grading
-trajectory sections. Collected agent records use `record_kind: agent`, including genuine empty
-completed answers. Older records keep unknown provenance rather than acquiring an inferred kind.
+`record_kind: standalone_user`. That row is telemetry, not an agent answer. Stop messages and rows
+already covered by an agent attempt are omitted from grading. An unanswered question with no agent
+record remains in the dialog as failed input evidence, with no canonical answer or latest agent
+output. Collected agent records use `record_kind: agent`, including genuine empty completed answers.
+Older records keep unknown provenance rather than acquiring an inferred kind.
 
 ## Designing the persona and goal
 
@@ -256,8 +258,9 @@ with them. That guard is what keeps a chatty simulator from poisoning the grade.
 When attempts repeat or fail, the dialog labels earlier and failed attempts as evidence while
 `[Turn N]` identifies the latest nonfailed agent attempt. Process-wide criteria still see failed
 agent work. A failed latest output or tool summary is explicitly labelled as failure evidence.
-A legacy user-only duplicate without provenance is ambiguous unless it carries the simulator's
-stop marker; grading reports an error rather than inventing or replacing an answer.
+A legacy user-only duplicate without agent telemetry is omitted with a degraded note; the raw record and
+its costs stay unchanged. An explicit `record_kind: agent` or positive agent telemetry preserves a
+genuine empty answer. A custom legacy adapter's empty duplicate can be ambiguous without either.
 
 ## What it costs
 

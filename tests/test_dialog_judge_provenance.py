@@ -220,20 +220,22 @@ def test_legacy_stop_flag_is_positive_provenance_without_inventing_a_kind(tmp_pa
     assert all(r.get("record_kind") is None for r in json.loads(path.read_text())["iterations"])
 
 
-def test_ambiguous_legacy_failed_tail_stays_unknown_after_two_saved_grading_failures(tmp_path, cli, probe):
+def test_legacy_failed_tail_stays_unknown_after_two_successful_detached_grades(tmp_path, cli, probe):
     path, before = run_dialog(tmp_path, cli, probe, "crash")
     for row in before["iterations"]:
         row.pop("record_kind", None)
     path.write_text(json.dumps(before))
     initial_incidents = len(before["error_history"])
-    for attempt in range(1, 3):
+    for _attempt in range(2):
+        prior_grades = len(probe["grades"])
         graded = evaluate(cli, path, tmp_path)
         assert graded.exit_code == 1
         after = json.loads(path.read_text())
         assert all(r.get("record_kind") is None for r in after["iterations"])
         assert after["final_status"] == "ERROR"
         assert [r["agent_output"] for r in after["iterations"]] == [r["agent_output"] for r in before["iterations"]]
-        assert len(after["error_history"]) == initial_incidents + attempt, graded.output
-        diagnostic = after["error_history"][-1]["message"].lower()
-        assert "ambiguous" in diagnostic and "legacy" in diagnostic
+        assert len(probe["grades"]) == prior_grades + 1
+        assert len(after["error_history"]) == initial_incidents, graded.output
+        assert after["success_criteria_results"]
+        assert all(row.get("error") is None for row in after["success_criteria_results"])
     assert len(probe["agents"]) == 1

@@ -1235,7 +1235,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `include_reference` | `true` | Inline the WHOLE reference directory into the judge prompt, one labelled block per file (silently omitted if no reference is configured). Never shown to the agent. Set `false` and use `$REFERENCE_DIR/<path>` entries in `files` to attach only specific assets. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
-| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts as evidence and grading final answers by logical turn number. Proven standalone user telemetry is excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). In simulation mode the user side may invent premises, so the block is wrapped as `UNTRUSTED DATA` (recommended whenever a task uses `simulation:`). |
+| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). In simulation mode the user side may invent premises, so the block is wrapped as `UNTRUSTED DATA` (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text rendered into the judge prompt (per-message cap is `max_file_chars`). When exceeded, trailing turns are dropped and a degraded note is recorded. |
 | `model` | `anthropic.claude-sonnet-4-6` | Judge model id (vendor-prefixed; auto-translated per backend) |
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
@@ -1310,7 +1310,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `include_reference` | `true` | Mount the reference tree at `_reference/` for the judge to Read/Glob (not inlined into the prompt). Use `$REFERENCE_DIR/<path>` entries in `files` to pre-attach specific assets as text. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
-| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts as evidence and grading final answers by logical turn number. Proven standalone user telemetry is excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). The block is wrapped as `UNTRUSTED DATA` and warns about simulator-generated premises (recommended whenever a task uses `simulation:`). |
+| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). The block is wrapped as `UNTRUSTED DATA` and warns about simulator-generated premises (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text (per-message cap is `max_file_chars`). Trailing turns are dropped past the cap. |
 | `max_file_chars` | `20000` | Per-file truncation for pre-attached files |
 | `max_turns` | `50` | Judge's inner-loop turn limit |
@@ -1449,8 +1449,11 @@ Option order is preserved as written, and a repeated option is a load-time error
 **What the judge reads.** By default the state is `prompt` plus the `files` you list. Three flags widen it, each off by default: `include_agent_output` adds the agent's own final message, `include_tool_calls` adds a summary of its tool-call trajectory, and `include_dialog` adds the multi-turn user/agent exchange (only meaningful in [simulation mode](#simulation)). Turning the first two on is what lets a rubric grade *how* the agent worked and whether its summary was honest, not just the artifact it left behind — see `tasks/smoke_system_one_judge.yaml` for a rubric that does both. `include_reference` (on by default) adds the reference solution. Each section is capped independently by `max_state_chars`.
 
 `include_dialog` uses the same [attempt semantics](DIALOG_MODE.md#grading-a-dialog): failed agent
-work stays visible, logical turns identify final answers, and proven standalone user telemetry
-is excluded. Attempt states include shared guidance; a failed latest attempt has no canonical answer.
+work and unanswered questions stay visible, logical turns identify final answers, and standalone
+stop messages and duplicate user telemetry are excluded. Attempt states include shared guidance;
+a failed latest attempt has no canonical answer.
+The state keeps the `agent_output` and `agent_tool_calls` keys for failed evidence and adds
+`agent_attempt: {turn: N, crashed: true}` so questions can distinguish it from a completed answer.
 
 **Scoring** — the criterion score is computed by the harness, not the model: each question resolves to a value in [0.0, 1.0] and the score is their weighted mean. `scoring: expected` (default) weights every outcome by its probability, so a half-confident answer lands mid-scale; `scoring: argmax` reads only the top answer and discards the confidence. Either way the reduction is deterministic given the answers, and `findings` records the arithmetic per question so the grade is auditable line by line.
 

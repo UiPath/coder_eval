@@ -183,11 +183,16 @@ def _build_state(prompt: str, context: JudgeContext, max_section_chars: int) -> 
     }
     if context.reference is not None:
         state["reference_solution"] = context.reference[:max_section_chars]
-    agent_prefix = "failed_" if context.agent_attempt is not None and context.agent_attempt.crashed else ""
     if context.agent_output is not None:
-        state[agent_prefix + "agent_output"] = context.agent_output[:max_section_chars]
+        state["agent_output"] = context.agent_output[:max_section_chars]
     if context.tool_calls_summary is not None:
-        state[agent_prefix + "agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
+        state["agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
+    if (
+        context.agent_attempt is not None
+        and context.agent_attempt.crashed
+        and (context.agent_output is not None or context.tool_calls_summary is not None)
+    ):
+        state["agent_attempt"] = {"turn": context.agent_attempt.turn, "crashed": True}
     if context.dialog:
         dialog = []
         for i, (user, agent) in enumerate(context.dialog, 1):

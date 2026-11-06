@@ -60,12 +60,13 @@ ATTEMPT_GUIDANCE = (
     "Only the latest nonfailed agent attempt is canonical "
     "([Turn N], or earlier_attempt_evidence=false and crashed=false). "
     "A failed latest attempt leaves no canonical [Turn N] answer; do not promote earlier attempts. "
+    "When agent_attempt.crashed=true, agent_output and agent_tool_calls are failed attempt evidence. "
     "Earlier and failed attempts remain evidence for process-wide rules."
 )
 
 
-def _grading_agent_records(records: list[TurnRecord]) -> list[TurnRecord]:
-    agents = []
+def _grading_trajectory_records(records: list[TurnRecord], degraded_notes: list[str]) -> list[TurnRecord]:
+    trajectory = []
     seen = set()
     for record in records:
         message = record.messages[0] if len(record.messages) == 1 else None
@@ -89,16 +90,21 @@ def _grading_agent_records(records: list[TurnRecord]) -> list[TurnRecord]:
             and not agent_telemetry
         )
         legacy_stop = legacy_user_only and isinstance(message, UserMessage) and message.stop_requested
-        if record.record_kind == "standalone_user" or legacy_stop:
+        if legacy_stop:
+            continue
+        if record.record_kind == "standalone_user" and (
+            not isinstance(message, UserMessage) or message.stop_requested or record.iteration in seen
+        ):
             continue
         if legacy_user_only and record.iteration in seen:
-            raise ValueError(
-                f"ambiguous legacy standalone user record at iteration {record.iteration}: "
-                + "missing record_kind; cannot select an agent answer"
+            degraded_notes.append(
+                f"omitted legacy user-only duplicate at iteration {record.iteration}: no agent provenance or telemetry"
             )
-        agents.append(record)
-        seen.add(record.iteration)
-    return agents
+            continue
+        trajectory.append(record)
+        if record.record_kind != "standalone_user":
+            seen.add(record.iteration)
+    return [record for record in trajectory if record.record_kind != "standalone_user" or record.iteration not in seen]
 
 
 def _resolve_host_path(path: str, task_dir: Path | None, reference_dir: Path | None) -> Path | None:
@@ -316,7 +322,7 @@ class FileBlock:
 
 @dataclass(frozen=True)
 class DialogAttempt:
-    """One agent record's logical turn and position among that turn's attempts."""
+    """One dialog entry's logical turn and status among that turn's attempts."""
 
     turn: int
     latest: bool
@@ -365,7 +371,12 @@ class JudgeContext:
 
     @property
     def attempt_guidance(self) -> str | None:
-        return ATTEMPT_GUIDANCE if self._dialog_attempts or self.agent_attempt is not None else None
+        has_failed_latest = (
+            self.agent_attempt is not None
+            and self.agent_attempt.crashed
+            and (self.agent_output is not None or self.tool_calls_summary is not None)
+        )
+        return ATTEMPT_GUIDANCE if self._dialog_attempts or has_failed_latest else None
 
     def dialog_label(self, position: int) -> str:
         attempt = self.dialog_attempt(position)
@@ -507,13 +518,19 @@ class JudgeContextBuilder:
     def _collect_trajectory(self, turn_records: list[TurnRecord] | None, ctx: JudgeContext) -> None:
         if not (self.include_dialog or self.include_agent_output or self.include_tool_calls):
             return
-        records = _grading_agent_records(turn_records or [])
-        latest = records[-1] if records else None
+        records = _grading_trajectory_records(turn_records or [], ctx.degraded_notes)
+        latest = records[-1] if records and records[-1].record_kind != "standalone_user" else None
         latest_positions = {turn.iteration: i for i, turn in enumerate(records)}
-        has_attempt_metadata = len(latest_positions) != len(records) or any(turn.crashed for turn in records)
+        has_attempt_metadata = len(latest_positions) != len(records) or any(
+            turn.crashed or turn.record_kind == "standalone_user" for turn in records
+        )
         attempts = (
             [
-                DialogAttempt(turn.iteration, position == latest_positions[turn.iteration], turn.crashed)
+                DialogAttempt(
+                    turn.iteration,
+                    position == latest_positions[turn.iteration],
+                    turn.crashed or turn.record_kind == "standalone_user",
+                )
                 for position, turn in enumerate(records)
             ]
             if has_attempt_metadata
@@ -560,8 +577,9 @@ class JudgeContextBuilder:
                         ctx._dialog_attempts.append(attempts[position])
                     total += pair_len
                 if dropped:
+                    unit = "dialog record(s)" if has_attempt_metadata else "turn(s)"
                     msg = (
-                        f"include_dialog: dropped {dropped} trailing turn(s) after "
+                        f"include_dialog: dropped {dropped} trailing {unit} after "
                         f"exceeding max_dialog_chars={self.max_dialog_chars}"
                     )
                     ctx.degraded_notes.append(msg)
