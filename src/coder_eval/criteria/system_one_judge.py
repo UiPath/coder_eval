@@ -175,31 +175,30 @@ def _build_state(prompt: str, context: JudgeContext, max_section_chars: int) -> 
     state: dict[str, Any] = {}
     if prompt:
         state["context"] = prompt[:max_section_chars]
+    if context.attempt_guidance is not None:
+        state["attempt_guidance"] = context.attempt_guidance
 
     state["files"] = {
         f.path: (f.content if f.content is not None else "<file not found>")[:max_section_chars] for f in context.files
     }
     if context.reference is not None:
         state["reference_solution"] = context.reference[:max_section_chars]
+    agent_prefix = "failed_" if context.agent_attempt is not None and context.agent_attempt.crashed else ""
     if context.agent_output is not None:
-        state["agent_output"] = context.agent_output[:max_section_chars]
+        state[agent_prefix + "agent_output"] = context.agent_output[:max_section_chars]
     if context.tool_calls_summary is not None:
-        state["agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
+        state[agent_prefix + "agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
     if context.dialog:
-        state["dialog"] = [
-            {
-                "turn": context._dialog_turn_numbers[i - 1] if context._dialog_turn_numbers else i,
+        dialog = []
+        for i, (user, agent) in enumerate(context.dialog, 1):
+            attempt = context.dialog_attempt(i - 1)
+            row: dict[str, Any] = {
+                "turn": attempt.turn if attempt is not None else i,
                 "user": user[:max_section_chars],
                 "agent": agent[:max_section_chars],
-                **(
-                    {
-                        "earlier_attempt_evidence": not context._dialog_latest_attempt[i - 1],
-                        "crashed": context._dialog_crashed[i - 1],
-                    }
-                    if context._dialog_turn_numbers
-                    else {}
-                ),
             }
-            for i, (user, agent) in enumerate(context.dialog, 1)
-        ]
+            if attempt is not None:
+                row.update(earlier_attempt_evidence=not attempt.latest, crashed=attempt.crashed)
+            dialog.append(row)
+        state["dialog"] = dialog
     return state

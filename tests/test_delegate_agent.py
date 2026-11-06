@@ -965,6 +965,7 @@ class TestCommunicate:
         events.append(_line({"type": "error", "message": "synthetic transient failure"}))
         agent, first = await _started_agent(patch_exec, events, tmp_path)
         restarted = []
+        failures = []
         records = []
         try:
             for n in range(1, 4):
@@ -972,8 +973,7 @@ class TestCommunicate:
             prior_records = [record.model_dump(mode="json") for record in records]
 
             async def failed(error, attempt):
-                assert attempt == 0 and agent.pending_turn.iteration == 4
-                assert agent.pending_turn.crashed and agent.pending_turn.user_input == "question4"
+                failures.append((error, attempt, agent.pending_turn))
                 await agent.discard_pending_turn()
                 restarted.append(
                     patch_exec(
@@ -994,6 +994,11 @@ class TestCommunicate:
                 on_attempt_error=failed,
             )
             fifth = await agent.communicate("question5")
+            assert len(failures) == 1
+            error, attempt, partial = failures[0]
+            assert isinstance(error, AgentCrashError) and attempt == 0
+            assert partial is not None and partial.iteration == 4
+            assert partial.crashed and partial.user_input == "question4"
             sends = [row for proc in [first, *restarted] for row in proc.stdin.written if row["cmd"] == "send"]
             assert [row["iteration"] for row in sends] == [1, 2, 3, 4, 4, 5]
             assert [row["prompt"] for row in sends] == [

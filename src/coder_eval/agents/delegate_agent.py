@@ -12,7 +12,7 @@ Wire protocol (one JSON object per line; the package README is the SSOT)::
     stdin                                   stdout
     {"cmd":"init","options":{...}}      ->  {"type":"init_ok"}
     {"cmd":"send","prompt":..,              {"type":"event","event":{...}}  (zero or more)
-            "sessionId":..}                 {"type":"usage","usage":{..}}   (one per model call)
+            "sessionId":..,"iteration":N}   {"type":"usage","usage":{..}}   (one per model call)
                                         ->  {"type":"result","response":..,"sessionId":..,
                                              "usage":{..},"turnUsages":[..],"model":..}
     {"cmd":"destroy"}                   ->  {"type":"destroyed"}

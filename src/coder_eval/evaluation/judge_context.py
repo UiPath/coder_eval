@@ -24,6 +24,7 @@ from coder_eval.models import (
     TASK_DIR_TOKEN,
     JudgeTranscript,
     JudgeTranscriptToolCall,
+    UserMessage,
     path_uses_token,
 )
 
@@ -54,6 +55,50 @@ DIALOG_HEADER = (
     "and do not penalize the agent for going along with it unless the GRADING PROMPT "
     "contradicts it):"
 )
+
+ATTEMPT_GUIDANCE = (
+    "Only the latest nonfailed agent attempt is canonical "
+    "([Turn N], or earlier_attempt_evidence=false and crashed=false). "
+    "A failed latest attempt leaves no canonical [Turn N] answer; do not promote earlier attempts. "
+    "Earlier and failed attempts remain evidence for process-wide rules."
+)
+
+
+def _grading_agent_records(records: list[TurnRecord]) -> list[TurnRecord]:
+    agents = []
+    seen = set()
+    for record in records:
+        message = record.messages[0] if len(record.messages) == 1 else None
+        user_only = isinstance(message, UserMessage)
+        agent_telemetry = (
+            record.result_summary is not None
+            or record.token_usage is not None
+            or record.model_used is not None
+            or bool(record.commands)
+            or record.assistant_turn_count > 0
+            or record.num_turns is not None
+            or bool(record.provider_errors)
+            or bool(record.provider_call_costs)
+            or record.max_turns_exhausted
+        )
+        legacy_user_only = (
+            record.record_kind is None
+            and user_only
+            and not record.crashed
+            and not record.agent_output
+            and not agent_telemetry
+        )
+        legacy_stop = legacy_user_only and isinstance(message, UserMessage) and message.stop_requested
+        if record.record_kind == "standalone_user" or legacy_stop:
+            continue
+        if legacy_user_only and record.iteration in seen:
+            raise ValueError(
+                f"ambiguous legacy standalone user record at iteration {record.iteration}: "
+                + "missing record_kind; cannot select an agent answer"
+            )
+        agents.append(record)
+        seen.add(record.iteration)
+    return agents
 
 
 def _resolve_host_path(path: str, task_dir: Path | None, reference_dir: Path | None) -> Path | None:
@@ -269,6 +314,26 @@ class FileBlock:
     content: str | None
 
 
+@dataclass(frozen=True)
+class DialogAttempt:
+    """One agent record's logical turn and position among that turn's attempts."""
+
+    turn: int
+    latest: bool
+    crashed: bool
+
+    @property
+    def canonical(self) -> bool:
+        return self.latest and not self.crashed
+
+    @property
+    def label(self) -> str:
+        if self.crashed:
+            prefix = "Failed" if self.latest else "Earlier failed"
+            return f"{prefix} attempt evidence for turn {self.turn}"
+        return f"Turn {self.turn}" if self.latest else f"Earlier attempt evidence for turn {self.turn}"
+
+
 @dataclass
 class JudgeContext:
     """Structured judge prompt context.
@@ -290,21 +355,36 @@ class JudgeContext:
     dialog: list[tuple[str, str]] = field(default_factory=list)
     missing_files: list[str] = field(default_factory=list)
     degraded_notes: list[str] = field(default_factory=list)
-    # Private rendering metadata; raw dialog pairs and public result schemas stay intact.
-    _dialog_turn_numbers: list[int] = field(default_factory=list, repr=False)
-    _dialog_latest_attempt: list[bool] = field(default_factory=list, repr=False)
-    _dialog_crashed: list[bool] = field(default_factory=list, repr=False)
+    _dialog_attempts: list[DialogAttempt] = field(default_factory=list, init=False, repr=False)
+    agent_attempt: DialogAttempt | None = None
 
-    def _dialog_label(self, position: int) -> str:
-        if not self._dialog_turn_numbers:
-            return f"Turn {position + 1}"
-        iteration = self._dialog_turn_numbers[position]
-        if self._dialog_crashed[position]:
-            prefix = "Failed" if self._dialog_latest_attempt[position] else "Earlier failed"
-            return f"{prefix} attempt evidence for turn {iteration}"
-        if self._dialog_latest_attempt[position]:
-            return f"Turn {iteration}"
-        return f"Earlier attempt evidence for turn {iteration}"
+    def dialog_attempt(self, position: int) -> DialogAttempt | None:
+        if self._dialog_attempts and len(self._dialog_attempts) != len(self.dialog):
+            raise ValueError("dialog attempt metadata must align with dialog rows")
+        return self._dialog_attempts[position] if self._dialog_attempts else None
+
+    @property
+    def attempt_guidance(self) -> str | None:
+        return ATTEMPT_GUIDANCE if self._dialog_attempts or self.agent_attempt is not None else None
+
+    def dialog_label(self, position: int) -> str:
+        attempt = self.dialog_attempt(position)
+        return attempt.label if attempt is not None else f"Turn {position + 1}"
+
+    def agent_section_title(self, section: str) -> str:
+        return f"FAILED {section}" if self.agent_attempt is not None and self.agent_attempt.crashed else section
+
+
+def render_dialog(context: JudgeContext) -> str:
+    """Render the shared untrusted dialog block without envelope whitespace."""
+    if not context.dialog:
+        return ""
+    header = DIALOG_HEADER + "\n" + context.attempt_guidance if context.attempt_guidance is not None else DIALOG_HEADER
+    turns = []
+    for position, (user, agent) in enumerate(context.dialog):
+        label = context.dialog_label(position)
+        turns.append(f"[{label}] USER:\n{user}\n[{label}] AGENT:\n{agent}")
+    return header + "\n" + "\n\n".join(turns)
 
 
 class JudgeContextBuilder:
@@ -425,7 +505,21 @@ class JudgeContextBuilder:
         logger.debug("judge_context: include_reference=True but reference not set")
 
     def _collect_trajectory(self, turn_records: list[TurnRecord] | None, ctx: JudgeContext) -> None:
-        latest = turn_records[-1] if turn_records else None
+        if not (self.include_dialog or self.include_agent_output or self.include_tool_calls):
+            return
+        records = _grading_agent_records(turn_records or [])
+        latest = records[-1] if records else None
+        latest_positions = {turn.iteration: i for i, turn in enumerate(records)}
+        has_attempt_metadata = len(latest_positions) != len(records) or any(turn.crashed for turn in records)
+        attempts = (
+            [
+                DialogAttempt(turn.iteration, position == latest_positions[turn.iteration], turn.crashed)
+                for position, turn in enumerate(records)
+            ]
+            if has_attempt_metadata
+            else []
+        )
+        ctx.agent_attempt = attempts[-1] if attempts else None
 
         if self.include_agent_output:
             if latest is None:
@@ -446,30 +540,24 @@ class JudgeContextBuilder:
                     ctx.tool_calls_summary = summary
 
         if self.include_dialog:
-            if not turn_records:
+            if not records:
                 ctx.degraded_notes.append("include_dialog requested but no turn records available")
             else:
                 # The per-message cap is applied FIRST so one huge message cannot
                 # crowd out later turns; the aggregate cap then drops trailing turns
                 # and records a note. TODO: keep first+last K instead.
-                latest_positions = {turn.iteration: i for i, turn in enumerate(turn_records)}
-                has_attempt_metadata = len(latest_positions) != len(turn_records) or any(
-                    turn.crashed for turn in turn_records
-                )
                 total = 0
                 dropped = 0
-                for position, turn in enumerate(turn_records):
+                for position, turn in enumerate(records):
                     user_text = truncate(turn.user_input, self.max_file_chars)
                     agent_text = truncate(turn.agent_output, self.max_file_chars)
                     pair_len = len(user_text) + len(agent_text)
                     if total + pair_len > self.max_dialog_chars and ctx.dialog:
-                        dropped = len(turn_records) - len(ctx.dialog)
+                        dropped = len(records) - len(ctx.dialog)
                         break
                     ctx.dialog.append((user_text, agent_text))
-                    if has_attempt_metadata:
-                        ctx._dialog_turn_numbers.append(turn.iteration)
-                        ctx._dialog_latest_attempt.append(position == latest_positions[turn.iteration])
-                        ctx._dialog_crashed.append(turn.crashed)
+                    if attempts:
+                        ctx._dialog_attempts.append(attempts[position])
                     total += pair_len
                 if dropped:
                     msg = (

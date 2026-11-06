@@ -1,7 +1,7 @@
 """Retry evidence stays visible without changing canonical turn targets."""
 
+import copy
 import json
-import re
 import socket
 import subprocess
 import sys
@@ -13,13 +13,14 @@ from coder_eval.criteria import agent_judge, llm_judge, system_one_judge
 from coder_eval.criteria.base import CheckContext
 from coder_eval.evaluation.judge_context import JudgeContext, JudgeContextBuilder
 from coder_eval.models import (
-    EvaluationResult,
-    FinalStatus,
+    CommandTelemetry,
     LiteLLMRoute,
     LLMJudgeCriterion,
+    ResultSummary,
     SandboxConfig,
     TokenUsage,
     TurnRecord,
+    UserMessage,
 )
 from coder_eval.sandbox import Sandbox
 
@@ -67,6 +68,7 @@ def turn(number, output=None, *, crashed=False, prompt=None):
         iteration=number,
         user_input=prompt or f"QUESTION_{number}",
         agent_output=f"FINAL_{number}" if output is None else output,
+        record_kind="agent",
         crashed=crashed,
         token_usage=TokenUsage(total_cost_usd=number / 100),
     )
@@ -76,29 +78,25 @@ def trajectory():
     return [turn(1), turn(2), turn(3), turn(4, "PARTIAL_4 NEVER_X", crashed=True), turn(4), turn(5)]
 
 
-def build(records, *, budget=80_000):
+def build(records, *, budget=80_000, output=False, tools=False):
     return JudgeContextBuilder(
         files=[],
         include_reference=False,
-        include_agent_output=False,
-        include_tool_calls=False,
+        include_agent_output=output,
+        include_tool_calls=tools,
         include_dialog=True,
         max_file_chars=10_000,
         max_dialog_chars=budget,
     ).build(Sandbox(SandboxConfig(driver="tempdir", python=None, node=None), "synthetic-judge"), None, records)
 
 
-def sections(text):
-    return re.findall(
-        r"\[([^\]]+)\] USER:\n(.*?)\n\[\1\] AGENT:\n(.*?)"
-        r"(?=\n\n\[[^\]]+\] USER:|\n\n(?:Call the submit_verdict|After investigating, call the submit_verdict)|\Z)",
-        text,
-        re.S,
-    )
-
-
-def canonical(text, number):
-    rows = [(user.strip(), agent.strip()) for label, user, agent in sections(text) if label == f"Turn {number}"]
+def canonical(context, number):
+    rows = [
+        pair
+        for position, pair in enumerate(context.dialog)
+        if ((attempt := context.dialog_attempt(position)) is None and position + 1 == number)
+        or (attempt is not None and attempt.turn == number and attempt.canonical)
+    ]
     assert len(rows) == 1
     return rows[0]
 
@@ -109,13 +107,6 @@ def offline_judge(monkeypatch):
 
     async def completion(*, user, **kwargs):
         requests.append(user)
-        rows = sections(user)
-        if "GLOBAL_NEVER_X" in user:
-            correct = not any("NEVER_X" in output for _, _, output in rows)
-        else:
-            number = int(re.search(r"TARGET=(\d+)", user).group(1))
-            expected = "" if "EXPECT_EMPTY" in user else f"FINAL_{number}"
-            correct = canonical(user, number) == (f"QUESTION_{number}", expected)
         return {
             "choices": [
                 {
@@ -128,8 +119,8 @@ def offline_judge(monkeypatch):
                                     "name": "submit_verdict",
                                     "arguments": json.dumps(
                                         {
-                                            "score": float(correct),
-                                            "rationale": "Synthetic target/evidence check",
+                                            "score": 0.5,
+                                            "rationale": "Synthetic protocol response",
                                             "findings": [],
                                         }
                                     ),
@@ -166,21 +157,25 @@ async def grade(records, prompt):
     return result
 
 
-@pytest.mark.parametrize("number", range(1, 6))
-async def test_public_checker_targets_latest_record_after_retry(number, offline_judge):
-    result = await grade(trajectory(), f"TARGET={number}")
-    assert result.score == 1.0
+async def test_public_checker_sends_canonical_retry_context(offline_judge):
+    result = await grade(trajectory(), "Grade logical turn 4 and then 5.")
+    assert result.score == 0.5
+    assert len(offline_judge) == 1
+    assert "[Turn 4] AGENT:\nFINAL_4" in offline_judge[0]
+    assert "[Turn 5] AGENT:\nFINAL_5" in offline_judge[0]
+    assert "[Earlier failed attempt evidence for turn 4] AGENT:\nPARTIAL_4 NEVER_X" in offline_judge[0]
 
 
-async def test_global_criterion_retains_failed_attempt_evidence(offline_judge):
-    result = await grade(trajectory(), "GLOBAL_NEVER_X")
-    assert result.score == 0.0
-    assert "PARTIAL_4 NEVER_X" in offline_judge[-1]
-    assert "Earlier failed attempt evidence for turn 4" in offline_judge[-1]
+@pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
+def test_global_criterion_retains_failed_attempt_evidence(renderer):
+    message = renderer("Never do X anywhere in the process.", build(trajectory()))
+    assert "PARTIAL_4 NEVER_X" in message
+    assert "Earlier failed attempt evidence for turn 4" in message
+    assert "Only the latest nonfailed agent attempt is canonical" in message
 
 
 @pytest.mark.parametrize("placeholder_crashed", [False, True])
-async def test_partial_before_empty_bookkeeping_is_visible_without_becoming_final(placeholder_crashed, offline_judge):
+def test_failed_or_genuinely_empty_latest_agent_attempt_is_preserved(placeholder_crashed):
     records = [
         turn(1),
         turn(2),
@@ -188,21 +183,20 @@ async def test_partial_before_empty_bookkeeping_is_visible_without_becoming_fina
         turn(4, "MEANINGFUL_PARTIAL NEVER_X", crashed=True),
         turn(4, "", crashed=placeholder_crashed),
     ]
+    context = build(records)
+    message = llm_judge._render_user_message("Synthetic", context)
     if placeholder_crashed:
-        message = llm_judge._render_user_message("Synthetic", build(records))
-        assert not any(label == "Turn 4" for label, _, _ in sections(message))
+        assert not context.dialog_attempt(4).canonical
         assert "[Failed attempt evidence for turn 4]" in message
     else:
-        result = await grade(records, "TARGET=4 EXPECT_EMPTY")
-        assert result.score == 1.0
-        message = offline_judge[-1]
+        assert canonical(context, 4) == ("QUESTION_4", "")
     assert "MEANINGFUL_PARTIAL NEVER_X" in message
     assert "Earlier failed attempt evidence for turn 4" in message
 
 
-async def test_completed_empty_response_is_not_replaced_with_prior_partial(offline_judge):
-    result = await grade([*trajectory()[:4], turn(4, ""), turn(5)], "TARGET=4 EXPECT_EMPTY")
-    assert result.score == 1.0
+def test_completed_empty_response_is_not_replaced_with_prior_partial():
+    context = build([*trajectory()[:4], turn(4, ""), turn(5)])
+    assert canonical(context, 4) == ("QUESTION_4", "")
 
 
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
@@ -215,10 +209,10 @@ def test_repeated_failures_and_distinct_same_text_turns(renderer):
     ]
     context = build(records)
     message = renderer("Synthetic target", context)
-    assert canonical(message, 1) == ("same prompt", "FINAL_1")
-    assert canonical(message, 2) == ("same prompt", "FINAL_2")
+    assert canonical(context, 1) == ("same prompt", "FINAL_1")
+    assert canonical(context, 2) == ("same prompt", "FINAL_2")
     assert "FIRST_FAILURE" in message and "SECOND_FAILURE" in message
-    assert len(sections(message)) == 4
+    assert len(context.dialog) == 4
 
 
 def test_system_one_state_uses_turn_numbers_and_retains_earlier_attempts():
@@ -238,7 +232,7 @@ def test_truncation_does_not_promote_failed_partial_to_canonical(renderer):
     message = renderer("Synthetic", context)
     assert len(context.dialog) == 2 and context.degraded_notes
     assert "PARTIAL_2" in message and "FINAL_2" not in message
-    assert not any(label == "Turn 2" for label, _, _ in sections(message))
+    assert not context.dialog_attempt(1).canonical
 
 
 def test_system_one_truncation_does_not_promote_prior_attempt():
@@ -265,36 +259,22 @@ def test_system_one_no_retry_state_remains_identical():
     )
 
 
-def test_raw_attempts_and_all_costs_are_unchanged_and_persisted(tmp_path):
+def test_context_build_leaves_raw_attempts_and_costs_unchanged():
     records = trajectory()
-    result = EvaluationResult(
-        task_id="synthetic",
-        task_description="Input trajectory fixture",
-        variant_id="fixture",
-        agent_type="none",
-        started_at=datetime.now(),
-        final_status=FinalStatus.NOT_GRADED,
-        iteration_count=5,
-        iterations=records,
-    )
-    before = result.model_dump_json()
-    build(result.iterations)
-    assert result.model_dump_json() == before
-    path = tmp_path / "task.json"
-    path.write_text(before, encoding="utf-8")
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert [row["iteration"] for row in saved["iterations"]] == [1, 2, 3, 4, 4, 5]
-    assert saved["iterations"][3]["crashed"] is True
-    assert sum(row["token_usage"]["total_cost_usd"] for row in saved["iterations"]) == pytest.approx(0.19)
-    assert saved["iterations"][3]["agent_output"] == "PARTIAL_4 NEVER_X"
+    before = copy.deepcopy(records)
+    build(records)
+    assert records == before
+    assert sum(row.token_usage.total_cost_usd for row in records) == pytest.approx(0.19)
 
 
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
 def test_manual_context_does_not_infer_retries_from_same_text(renderer):
     context = JudgeContext(dialog=[("same prompt", "first"), ("same prompt", "second")])
     message = renderer("Synthetic", context)
-    assert canonical(message, 1) == ("same prompt", "first")
-    assert canonical(message, 2) == ("same prompt", "second")
+    assert canonical(context, 1) == ("same prompt", "first")
+    assert canonical(context, 2) == ("same prompt", "second")
+    assert "[Turn 1] AGENT:\nfirst" in message
+    assert "[Turn 2] AGENT:\nsecond" in message
 
 
 def test_system_one_manual_context_keeps_original_shape():
@@ -309,10 +289,11 @@ def test_system_one_manual_context_keeps_original_shape():
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
 def test_failed_attempt_labels_come_from_crashed_flag(renderer):
     records = [turn(1, "EARLIER_RETURNED"), turn(1, "ACTUAL_CRASH", crashed=True), turn(1)]
-    message = renderer("Synthetic", build(records))
+    context = build(records)
+    message = renderer("Synthetic", context)
     assert "[Earlier attempt evidence for turn 1]" in message
     assert "[Earlier failed attempt evidence for turn 1]" in message
-    assert canonical(message, 1) == ("QUESTION_1", "FINAL_1")
+    assert canonical(context, 1) == ("QUESTION_1", "FINAL_1")
     assert all(text in message for text in ["EARLIER_RETURNED", "ACTUAL_CRASH", "FINAL_1"])
 
 
@@ -327,8 +308,9 @@ def test_system_one_preserves_explicit_crashed_attempt_metadata():
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
 def test_latest_failed_attempt_is_not_presented_as_final_answer(renderer):
     records = [turn(1), turn(2, "FIRST_FAILURE", crashed=True), turn(2, "LATEST_FAILURE", crashed=True)]
-    message = renderer("Synthetic", build(records))
-    assert not any(label == "Turn 2" for label, _, _ in sections(message))
+    context = build(records)
+    message = renderer("Synthetic", context)
+    assert not context.dialog_attempt(2).canonical
     assert "[Earlier failed attempt evidence for turn 2]" in message
     assert "[Failed attempt evidence for turn 2]" in message
     assert "FIRST_FAILURE" in message and "LATEST_FAILURE" in message
@@ -345,10 +327,11 @@ def test_system_one_latest_failed_attempt_stays_failed():
 
 @pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
 def test_single_failed_record_is_explicit_without_duplicate_iteration(renderer):
-    message = renderer("Synthetic", build([turn(1, "ONLY_FAILURE", crashed=True)]))
+    context = build([turn(1, "ONLY_FAILURE", crashed=True)])
+    message = renderer("Synthetic", context)
     assert "[Failed attempt evidence for turn 1]" in message
     assert "ONLY_FAILURE" in message
-    assert not any(label == "Turn 1" for label, _, _ in sections(message))
+    assert not context.dialog_attempt(0).canonical
 
 
 def test_system_one_single_failed_record_is_explicit():
@@ -356,3 +339,111 @@ def test_system_one_single_failed_record_is_explicit():
     assert rows == [
         {"turn": 1, "user": "QUESTION_1", "agent": "ONLY_FAILURE", "earlier_attempt_evidence": False, "crashed": True}
     ]
+
+
+@pytest.mark.parametrize("record_kind", ["standalone_user", None])
+def test_proven_standalone_user_is_omitted_from_all_grading_trajectory(record_kind):
+    records = [turn(1)]
+    standalone = TurnRecord(
+        iteration=1,
+        user_input="STOP_TOKEN was never sent to the agent",
+        agent_output="",
+        record_kind=record_kind,
+        messages=[UserMessage(text="STOP_TOKEN was never sent to the agent", stop_requested=True)],
+    )
+    context = build([*records, standalone], output=True, tools=True)
+    assert context.dialog == [("QUESTION_1", "FINAL_1")]
+    expected = build(records, output=True, tools=True)
+    for renderer in (llm_judge._render_user_message, agent_judge._render_user_message):
+        assert renderer("Synthetic", context) == renderer("Synthetic", expected)
+    assert system_one_judge._build_state("Synthetic", context, 10_000) == system_one_judge._build_state(
+        "Synthetic", expected, 10_000
+    )
+
+
+def test_ambiguous_unmarked_user_only_duplicate_fails_closed_without_mutation():
+    legacy = TurnRecord(
+        iteration=2, user_input="QUESTION_2", agent_output="", messages=[UserMessage(text="QUESTION_2")]
+    )
+    records = [turn(1), turn(2, "FAILED_PARTIAL", crashed=True), legacy]
+    before = copy.deepcopy(records)
+    with pytest.raises(ValueError, match="ambiguous legacy standalone user record"):
+        build(records)
+    assert records == before
+    assert legacy.record_kind is None
+
+
+def test_genuine_marked_empty_agent_with_user_only_transcript_remains_canonical():
+    empty = turn(2, "")
+    empty.messages = [UserMessage(text="QUESTION_2")]
+    context = build([turn(1), turn(2, "FAILED_PARTIAL", crashed=True), empty])
+    assert canonical(context, 2) == ("QUESTION_2", "")
+
+
+def test_unmarked_single_empty_agent_keeps_legacy_contract():
+    legacy = TurnRecord(
+        iteration=1, user_input="QUESTION_1", agent_output="", messages=[UserMessage(text="QUESTION_1")]
+    )
+    assert build([legacy]).dialog == [("QUESTION_1", "")]
+
+
+@pytest.mark.parametrize("renderer", [llm_judge._render_user_message, agent_judge._render_user_message])
+def test_failed_latest_output_and_tool_summary_are_labelled_as_failure_evidence(renderer):
+    failed = turn(1, "PARTIAL", crashed=True)
+    failed.commands = [
+        CommandTelemetry(
+            tool_name="Read",
+            tool_id="partial-read",
+            timestamp=datetime(2026, 1, 1),
+            parameters={"file_path": "partial.txt"},
+        )
+    ]
+    context = JudgeContextBuilder(
+        files=[],
+        include_reference=False,
+        include_agent_output=True,
+        include_tool_calls=True,
+        include_dialog=False,
+        max_file_chars=10_000,
+    ).build(Sandbox(SandboxConfig(driver="tempdir", python=None, node=None), "synthetic"), None, [failed])
+    message = renderer("Synthetic", context)
+    assert "FAILED AGENT OUTPUT (UNTRUSTED DATA" in message
+    assert "FAILED AGENT TOOL CALLS (UNTRUSTED DATA" in message
+
+
+def test_system_one_failed_latest_sections_are_not_named_final_agent_output():
+    failed = turn(1, "PARTIAL", crashed=True)
+    state = system_one_judge._build_state("Synthetic", build([failed], output=True), 10_000)
+    assert state["failed_agent_output"] == "PARTIAL"
+    assert "agent_output" not in state
+
+
+def test_unmarked_empty_completed_retry_has_positive_agent_provenance():
+    empty = TurnRecord(
+        iteration=2,
+        user_input="QUESTION_2",
+        agent_output="",
+        messages=[UserMessage(text="QUESTION_2")],
+        result_summary=ResultSummary(is_error=False, subtype="completed"),
+    )
+    context = build([turn(1), turn(2, "FAILED_PARTIAL", crashed=True), empty])
+    assert canonical(context, 2) == ("QUESTION_2", "")
+    assert empty.record_kind is None
+
+
+@pytest.mark.parametrize("kind", ["llm", "agent", "system_one"])
+def test_every_judge_explains_failed_latest_attempt_has_no_canonical_answer(kind):
+    context = build([turn(1, "FAILED_PARTIAL", crashed=True)])
+    if kind == "system_one":
+        payload = json.dumps(system_one_judge._build_state("Synthetic", context, 10_000))
+    else:
+        renderer = llm_judge._render_user_message if kind == "llm" else agent_judge._render_user_message
+        payload = renderer("Synthetic", context)
+    assert "A failed latest attempt leaves no canonical [Turn N] answer" in payload
+
+
+def test_public_attempt_accessor_rejects_misaligned_dialog_rows():
+    context = build(trajectory())
+    context.dialog.pop()
+    with pytest.raises(ValueError, match="attempt metadata must align"):
+        context.dialog_attempt(0)

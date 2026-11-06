@@ -133,12 +133,18 @@ What changes against a simulated dialog:
   `NOT_GRADED`; `coder-eval evaluate <run_dir>` grades it later. Criteria are checked once, after the
   last turn.
 
-Each exchange is one entry in `iterations` of `task.json` (see [TurnRecord](REPORT_SCHEMA.md#turnrecord)):
+Each agent attempt is an entry in `iterations` of `task.json` (see [TurnRecord](REPORT_SCHEMA.md#turnrecord)):
 that turn's `user_input` (the prompt as the agent received it), `agent_output`, `commands`,
 `token_usage` and timings, with the authored turn as `messages[0]`. `agent_output` is the agent's own
 rendering of its reply: Claude Code's is a tagged transcript, and its SDK result text is also in
 `result_summary.result`. `n_trials: N` repeats the whole script N times, each in its own session, to
 measure variance.
+
+Retries share the authored `iteration` number; failed attempts and their costs stay in the raw
+record. The driver can also preserve an unconsumed simulator utterance as
+`record_kind: standalone_user`. That row is telemetry, not an agent answer, and is omitted from grading
+trajectory sections. Collected agent records use `record_kind: agent`, including genuine empty
+completed answers. Older records keep unknown provenance rather than acquiring an inferred kind.
 
 ## Designing the persona and goal
 
@@ -246,6 +252,12 @@ success_criteria:
 The rendered dialog is wrapped as `UNTRUSTED DATA` with a rubric guard telling the judge that claims
 made only by the *simulated user* may be invented, and not to penalize the agent for going along
 with them. That guard is what keeps a chatty simulator from poisoning the grade.
+
+When attempts repeat or fail, the dialog labels earlier and failed attempts as evidence while
+`[Turn N]` identifies the latest nonfailed agent attempt. Process-wide criteria still see failed
+agent work. A failed latest output or tool summary is explicitly labelled as failure evidence.
+A legacy user-only duplicate without provenance is ambiguous unless it carries the simulator's
+stop marker; grading reports an error rather than inventing or replacing an answer.
 
 ## What it costs
 
