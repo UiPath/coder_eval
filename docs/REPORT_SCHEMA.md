@@ -251,6 +251,10 @@ row per model-provider error the agent's own client reported, including errors i
 retried itself; filled by the codex adapter, empty on other backends), `crashed`,
 `crash_reason`.
 
+`record_kind` records producer provenance: `agent` for collected agent attempts and
+`standalone_user` for an unconsumed simulator utterance preserved by the dialog driver.
+Legacy records keep `null` when their provenance is unknown; grading never fills it by inference.
+
 > **Token invariant.** Summing the four token buckets across `messages`
 > (assistant + the synthetic `reconciliation` entry) equals `token_usage` exactly.
 > The `reconciliation` message carries the residual the per-message stream

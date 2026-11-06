@@ -274,6 +274,10 @@ class ResultSummary(BaseModel):
 class TurnRecord(BaseModel):
     """Record of a single agent turn (input + output)."""
 
+    record_kind: Literal["agent", "standalone_user"] | None = Field(
+        default=None,
+        description="Producer provenance; None is unknown legacy. standalone_user is not an agent answer.",
+    )
     iteration: int = Field(
         description=(
             "Orchestrator iteration number. Multiple records may share this value when "

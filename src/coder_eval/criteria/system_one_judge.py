@@ -175,6 +175,8 @@ def _build_state(prompt: str, context: JudgeContext, max_section_chars: int) -> 
     state: dict[str, Any] = {}
     if prompt:
         state["context"] = prompt[:max_section_chars]
+    if context.attempt_guidance is not None:
+        state["attempt_guidance"] = context.attempt_guidance
 
     state["files"] = {
         f.path: (f.content if f.content is not None else "<file not found>")[:max_section_chars] for f in context.files
@@ -185,9 +187,23 @@ def _build_state(prompt: str, context: JudgeContext, max_section_chars: int) -> 
         state["agent_output"] = context.agent_output[:max_section_chars]
     if context.tool_calls_summary is not None:
         state["agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
+    if (
+        context.agent_attempt is not None
+        and context.agent_attempt.crashed
+        and (context.agent_output is not None or context.tool_calls_summary is not None)
+    ):
+        state["agent_attempt"] = {"turn": context.agent_attempt.turn, "crashed": True}
     if context.dialog:
-        state["dialog"] = [
-            {"turn": i, "user": user[:max_section_chars], "agent": agent[:max_section_chars]}
-            for i, (user, agent) in enumerate(context.dialog, 1)
-        ]
+        dialog = []
+        for i, (user, agent) in enumerate(context.dialog, 1):
+            attempt = context.dialog_attempt(i - 1)
+            row: dict[str, Any] = {
+                "turn": attempt.turn if attempt is not None else i,
+                "user": user[:max_section_chars],
+                "agent": agent[:max_section_chars],
+            }
+            if attempt is not None:
+                row.update(earlier_attempt_evidence=not attempt.latest, crashed=attempt.crashed)
+            dialog.append(row)
+        state["dialog"] = dialog
     return state

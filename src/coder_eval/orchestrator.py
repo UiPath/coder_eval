@@ -2787,8 +2787,7 @@ class Orchestrator:
             )
             return all_passed
         finally:
-            # An agent turn attempted but crashed before attaching its user turn
-            # to a record: append it standalone or its telemetry is lost.
+            # Preserve an unconsumed user utterance as telemetry, not an agent answer.
             if agent_turn_attempted and pending_user_turn is not None and self.result is not None:
                 # `duration_seconds` defaults to 0.0 and no caller passes it, so
                 # this used to report 0 s for a simulator call that took seconds,
@@ -2796,6 +2795,7 @@ class Orchestrator:
                 # no simulator call behind it, so 0.0 there is real.
                 sim_ms = pending_user_turn.generation_duration_ms
                 standalone_turn = TurnRecord(
+                    record_kind="standalone_user",
                     iteration=turns_completed,
                     user_input=pending_user_turn.text or "",
                     agent_output="",
