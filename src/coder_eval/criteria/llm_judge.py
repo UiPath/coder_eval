@@ -271,7 +271,7 @@ def _render_user_message(prompt: str, context: JudgeContext) -> str:
     tool_calls_block = ""
     if context.tool_calls_summary is not None:
         tool_calls_block = f"AGENT TOOL CALLS (UNTRUSTED DATA):\n{context.tool_calls_summary}\n\n"
-    dialog_block = _render_dialog_block(context.dialog)
+    dialog_block = _render_dialog_block(context.dialog, [context._dialog_label(i) for i in range(len(context.dialog))])
 
     closing = (
         "Call the submit_verdict tool exactly once with "
@@ -289,11 +289,12 @@ def _render_user_message(prompt: str, context: JudgeContext) -> str:
     )
 
 
-def _render_dialog_block(dialog: list[tuple[str, str]]) -> str:
+def _render_dialog_block(dialog: list[tuple[str, str]], labels: list[str] | None = None) -> str:
     if not dialog:
         return ""
     turns = []
     for i, (user_text, agent_text) in enumerate(dialog, 1):
-        turns.append(f"[Turn {i}] USER:\n{user_text}\n[Turn {i}] AGENT:\n{agent_text}")
+        label = labels[i - 1] if labels is not None else f"Turn {i}"
+        turns.append(f"[{label}] USER:\n{user_text}\n[{label}] AGENT:\n{agent_text}")
     body = "\n\n".join(turns)
     return f"{DIALOG_HEADER}\n{body}\n\n"

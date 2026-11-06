@@ -392,7 +392,8 @@ def _render_user_message(
     if context.dialog:
         turns = []
         for i, (user_text, agent_text) in enumerate(context.dialog, 1):
-            turns.append(f"[Turn {i}] USER:\n{user_text}\n[Turn {i}] AGENT:\n{agent_text}")
+            label = context._dialog_label(i - 1)
+            turns.append(f"[{label}] USER:\n{user_text}\n[{label}] AGENT:\n{agent_text}")
         trajectory_blocks.append(f"{DIALOG_HEADER}\n" + "\n\n".join(turns))
     if context.agent_output is not None:
         trajectory_blocks.append(

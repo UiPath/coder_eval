@@ -187,7 +187,19 @@ def _build_state(prompt: str, context: JudgeContext, max_section_chars: int) -> 
         state["agent_tool_calls"] = context.tool_calls_summary[:max_section_chars]
     if context.dialog:
         state["dialog"] = [
-            {"turn": i, "user": user[:max_section_chars], "agent": agent[:max_section_chars]}
+            {
+                "turn": context._dialog_turn_numbers[i - 1] if context._dialog_turn_numbers else i,
+                "user": user[:max_section_chars],
+                "agent": agent[:max_section_chars],
+                **(
+                    {
+                        "earlier_attempt_evidence": not context._dialog_latest_attempt[i - 1],
+                        "crashed": context._dialog_crashed[i - 1],
+                    }
+                    if context._dialog_turn_numbers
+                    else {}
+                ),
+            }
             for i, (user, agent) in enumerate(context.dialog, 1)
         ]
     return state

@@ -433,7 +433,7 @@ class TestCommunicate:
         assert command.result_status == "success"
         assert command.result_summary == "file.txt"
         sent = proc.stdin.written[1]
-        assert sent == {"cmd": "send", "prompt": "do something", "sessionId": None}
+        assert sent == {"cmd": "send", "prompt": "do something", "sessionId": None, "iteration": 1}
         # The result's session id is remembered for the NEXT turn.
         assert agent._session_id == "sess-2"
 
@@ -957,6 +957,62 @@ class TestCommunicate:
         agent = DelegateAgent(_config())
         with pytest.raises(RuntimeError, match="start"):
             await agent.communicate("hi")
+
+    async def test_retry_keeps_logical_iteration_session_and_workspace(self, patch_exec, tmp_path, monkeypatch):
+        from coder_eval.errors import executor
+
+        events = [_result(response=f"answer{n}", sessionId="stable-session") for n in range(1, 4)]
+        events.append(_line({"type": "error", "message": "synthetic transient failure"}))
+        agent, first = await _started_agent(patch_exec, events, tmp_path)
+        restarted = []
+        records = []
+        try:
+            for n in range(1, 4):
+                records.append(await agent.communicate(f"question{n}"))
+            prior_records = [record.model_dump(mode="json") for record in records]
+
+            async def failed(error, attempt):
+                assert attempt == 0 and agent.pending_turn.iteration == 4
+                assert agent.pending_turn.crashed and agent.pending_turn.user_input == "question4"
+                await agent.discard_pending_turn()
+                restarted.append(
+                    patch_exec(
+                        [
+                            _line({"type": "init_ok"}),
+                            _result(response="answer4", sessionId="stable-session"),
+                            _result(response="answer5", sessionId="stable-session"),
+                        ]
+                    )
+                )
+
+            monkeypatch.setattr(executor, "get_retry_delay", lambda *_: 0)
+            fourth = await executor.execute_with_retry(
+                operation=lambda: agent.communicate("question4"),
+                operation_name="Agent communication",
+                context={"task_id": "t1", "component": "agent", "agent_name": "delegate"},
+                max_attempts=2,
+                on_attempt_error=failed,
+            )
+            fifth = await agent.communicate("question5")
+            sends = [row for proc in [first, *restarted] for row in proc.stdin.written if row["cmd"] == "send"]
+            assert [row["iteration"] for row in sends] == [1, 2, 3, 4, 4, 5]
+            assert [row["prompt"] for row in sends] == [
+                "question1",
+                "question2",
+                "question3",
+                "question4",
+                "question4",
+                "question5",
+            ]
+            assert all(row["sessionId"] == "stable-session" for row in sends[1:])
+            assert all(proc.spawn_kwargs["cwd"] == str(tmp_path) for proc in [first, *restarted])
+            assert fourth.iteration == 4 and fifth.iteration == 5
+            assert [record.model_dump(mode="json") for record in records] == prior_records
+            assert [(record.iteration, record.user_input, record.agent_output) for record in records] == [
+                (n, f"question{n}", f"answer{n}") for n in range(1, 4)
+            ]
+        finally:
+            await agent.stop()
 
     async def test_respawns_after_crash_on_next_turn(self, patch_exec, tmp_path):
         agent, _ = await _started_agent(patch_exec, [], tmp_path)

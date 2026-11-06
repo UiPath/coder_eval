@@ -824,7 +824,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         try:
-            await self._send_command({"cmd": "send", "prompt": user_input, "sessionId": self._session_id})
+            await self._send_command(
+                {"cmd": "send", "prompt": user_input, "sessionId": self._session_id, "iteration": self._iteration}
+            )
 
             while True:
                 remaining = None if deadline is None else deadline - time.monotonic()

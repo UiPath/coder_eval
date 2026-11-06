@@ -111,7 +111,7 @@ Agent (ABC)
 ### Key Methods
 
 - **`start(working_directory)`** — resolve the host install, spawn the host, send the `init` command and wait for `init_ok`.
-- **`communicate(user_input, timeout, stream_callback)`** — send one `"send"` command and drain the host's `event` frames until `result`, `error` or EOF.
+- **`communicate(user_input, timeout, stream_callback)`** — send one `"send"` command and drain the host's `event` frames until `result`, `error` or EOF. The frame includes `iteration` metadata: the logical turn number, preserved by the framework when it retries that turn. The official `delegate-stdio` host ignores this optional field.
 - **`stop()`** — send `destroy`, wait bounded, then SIGKILL.
 - **`kill()` / `kill_sync()`** — force-terminate the host subprocess (the latter safe to call from the orchestrator's watchdog thread).
 

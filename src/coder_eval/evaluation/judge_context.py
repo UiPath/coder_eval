@@ -290,6 +290,21 @@ class JudgeContext:
     dialog: list[tuple[str, str]] = field(default_factory=list)
     missing_files: list[str] = field(default_factory=list)
     degraded_notes: list[str] = field(default_factory=list)
+    # Private rendering metadata; raw dialog pairs and public result schemas stay intact.
+    _dialog_turn_numbers: list[int] = field(default_factory=list, repr=False)
+    _dialog_latest_attempt: list[bool] = field(default_factory=list, repr=False)
+    _dialog_crashed: list[bool] = field(default_factory=list, repr=False)
+
+    def _dialog_label(self, position: int) -> str:
+        if not self._dialog_turn_numbers:
+            return f"Turn {position + 1}"
+        iteration = self._dialog_turn_numbers[position]
+        if self._dialog_crashed[position]:
+            prefix = "Failed" if self._dialog_latest_attempt[position] else "Earlier failed"
+            return f"{prefix} attempt evidence for turn {iteration}"
+        if self._dialog_latest_attempt[position]:
+            return f"Turn {iteration}"
+        return f"Earlier attempt evidence for turn {iteration}"
 
 
 class JudgeContextBuilder:
@@ -437,9 +452,13 @@ class JudgeContextBuilder:
                 # The per-message cap is applied FIRST so one huge message cannot
                 # crowd out later turns; the aggregate cap then drops trailing turns
                 # and records a note. TODO: keep first+last K instead.
+                latest_positions = {turn.iteration: i for i, turn in enumerate(turn_records)}
+                has_attempt_metadata = len(latest_positions) != len(turn_records) or any(
+                    turn.crashed for turn in turn_records
+                )
                 total = 0
                 dropped = 0
-                for turn in turn_records:
+                for position, turn in enumerate(turn_records):
                     user_text = truncate(turn.user_input, self.max_file_chars)
                     agent_text = truncate(turn.agent_output, self.max_file_chars)
                     pair_len = len(user_text) + len(agent_text)
@@ -447,6 +466,10 @@ class JudgeContextBuilder:
                         dropped = len(turn_records) - len(ctx.dialog)
                         break
                     ctx.dialog.append((user_text, agent_text))
+                    if has_attempt_metadata:
+                        ctx._dialog_turn_numbers.append(turn.iteration)
+                        ctx._dialog_latest_attempt.append(position == latest_positions[turn.iteration])
+                        ctx._dialog_crashed.append(turn.crashed)
                     total += pair_len
                 if dropped:
                     msg = (
