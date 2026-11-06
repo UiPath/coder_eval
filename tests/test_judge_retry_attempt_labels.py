@@ -4,6 +4,7 @@ import json
 import re
 import socket
 import subprocess
+import sys
 from datetime import datetime
 
 import pytest
@@ -28,8 +29,37 @@ def no_external_calls(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Synthetic judge tests must not open a network connection or start a subprocess")
 
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    connect = socket.socket.connect
+
+    def no_external_connect(sock, address):
+        if (
+            isinstance(address, tuple)
+            and address[0] in {"127.0.0.1", "::1"}
+            and sys._getframe(1).f_code is socket._fallback_socketpair.__code__
+        ):
+            return connect(sock, address)
+        return forbidden()
+
+    monkeypatch.setattr(socket.socket, "connect", no_external_connect)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
+
+
+def test_guard_allows_stdlib_socketpair():
+    reader, writer = socket._fallback_socketpair()
+    try:
+        writer.sendall(b"local")
+        assert reader.recv(5) == b"local"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_guard_blocks_other_io():
+    for address in (("127.0.0.1", 9), ("192.0.2.1", 443)):
+        with socket.socket() as sock, pytest.raises(AssertionError, match="must not open a network"):
+            sock.connect(address)
+    with pytest.raises(AssertionError, match="must not open a network"):
+        subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
 
 
 def turn(number, output=None, *, crashed=False, prompt=None):
