@@ -74,11 +74,12 @@ def _cmd_crit(
     min_count: int = 1,
     max_count: int | None = None,
     require_success: bool = False,
+    tool_name: str | None = "Bash",
 ) -> CommandExecutedCriterion:
     return CommandExecutedCriterion(
         type="command_executed",
         description=f"command_executed[{pattern}]",
-        tool_name="Bash",
+        tool_name=tool_name,
         command_pattern=pattern,
         min_count=min_count,
         max_count=max_count,
@@ -273,6 +274,26 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
                 _bash("echo done", sequence_number=2),
             ),
             reaches="pass",
+        ),
+        ContractCase(
+            label="null tool_name: a Write body naming the command never counts; the shell call does",
+            criterion=_cmd_crit(min_count=1, max_count=None, tool_name=None),
+            commands=(
+                cmd("Write", {"file_path": "fetch.sh", "content": "curl https://example.com"}, sequence_number=0),
+                cmd("TodoWrite", {"todos": [{"content": "curl https://example.com"}]}, sequence_number=1),
+                cmd("shell", {"command": "curl https://example.com"}, sequence_number=2),
+            ),
+            reaches="pass",
+        ),
+        ContractCase(
+            label="null tool_name must-NOT-run guard: a Write body does not trip it; running it fails",
+            criterion=_cmd_crit(pattern="rm -rf", min_count=0, max_count=0, tool_name=None),
+            commands=(
+                cmd("Write", {"file_path": "clean.sh", "content": "rm -rf /tmp/scratch"}, sequence_number=0),
+                _bash("echo done", sequence_number=1),
+                cmd("shell", {"command": "rm -rf /tmp/scratch"}, sequence_number=2),
+            ),
+            reaches="fail",
         ),
     ),
 }
