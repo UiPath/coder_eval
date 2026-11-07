@@ -58,6 +58,16 @@ class RunLimits(BaseModel):
         ge=10,
         description="Max seconds per agent communicate() call. None = no limit.",
     )
+    max_turn_retries: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Max retries of a failed agent communicate() call, after its first attempt. "
+            "0 disables whole-turn replay; None keeps the error-category retry policy. "
+            "A positive value caps that policy and never makes a non-retryable error retryable. "
+            "Applies to each single-shot or dialog turn, not retries inside an agent or provider SDK."
+        ),
+    )
     max_input_tokens: int | None = Field(
         default=None,
         ge=1,

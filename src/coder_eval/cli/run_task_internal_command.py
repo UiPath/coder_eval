@@ -317,8 +317,15 @@ def _grade_recorded_run(
 
     Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
     """
+    from coder_eval.errors import GradingError
+    from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
     from coder_eval.models import CONTAINER_GRADE_WORKSPACE
-    from coder_eval.orchestration.regrade import RegradeError, regrade_in_place
+    from coder_eval.orchestration.regrade import (
+        CONTAINER_GRADING_FAILURE_KEY,
+        RegradeError,
+        container_grading_failure_record,
+        regrade_in_place,
+    )
 
     prior_path = input_dir / PRIOR_RESULT_FILENAME
     if not prior_path.is_file():
@@ -331,6 +338,10 @@ def _grade_recorded_run(
         # task.json, so a crash here surfaces as the opaque "no task.json".
         typer.echo(f"FATAL: {prior_path} is not a readable EvaluationResult: {e}", err=True)
         raise typer.Exit(2) from e
+
+    for incident in prior.error_history:
+        if incident.details is not None:
+            incident.details.pop(CONTAINER_GRADING_FAILURE_KEY, None)
 
     workspace = Path(CONTAINER_GRADE_WORKSPACE)
     if not workspace.is_dir():
@@ -352,6 +363,14 @@ def _grade_recorded_run(
                 recorded_task_file=recorded_task_file,
                 container_contract=container_contract,
             )
+        )
+    except GradingError as error:
+        transport = container_grading_failure_record(prior, error, container_contract)
+        from coder_eval.path_utils import TASK_JSON_FILENAME
+
+        write_text_atomic(
+            output_dir / TASK_JSON_FILENAME,
+            transport.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE),
         )
     except RegradeError as e:
         # Clean message, not a traceback. Exit 2 keeps it distinguishable from an

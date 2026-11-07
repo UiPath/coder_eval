@@ -99,3 +99,76 @@ async def test_the_hook_runs_once_before_the_criteria(tmp_path: Path, monkeypatc
     await orch._start_grading()
     assert calls == [1]
     assert orch.result is not None and orch.result.final_status == FinalStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_failed_before_grading_hook_records_a_grading_incident(tmp_path: Path) -> None:
+    task = TaskDefinition(
+        task_id="grading-hook-failure",
+        description="offline fixture",
+        agent=parse_agent_config(type=AgentKind.NONE),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(path="proof.txt", description="proof")],
+    )
+    orch = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="v")
+
+    async def refused() -> None:
+        raise RuntimeError("grading egress unavailable")
+
+    orch.before_grading = refused
+    result = await orch.run()
+
+    assert result.final_status is FinalStatus.ERROR
+    assert result.error_phase == "grading"
+    assert result.error_message == "grading egress unavailable"
+    assert result.error_details is not None
+    assert result.error_details["component"] == "orchestrator.before_grading"
+
+
+@pytest.mark.asyncio
+async def test_reference_tampering_remains_an_execution_fact_after_regrading(tmp_path: Path) -> None:
+    from coder_eval.models import ReferenceSource
+    from coder_eval.orchestration.regrade import regrade_in_place
+
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    (reference / "answer.txt").write_text("original answer")
+    task_file = tmp_path / "task.yaml"
+    task_file.write_text("task_id: anti-cheat-fixture\n")
+    task = TaskDefinition(
+        task_id="anti-cheat-fixture",
+        description="offline reference integrity fixture",
+        agent=parse_agent_config(type=AgentKind.NONE),
+        sandbox=SandboxConfig(driver="tempdir"),
+        reference=ReferenceSource(directory="reference"),
+        success_criteria=[FileExistsCriterion(path="proof.txt", description="proof exists")],
+    )
+    orch = Orchestrator(task=task, task_file=task_file, run_dir=tmp_path / "run", variant_id="v")
+
+    async def overwrite_private_reference() -> None:
+        assert orch._reference_dir is not None
+        (orch._reference_dir / "answer.txt").write_text("changed answer")
+
+    orch.before_grading = overwrite_private_reference
+    prior = await orch.run()
+    assert prior.final_status is FinalStatus.ERROR
+    assert prior.error_phase == "execution"
+    assert prior.error_history == []
+    workspace = tmp_path / "retained-workspace"
+    workspace.mkdir()
+    (workspace / "proof.txt").write_text("proof")
+
+    repaired = await regrade_in_place(
+        task=task,
+        prior=prior,
+        workspace=workspace,
+        run_dir=tmp_path / "grade",
+        task_file=task_file,
+        source_yaml=task_file.read_text(),
+        variant_id="v",
+    )
+
+    assert repaired.weighted_score == 1.0
+    assert repaired.final_status is FinalStatus.ERROR
+    assert repaired.error_phase == "execution"
+    assert repaired.error_message == prior.error_message

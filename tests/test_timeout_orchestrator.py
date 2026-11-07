@@ -557,6 +557,8 @@ async def test_post_failure_checker_error_preserves_terminal_agent_error(
     assert unavailable.evaluation_status == "not_evaluated"
     assert expected_type in (unavailable.details or "")
     assert expected_message in (unavailable.details or "")
+    assert len(result.error_history) == 1
+    assert result.error_history[0].message == expected_message
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coder_eval.errors import BudgetExceededError
+from coder_eval.errors import AgentCrashError, BudgetExceededError
 from coder_eval.models import (
     DEFAULT_SIMULATOR_MODEL,
     AgentKind,
@@ -107,6 +107,111 @@ def _make_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrator:
     return orchestrator
 
 
+def _crashing_agent(*, recover: bool = False):
+    agent = AsyncMock()
+    agent.pending_turn = None
+    attempts = 0
+
+    async def communicate(prompt, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if recover and attempts > 1:
+            return _make_turn()
+        agent.pending_turn = TurnRecord(
+            iteration=1,
+            user_input=prompt,
+            agent_output="partial answer",
+            crashed=True,
+            crash_reason="transient crash",
+        )
+        raise AgentCrashError("transient crash")
+
+    async def discard():
+        agent.pending_turn = None
+
+    agent.communicate.side_effect = communicate
+    agent.discard_pending_turn.side_effect = discard
+    return agent
+
+
+@pytest.mark.asyncio
+class TestTurnRetryLimit:
+    @pytest.mark.parametrize("limit, attempts", [(None, 3), (0, 1), (1, 2), (99, 3)])
+    async def test_terminal_crash_preserves_each_attempt(self, tmp_path, limit, attempts):
+        task = _make_task(run_limits=RunLimits(max_turn_retries=limit))
+        orch = _make_orchestrator(task, tmp_path)
+        orch.agent = _crashing_agent()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep, pytest.raises(AgentCrashError):
+            await orch._evaluation_loop()
+
+        assert orch.agent.communicate.await_count == attempts
+        assert orch.agent.discard_pending_turn.await_count == attempts
+        assert sleep.await_count == attempts - 1
+        assert len(orch.result.iterations) == attempts
+        assert all(turn.crashed and turn.iteration == 1 for turn in orch.result.iterations)
+        assert all(turn.crash_reason == "transient crash" for turn in orch.result.iterations)
+        assert orch.result.iteration_count == 1
+        orch.success_checker.check_all_async.assert_not_called()
+
+    async def test_one_retry_can_recover_without_losing_partial(self, tmp_path):
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_turn_retries=1)), tmp_path)
+        orch.agent = _crashing_agent(recover=True)
+        orch.success_checker.check_all_async = AsyncMock(
+            return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            success = await orch._evaluation_loop()
+
+        assert success is True
+        assert orch.agent.communicate.await_count == 2
+        assert sleep.await_count == 1
+        assert [turn.crashed for turn in orch.result.iterations] == [True, False]
+        assert [turn.iteration for turn in orch.result.iterations] == [1, 1]
+
+    async def test_positive_limit_does_not_retry_auth_error(self, tmp_path):
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_turn_retries=99)), tmp_path)
+        orch.agent = AsyncMock()
+        orch.agent.communicate.side_effect = RuntimeError("Invalid API Key")
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock) as sleep,
+            pytest.raises(RuntimeError, match="Invalid API Key"),
+        ):
+            await orch._evaluation_loop()
+
+        orch.agent.communicate.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    async def test_zero_retries_stops_dialog_before_next_question(self, tmp_path):
+        from coder_eval.models import SimulationConfig
+
+        task = _make_task(run_limits=RunLimits(max_turn_retries=0))
+        task.simulation = SimulationConfig(enabled=True, persona="user", goal="ask questions", max_turns=3)
+        orch = _make_orchestrator(task, tmp_path)
+        orch.agent = _crashing_agent()
+        simulator = MagicMock(model=DEFAULT_SIMULATOR_MODEL)
+        simulator.start = AsyncMock()
+        simulator.stop = AsyncMock()
+        simulator.next_user_message = AsyncMock()
+
+        with (
+            patch("coder_eval.orchestrator.UserSimulator", return_value=simulator),
+            patch("asyncio.sleep", new_callable=AsyncMock) as sleep,
+            pytest.raises(AgentCrashError),
+        ):
+            await orch._simulation_dialog_loop("first question", orch.sandbox.sandbox_dir)
+
+        orch.agent.communicate.assert_awaited_once()
+        assert any(turn.crashed for turn in orch.result.iterations)
+        assert orch.result.simulation.stop_reason == "error"
+        assert orch.result.simulation.total_turns == 1
+        simulator.next_user_message.assert_not_awaited()
+        simulator.stop.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+
 class TestCheckRunLimitsUnit:
     """Direct tests of the _check_run_limits helper."""
 
@@ -124,33 +229,33 @@ class TestCheckRunLimitsUnit:
     def test_input_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "input_tokens"
-        assert exc.value.actual == 2000
-        assert exc.value.limit == 1000
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "input_tokens"
+        assert error.actual == 2000
+        assert error.limit == 1000
 
     def test_output_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(output_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "output_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "output_tokens"
 
     def test_total_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=2500)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=1500, output_tokens=1500))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "total_tokens"
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "total_tokens"
 
     def test_cost_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
         orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "usd"
-        assert exc.value.actual == pytest.approx(0.20)
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.budget_name == "usd"
+        assert error.actual == pytest.approx(0.20)
 
     def test_cost_skipped_when_no_cost_reported(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
@@ -180,16 +285,15 @@ class TestCheckRunLimitsUnit:
             _make_task(run_limits=RunLimits(max_input_tokens=1000, count_cached_input=True)), tmp_path
         )
         orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.actual == 1100
+        error = orch._check_run_limits(iteration=1)
+        assert isinstance(error, BudgetExceededError)
+        assert error.actual == 1100
 
     def test_cumulative_across_turns(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
         orch.result.iterations.append(_make_turn(iteration=1, input_tokens=600))
         orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
-        with pytest.raises(BudgetExceededError):
-            orch._check_run_limits(iteration=2)
+        assert isinstance(orch._check_run_limits(iteration=2), BudgetExceededError)
 
 
 async def _run_orchestrator(
@@ -362,11 +466,12 @@ class TestCostDataAvailableFlag:
 class TestSimulationBudgetAbort:
     """The simulation arm raises BudgetExceededError mid-dialog and records telemetry."""
 
-    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path):
+    @pytest.mark.parametrize("grade", [True, False])
+    async def test_dialog_aborts_with_run_limit_stop_reason(self, tmp_path, grade):
         """A budget breach in _simulation_dialog_loop must:
         - raise BudgetExceededError to the caller (Orchestrator.run),
         - set stop_reason=RUN_LIMIT_EXCEEDED in the finally block's SimulationTelemetry,
-        - run end-of-dialog criteria for partial credit.
+        - run end-of-dialog criteria for partial credit only when grading is enabled.
         """
         from coder_eval.models import SimulationConfig
 
@@ -381,6 +486,7 @@ class TestSimulationBudgetAbort:
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
+        orch.grade = grade
         # The agent's first turn reports tokens above the budget.
         turn = _make_turn(input_tokens=200, output_tokens=10)
         mock_agent = AsyncMock()
@@ -410,8 +516,9 @@ class TestSimulationBudgetAbort:
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
 
-        # End-of-dialog criteria must have run for partial credit before the raise.
-        assert len(orch.result.success_criteria_results) == 1
+        assert len(orch.result.success_criteria_results) == (1 if grade else 0)
+        assert mock_checker.check_all_async.await_count == (1 if grade else 0)
+        assert orch.result.final_status is FinalStatus.TOKEN_BUDGET_EXCEEDED
         # Finally block must have written telemetry with the dedicated stop_reason.
         assert orch.result.simulation is not None
         assert orch.result.simulation.stop_reason == "run_limit_exceeded"

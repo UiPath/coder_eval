@@ -12,7 +12,7 @@ Wire protocol (one JSON object per line; the package README is the SSOT)::
     stdin                                   stdout
     {"cmd":"init","options":{...}}      ->  {"type":"init_ok"}
     {"cmd":"send","prompt":..,              {"type":"event","event":{...}}  (zero or more)
-            "sessionId":..}                 {"type":"usage","usage":{..}}   (one per model call)
+            "sessionId":..,"iteration":N}   {"type":"usage","usage":{..}}   (one per model call)
                                         ->  {"type":"result","response":..,"sessionId":..,
                                              "usage":{..},"turnUsages":[..],"model":..}
     {"cmd":"destroy"}                   ->  {"type":"destroyed"}
@@ -824,7 +824,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         try:
-            await self._send_command({"cmd": "send", "prompt": user_input, "sessionId": self._session_id})
+            await self._send_command(
+                {"cmd": "send", "prompt": user_input, "sessionId": self._session_id, "iteration": self._iteration}
+            )
 
             while True:
                 remaining = None if deadline is None else deadline - time.monotonic()

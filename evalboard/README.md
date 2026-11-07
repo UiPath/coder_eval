@@ -167,5 +167,9 @@ Two invariants worth preserving if you add a source:
   Files are gathered by `collectTaskFiles` / `collectRunFiles`, which reuse the
   `walkArtifacts` noise filter, and zipped by `lib/zip.ts` (a dependency-free
   DEFLATE writer).
+- In production the server requests its own `/` 15 s after it starts and then
+  every 4 minutes (`lib/warm.ts`, started from `instrumentation.ts`), so the
+  per-run cache is rebuilt by that request rather than by a visitor.
+  `EVALBOARD_WARM_INTERVAL_SECONDS` sets the interval; `0` turns it off.
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

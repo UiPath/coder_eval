@@ -23,9 +23,10 @@
   written and never read. `tests/test_seed_from_prior_result.py` partitions every
   `EvaluationResult` field as CARRIED or RECOMPUTED and fails closed on a new one, and
   asserts the two `_select_gate()` call sites. A prior status that
-  `FinalStatus.is_execution_fact` (TIMEOUT / ERROR / BUILD_FAILED / the budget stops) is
-  **preserved**, never overwritten: grading may only move `NOT_GRADED` to
-  SUCCESS/FAILURE, since it neither repeated nor observed the agent phase.
+  `EvaluationResult.has_execution_failure` (TIMEOUT / execution or legacy ERROR /
+  BUILD_FAILED / the budget stops) is **preserved**, never overwritten. An explicitly
+  grading-origin ERROR can instead be repaired, with its incident retained in history;
+  see orchestration.md § Grading incidents and execution facts.
   **`MAX_TURNS_EXHAUSTED` is deliberately NOT one of them — anywhere**.
   `_EXECUTION_FACT_STATUSES` maps it to `False`, and the table and the chain that reads
   it must agree: it shipped as `True` while `_terminal_status`'s own docstring argued

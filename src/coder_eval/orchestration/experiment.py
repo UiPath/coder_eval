@@ -274,6 +274,23 @@ def _apply_prompt_overrides(
         variant: The specific variant being resolved.
         lineage: Config lineage dict to update.
     """
+    simulation = task.simulation
+    if (
+        simulation is not None
+        and simulation.enabled
+        and simulation.is_scripted
+        and (
+            variant.initial_prompt is not None
+            or variant.initial_prompt_file is not None
+            or variant.prompt_mutations
+            or (experiment.defaults is not None and experiment.defaults.prompt_mutations)
+        )
+    ):
+        raise ValueError(
+            "simulation.turns supplies every user turn: initial_prompt, initial_prompt_file, "
+            + "and prompt_mutations cannot override a scripted task."
+        )
+
     # Full replacement — skip all mutations
     if variant.initial_prompt is not None:
         task.initial_prompt = variant.initial_prompt

@@ -274,6 +274,10 @@ class ResultSummary(BaseModel):
 class TurnRecord(BaseModel):
     """Record of a single agent turn (input + output)."""
 
+    record_kind: Literal["agent", "standalone_user"] | None = Field(
+        default=None,
+        description="Producer provenance; None is unknown legacy. standalone_user is not an agent answer.",
+    )
     iteration: int = Field(
         description=(
             "Orchestrator iteration number. Multiple records may share this value when "
@@ -435,6 +439,7 @@ class SimulationTelemetry(BaseModel):
     stop_reason: Literal[
         "criteria_passed",
         "stop_token",
+        "script_exhausted",
         "max_turns",
         "agent_max_turns",
         "budget",
@@ -450,7 +455,7 @@ class SimulationTelemetry(BaseModel):
         description=(
             "Resolved model that played the simulated user, captured so a persisted "
             "task.json is self-describing and its cost prices from a fact rather than "
-            "from the run's route."
+            "from the run's route. None when the user was scripted (``simulation.turns``)."
         ),
     )
 
@@ -529,6 +534,15 @@ class EarlyStopInfo(BaseModel):
         + "Bounded to mirror the source field so a hand-edited or externally produced record "
         + "cannot represent a value the authoritative field would reject.",
     )
+
+
+class GradingErrorInfo(BaseModel):
+    """One failed grading pass, independent of the agent's execution outcome."""
+
+    message: str
+    details: dict[str, Any] | None = None
+    log_tail: str | None = None
+    recorded_at: datetime
 
 
 class EvaluationResult(BaseModel):
@@ -619,6 +633,14 @@ class EvaluationResult(BaseModel):
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if evaluation failed")
+    error_phase: Literal["execution", "grading"] | None = Field(
+        default=None,
+        description="Origin of the terminal error. Absent legacy ERROR rows remain execution facts.",
+    )
+    error_history: list[GradingErrorInfo] = Field(
+        default_factory=list,
+        description="Prior grading incidents retained after another grading pass starts, plus secondary diagnostics.",
+    )
     error_details: dict[str, Any] | None = Field(
         default=None, description="Detailed error context from error_handling module"
     )
@@ -708,6 +730,13 @@ class EvaluationResult(BaseModel):
             "None on a full run — 'early_stop is not None' is itself the stopped-early flag."
         ),
     )
+
+    @property
+    def has_execution_failure(self) -> bool:
+        """Execution facts stay terminal; explicitly grading-origin ERROR rows are repairable."""
+        return self.final_status.is_execution_fact and not (
+            self.final_status is FinalStatus.ERROR and self.error_phase == "grading"
+        )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.

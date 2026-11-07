@@ -72,6 +72,7 @@
   "model_used": "virtuoso-1-5",
   "num_turns": null,
   "provider_errors": [],
+  "record_kind": "agent",
   "result_summary": {
     "is_error": true,
     "result": "Delegate send failed: Delegate backend error: HTTP 422",

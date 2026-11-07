@@ -14,6 +14,7 @@ from typing import Any
 
 import click
 import typer
+from rich.markup import escape
 from tqdm import tqdm
 
 from ..config import Settings, settings
@@ -850,13 +851,14 @@ async def _grade_resumed_tasks(
 
     Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
     """
+    from ..errors import GradingError
     from ..orchestration.regrade import (
         RegradeError,
         back_up_pre_grade_record,
         default_workspace,
         load_prior_result,
         regrade_in_place,
-        restore_pre_grade_record,
+        write_grading_incident,
     )
 
     graded: list[tuple[ResolvedTask, TaskResult]] = []
@@ -892,34 +894,17 @@ async def _grade_resumed_tasks(
                 replicate_index=rt.replicate_index,
                 allow_host_grading=allow_host_grading,
             )
-        except (RegradeError, OSError, RuntimeError, ValueError) as e:
-            console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
-            if prior is None:
-                # Dropping it removes it from run.json AND from tasks_not_graded,
-                # which is what the exit gate counts. Stand in a placeholder.
-                result = _unreadable_row_placeholder(rt, e)
-            else:
-                # APPEND, don't replace: a row carrying an execution fact already
-                # names its own cause, and overwriting published the wrong one
-                # while the on-disk record still named the right one.
+        except GradingError as error:
+            assert prior is not None
+            console.print(f"[yellow]⚠[/] Grading {escape(rt.task.task_id)} errored: {escape(str(error))}")
+            try:
+                result = write_grading_incident(rt.run_dir, prior, error)
+            except (OSError, RegradeError) as write_error:
+                console.print(f"[yellow]⚠[/] Could not record the grading incident: {escape(str(write_error))}")
                 result = prior
-                grading_note = f"Grading failed during --resume: {e}"
-                result.error_message = (
-                    f"{result.error_message}\n{grading_note}" if result.error_message else grading_note
-                )
-        else:
-            if result.final_status is FinalStatus.ERROR:
-                # A grading crash is not a verdict about the run, and
-                # _finalize_result has already written the ERROR task.json into
-                # this directory -- which is what a later --resume reads.
-                # Rationale: .claude/notes/orchestration.md § When a resumed grade crashes
-                restore_pre_grade_record(rt.run_dir)
-                console.print(
-                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.error_message}); "
-                    + "keeping the ungraded row so it stays re-gradeable."
-                )
-                prior.error_message = f"Grading errored during --resume: {result.error_message}"
-                result = prior
+        except (RegradeError, OSError, RuntimeError, ValueError) as error:
+            console.print(f"[yellow]⚠[/] Could not grade {escape(rt.task.task_id)}: {escape(str(error))}")
+            result = _unreadable_row_placeholder(rt, error) if prior is None else prior
         graded.append(
             (
                 rt,
@@ -977,25 +962,28 @@ async def _apply_resume(
 
 
 def _reject_simulation_under_execute(resolved: list[ResolvedTask], *, grade: bool) -> None:
-    """Refuse a simulation task under ``execute`` rather than degrading it.
+    """Refuse a simulated-user task under ``execute`` rather than degrading it.
 
     The dialog loop reads criteria results to decide whether to keep talking, so
     an ungraded dialog would quietly change its own stopping behaviour and
     produce a trajectory that is not the one `run` would have produced. A
+    scripted dialog (``simulation.turns``) never reads them and is accepted. A
     resolution-time config error (exit 2), sitting with the other
     resolution-time validations, and it names the offending tasks.
     """
     if grade:
         return
     simulated = sorted(
-        rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
+        rt.task.task_id
+        for rt in resolved
+        if rt.task.simulation is not None and rt.task.simulation.enabled and not rt.task.simulation.is_scripted
     )
     if simulated:
         raise typer.BadParameter(
-            "`coder-eval execute` does not support simulation tasks (their turn-continuation "
-            + "logic depends on criteria results): "
+            "`coder-eval execute` does not support simulation tasks with an LLM-simulated user (their "
+            + "turn-continuation logic depends on criteria results): "
             + ", ".join(simulated)
-            + ". Use `coder-eval run` for these."
+            + ". Use `coder-eval run` for these, or script the user with `simulation.turns`."
         )
 
 

@@ -179,6 +179,7 @@ class EventCollector:
         if end is None:
             # No terminal event yet (mid-stream snapshot): minimal record.
             return TurnRecord(
+                record_kind="agent",
                 iteration=self._iteration,
                 user_input=self._user_input,
                 agent_output="",
@@ -212,6 +213,7 @@ class EventCollector:
         tool_union = union_ms(tool_spans) if tool_spans else None
 
         return TurnRecord(
+            record_kind="agent",
             iteration=end.iteration or self._iteration,
             user_input=end.user_input or self._user_input,
             agent_output=end.agent_output,

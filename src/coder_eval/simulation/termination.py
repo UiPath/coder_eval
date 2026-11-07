@@ -13,6 +13,7 @@ class DialogStopReason(StrEnum):
 
     CRITERIA_PASSED = "criteria_passed"
     STOP_TOKEN = "stop_token"
+    SCRIPT_EXHAUSTED = "script_exhausted"
     MAX_TURNS = "max_turns"
     AGENT_MAX_TURNS = "agent_max_turns"
     BUDGET = "budget"
@@ -43,9 +44,10 @@ def evaluate_stop(
 
     Precedence (first matching wins):
       1. criteria passed AND ``stop_on_criteria_pass`` — CRITERIA_PASSED
-      2. ``turns_completed >= max_turns`` — MAX_TURNS
-      3. ``max_total_tokens`` exceeded — BUDGET
-      4. otherwise — keep going
+      2. every scripted turn (``turns``) answered — SCRIPT_EXHAUSTED
+      3. ``turns_completed >= max_turns`` — MAX_TURNS
+      4. ``max_total_tokens`` exceeded — BUDGET
+      5. otherwise — keep going
 
     Stop-token detection is NOT handled here: the orchestrator checks
     ``SimulatorResult.stop_requested`` directly on the fresh simulator output
@@ -66,6 +68,9 @@ def evaluate_stop(
     """
     if config.stop_on_criteria_pass and criteria_all_passed:
         return StopDecision(stop=True, reason=DialogStopReason.CRITERIA_PASSED)
+
+    if config.turns is not None and turns_completed >= len(config.turns):
+        return StopDecision(stop=True, reason=DialogStopReason.SCRIPT_EXHAUSTED)
 
     if turns_completed >= config.max_turns:
         return StopDecision(stop=True, reason=DialogStopReason.MAX_TURNS)
