@@ -80,6 +80,21 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   table's to state, not this file's. Full table + rationale:
   docs/agents/HARNESS_PARITY.md.
 
+## Codex compaction usage metadata
+
+Codex emits usage for the compaction model response, then emits another usage update
+after estimating the replacement context. The estimate has zero input, output, cache
+and reasoning deltas. Within a compaction lifecycle, that later bookkeeping update
+still updates usage and transcript capture but does not begin another model call.
+The first compaction usage update counts even when its reported deltas are zero;
+completion clears the lifecycle before ordinary model and tool calls resume.
+
+The source contract is visible in `openai/codex` tag `rust-v0.163.0`:
+`compact.rs` calls `update_token_usage_info` and then `recompute_token_usage`, each of
+which emits a `TokenCount` event. The app-server forwards both as
+`thread/tokenUsage/updated`. An ordinary tool call's next-call reservation remains
+unchanged. An estimate outside compaction keeps the existing accounting behavior.
+
 ## Shared turn lifecycle
 
 Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the

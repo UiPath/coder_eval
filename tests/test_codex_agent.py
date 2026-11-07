@@ -2229,6 +2229,95 @@ class TestMaxTurnsApiCallCap:
         notifications.append(_turn_completed())
         return notifications
 
+    @staticmethod
+    def _compaction_notifications(
+        *, estimate: bool = True, empty_response: bool = False, item_id: str = "compact"
+    ) -> list:
+        item = SimpleNamespace(type="contextCompaction", id=item_id)
+        response = _token_usage(inp=10, out=5, cached=0)
+        response.payload.token_usage.last = SimpleNamespace(
+            input_tokens=0 if empty_response else 10,
+            output_tokens=0 if empty_response else 5,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=0 if empty_response else 15,
+        )
+        notifications = [_item_notification("item/started", item), response]
+        if estimate:
+            recomputed = _token_usage(inp=10, out=5, cached=0)
+            recomputed.payload.token_usage.last = SimpleNamespace(
+                input_tokens=0,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cache_write_input_tokens=0,
+                reasoning_output_tokens=0,
+                total_tokens=20,
+            )
+            notifications.append(recomputed)
+        notifications.append(_item_notification("item/completed", item))
+        return notifications
+
+    @pytest.mark.parametrize("estimate,empty_response", [(True, False), (False, False), (True, True)])
+    async def test_compaction_estimate_does_not_spend_model_call_budget(self, estimate, empty_response):
+        notifications = self._cmd_notifications(1)
+        notifications[5:5] = self._compaction_notifications(estimate=estimate, empty_response=empty_response)
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=3)
+
+        assert record.num_turns == 3
+        assert record.max_turns_exhausted is False
+        assert len(record.commands) == 1
+
+    async def test_repeated_compaction_resets_before_normal_tool_calls(self):
+        notifications = self._cmd_notifications(2)
+        notifications[10:10] = self._compaction_notifications(item_id="compact-2")
+        notifications[5:5] = self._compaction_notifications(item_id="compact-1")
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=None)
+
+        assert record.num_turns == 5
+        assert record.max_turns_exhausted is False
+        assert len(record.commands) == 2
+
+    async def test_zero_usage_outside_compaction_still_counts(self):
+        update = _token_usage(inp=0, out=0, cached=0)
+        update.payload.token_usage.last = SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=20,
+        )
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), [update, _turn_completed()])
+
+        record = await agent.communicate("go", max_turns=1)
+
+        assert record.num_turns == 1
+        assert record.max_turns_exhausted is False
+
+    async def test_zero_usage_after_compaction_completion_counts_next_model_call(self):
+        update = _token_usage(inp=0, out=0, cached=0)
+        update.payload.token_usage.last = SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=0,
+        )
+        notifications = self._compaction_notifications()
+        notifications.extend([update, _turn_completed()])
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=2)
+
+        assert record.num_turns == 2
+        assert record.max_turns_exhausted is False
+
     async def test_cap_stops_before_the_next_call_runs_a_tool(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 

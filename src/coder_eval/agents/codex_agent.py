@@ -557,6 +557,8 @@ class _CodexTurnState:
         self.api_calls = 0
         self.in_api_call = False
         self.call_ran_tools = False
+        self.in_context_compaction = False
+        self.compaction_usage_seen = False
 
         # Finalize inputs, COMMITTED by communicate after a clean pump return.
         # Defaults are the crash values (no terminal usage; format from messages).
@@ -755,6 +757,9 @@ class _CodexTurnState:
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
+        if root_type == "contextCompaction":
+            self.in_context_compaction = True
+            self.compaction_usage_seen = False
         if not self.in_api_call and root_type not in _NON_MODEL_ITEM_TYPES:
             self._open_api_call()
         # Any item that isn't transcript content is a tool call (generic capture).
@@ -790,6 +795,8 @@ class _CodexTurnState:
             return
         completed_ms = getattr(notification.payload, "completed_at_ms", None)
         root_type = getattr(root, "type", None)
+        if root_type == "contextCompaction":
+            self.in_context_compaction = False
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
             seq = self.seq_by_id.get(tool_id, self.next_sequence)
@@ -875,18 +882,39 @@ class _CodexTurnState:
                 self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=delta))
 
     def on_token_usage_updated(self, notification: Any) -> None:
-        """One per generation → cut a message. Carries `total` (cumulative over the
-        whole THREAD, i.e. every turn so far) and `last` (this generation's delta)."""
-        if not self.in_api_call:
-            self.api_calls += 1
-        self.in_api_call = False
-        # Tool results always go back to the model, so the next call begins here,
-        # before Codex can run the next call's tools (an item starts as its tool runs).
-        if self.call_ran_tools:
-            self._open_api_call()
+        """Capture generation usage and compaction's context-size estimates.
+
+        Rationale: .claude/notes/agents.md § Codex compaction usage metadata
+        """
+        usage = getattr(notification.payload, "token_usage", None) if notification.payload else None
+        last = getattr(usage, "last", None)
+        estimate = (
+            self.in_context_compaction
+            and self.compaction_usage_seen
+            and last is not None
+            and all(
+                getattr(last, key, 0) == 0
+                for key in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "reasoning_output_tokens",
+                )
+            )
+        )
+        if self.in_context_compaction:
+            self.compaction_usage_seen = True
+        if not estimate:
+            if not self.in_api_call:
+                self.api_calls += 1
+            self.in_api_call = False
+            # Tool results reserve the next model call before its tools can run.
+            if self.call_ran_tools:
+                self._open_api_call()
         if notification.payload:
-            self.latest_token_usage = getattr(notification.payload, "token_usage", None)
-            self._flush_message(getattr(self.latest_token_usage, "last", None))
+            self.latest_token_usage = usage
+            self._flush_message(last)
 
     def on_turn_completed(self, notification: Any) -> bool:
         """Capture the final Turn. Returns True (break the pump) iff the payload is
