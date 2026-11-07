@@ -11,7 +11,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
-        pypdf==5.1.0 \
+        pypdf==6.21.4 \
         fillpdf==0.7.3 \
         pdfrw==0.4 \
         PyPDF2==3.0.1 \
