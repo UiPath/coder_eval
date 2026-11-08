@@ -117,7 +117,7 @@ class TestErrorCategory:
             ErrorCategory.AGENT_API_ERROR: (Exception("network connection error"), {"component": "agent"}),
             ErrorCategory.AGENT_RATE_LIMIT: (Exception("rate limit hit"), {}),
             ErrorCategory.AGENT_AUTH_ERROR: (Exception("authentication failed"), {}),
-            ErrorCategory.AGENT_BILLING_ERROR: (Exception("billing problem"), {}),
+            ErrorCategory.AGENT_BILLING_ERROR: (Exception("insufficient credits on account"), {}),
             ErrorCategory.AGENT_CRASH: (AgentCrashError("unexpected exit"), {"component": "agent"}),
             ErrorCategory.AGENT_INVALID_OUTPUT: (Exception("content filter blocked"), {}),
             ErrorCategory.AGENT_CONFIG_ERROR: (AgentConfigError("missing prerequisite"), {}),
@@ -242,6 +242,49 @@ class TestCategorizeError:
     def test_categorize_agent_crash_without_component_hint(self):
         """The typed-AgentCrashError fallback also fires when no component is provided."""
         assert categorize_error(AgentCrashError("anything"), {}) == ErrorCategory.AGENT_CRASH
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "The billing team handles invoice requests.",
+            "Check the credit note before sending payment.",
+            "There is insufficient evidence to confirm that process.",
+        ],
+    )
+    def test_business_answer_does_not_disable_crash_retry(self, message):
+        category = categorize_error(AgentCrashError(message), {"component": "agent"})
+
+        assert category == ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Your credit balance is too low to access the API.",
+            "Insufficient API credits on account",
+            "Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
+            "Error code: 400 - {'error': {'code': 'billing_hard_limit_reached'}}",
+            "Error code: 400 - {'error': {'code': 'billing_not_active'}}",
+            "Billing hard limit has been reached",
+            "API response: {'code': 'payment_required'}",
+        ],
+    )
+    def test_provider_quota_denial_stays_non_retryable(self, message):
+        category = categorize_error(AgentCrashError(message), {"component": "agent"})
+
+        assert category == ErrorCategory.AGENT_BILLING_ERROR
+        assert not should_retry(category, 0)
+
+    def test_http_payment_required_stays_non_retryable(self):
+        import httpx
+
+        response = httpx.Response(402, request=httpx.Request("POST", "https://provider.invalid/messages"))
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            response.raise_for_status()
+        category = categorize_error(caught.value, {"component": "agent"})
+
+        assert category == ErrorCategory.AGENT_BILLING_ERROR
+        assert not should_retry(category, 0)
 
     def test_categorize_agent_config_error(self):
         """AgentConfigError → AGENT_CONFIG_ERROR via typed check."""

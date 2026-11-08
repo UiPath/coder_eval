@@ -89,11 +89,22 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
     ):
         return ErrorCategory.AGENT_AUTH_ERROR
 
-    # Billing/credit errors (NOT retryable). Broad patterns are intentional: a false
-    # positive skips one retry, a false negative wastes every retry on an error that
-    # will never succeed.
+    # Bare finance words can be task content carried by an AgentCrashError.
     if any(
-        pat in error_str for pat in ["credit", "billing", "payment", "insufficient", "quota exceeded", "spending limit"]
+        pat in error_str
+        for pat in [
+            "insufficient credit",
+            "insufficient api credit",
+            "credit balance is too low",
+            "insufficient_quota",
+            "billing_hard_limit",
+            "billing hard limit",
+            "billing_not_active",
+            "payment required",
+            "payment_required",
+            "quota exceeded",
+            "spending limit",
+        ]
     ) or _mentions_status(error_str, "402"):
         return ErrorCategory.AGENT_BILLING_ERROR
 
