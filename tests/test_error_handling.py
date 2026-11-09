@@ -316,6 +316,20 @@ class TestCategorizeError:
 
         assert categorize_error(wrapper, {"component": "agent"}) is expected
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Quota exceeded for x.test/aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model",
+            "Quota exceeded for evil-aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model",
+            "Quota exceeded for aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model.extra",
+        ],
+    )
+    def test_vertex_quota_requires_a_complete_metric_identifier(self, message):
+        category = categorize_error(AgentCrashError(message), {"component": "agent"})
+
+        assert category is ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
+
     def test_transient_vertex_quota_is_retryable(self):
         error = AgentCrashError(
             "429 Quota exceeded for aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model"

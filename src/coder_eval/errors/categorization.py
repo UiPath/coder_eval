@@ -24,6 +24,9 @@ _HTTP_STATUS = re.compile(
     r"\b(?:http(?:/\d(?:\.\d)?)?\s+(?:status(?:\s+code)?\s*[:=]?\s*)?"
     + r"|(?:http[_ ]?)?status(?:[_ ]?code)?\s*[:=]\s*|error\s+code\s*:\s*)(\d{3})\b"
 )
+_VERTEX_QUOTA_METRIC = re.compile(
+    r"\bquota exceeded for aiplatform\.googleapis\.com/([a-z0-9_]+)(?=$|[\s,;:)]|\.(?:\s|$))"
+)
 _STATUS_REASONS: Final = {
     "401": "unauthorized",
     "402": "payment required",
@@ -183,9 +186,8 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
         any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"])
         or _mentions_status(error_str, "429")
         or (
-            "quota exceeded" in error_str
-            and "googleapis.com/" in error_str
-            and any(window in error_str for window in ["per_minute", "per_hour", "per_day"])
+            (quota := _VERTEX_QUOTA_METRIC.search(error_str)) is not None
+            and re.search(r"_per_(?:minute|hour|day)(?:_|$)", quota.group(1))
         )
     ):
         return ErrorCategory.AGENT_RATE_LIMIT
