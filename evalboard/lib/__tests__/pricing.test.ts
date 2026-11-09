@@ -54,6 +54,13 @@ describe("resolvePricing", () => {
         expect(resolvePricing("bedrock/converse/deepseek.v3.2")?.inputPerMTok).toBe(0.74);
         expect(resolvePricing("eu.anthropic.claude-sonnet-4-6")?.outputPerMTok).toBe(15);
     });
+
+    test("prices the underscored id the Delegate backend echoes under its hyphenated key", () => {
+        // Mirror of pricing.py::delegate_rate_key; without it every token bucket
+        // on a Delegate row rendered "—".
+        expect(resolvePricing("gpt_5_6_luna")).toEqual(resolvePricing("gpt-5-6-luna"));
+        expect(tokenBucketUsd("gpt_5_6_luna", 1_000_000, "output")).toBe(1.2);
+    });
 });
 
 describe("tokenBucketUsd", () => {

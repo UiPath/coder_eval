@@ -16,7 +16,14 @@ from __future__ import annotations
 from typing import Any
 
 from coder_eval.errors import truncate_crash_message
-from coder_eval.models import EvaluationResult, FinalStatus, judge_cost_usd, simulator_cost_usd, sum_costs
+from coder_eval.models import (
+    EvaluationResult,
+    FinalStatus,
+    JudgeCriterionResult,
+    judge_cost_usd,
+    simulator_cost_usd,
+    sum_costs,
+)
 from coder_eval.result_metrics import agent_wall_ms, expected_turns_overage, turn_time_buckets, visible_turn_count
 from coder_eval.result_metrics import has_final_reply as _has_final_reply
 
@@ -28,28 +35,36 @@ _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
 
 def _cost_complete(result: EvaluationResult) -> bool:
-    """Whether this row's recorded agent spend accounts for everything it spent.
+    """Whether this row's recorded agent, judge and simulator spend accounts for everything it spent.
 
-    False means the costs on the row are a floor, not the bill. Two ways in:
+    False means the costs on the row are a floor, not the bill. Three ways in:
 
-    1. A turn burned tokens the rate card could not price. The card is the fallback
-       for anything the backend did not price itself, so with no rate those tokens
-       book no money.
-    2. The task was hard-killed by the task-level timeout. Keyed on the status
-       rather than on emptiness: the watchdog fires while the evaluation loop is
-       running, so a TIMEOUT row always lost an in-flight turn, even one that
-       completed earlier turns that do carry costs.
+    1. An agent turn burned tokens the rate card could not price. The card is the
+       fallback for anything the backend did not price itself, so those tokens book
+       no money.
+    2. A judge or the simulated user burned tokens with no cost. Both price from the
+       rate card, so an unpriced model drops that slice of the bill.
+    3. The task was hard-killed by the task-level timeout. Keyed on the status, not
+       on emptiness: the watchdog fires while the loop runs, so a TIMEOUT row always
+       lost an in-flight turn, even after earlier turns that carry costs.
 
-    True for a row that burned nothing: an error before the agent ran genuinely
-    cost zero, and a slow setup failure is as free as a fast one.
+    True for a row that burned nothing: an error before the agent ran cost zero.
     """
     if result.final_status is FinalStatus.TIMEOUT:
         return False
-    return all(
-        usage.total_cost_usd is not None
-        for t in result.iterations
-        if (usage := t.token_usage) is not None and not usage.is_empty()
-    )
+    sim = result.simulation
+    if (
+        sim is not None
+        and (sim.simulator_input_tokens or sim.simulator_output_tokens)
+        and simulator_cost_usd(result) is None
+    ):
+        return False
+    usages = [t.token_usage for t in result.iterations] + [
+        cr.token_usage
+        for cr in result.success_criteria_results + result.post_failure_criteria_results
+        if isinstance(cr, JudgeCriterionResult)
+    ]
+    return all(usage.total_cost_usd is not None for usage in usages if usage is not None and not usage.is_empty())
 
 
 def eval_result_to_task_dict(
