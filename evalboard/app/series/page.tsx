@@ -20,7 +20,7 @@ async function SeriesTable() {
                 <table className="w-full text-sm">
                     <thead>
                         <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
-                            <th className={TH}>Series</th>
+                            <th className={TH}>Pipeline</th>
                             <th className={TH}>Last run</th>
                             <th className={TH}>Latest</th>
                             <th className={TH}>Last 8 runs</th>
@@ -41,7 +41,7 @@ async function SeriesTable() {
                                     colSpan={4}
                                     className="py-8 px-4 text-center text-gray-500"
                                 >
-                                    No series has runs yet.
+                                    No scheduled pipeline has runs yet.
                                 </td>
                             </tr>
                         )}
@@ -72,10 +72,10 @@ export default function SeriesPage() {
     return (
         <div className="space-y-5">
             <div className="space-y-1">
-                <h1 className="text-xl font-semibold text-gray-900">Series</h1>
+                <h1 className="text-xl font-semibold text-gray-900">Scheduled</h1>
                 <p className="text-sm text-gray-500">
-                    Scheduled runs outside the skills nightly, one trend per
-                    series.
+                    Pipelines that run on a schedule outside the skills
+                    nightly, one trend each.
                 </p>
             </div>
             <Suspense fallback={<SkelTable rows={4} />}>

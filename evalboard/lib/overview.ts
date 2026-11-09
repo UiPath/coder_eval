@@ -1273,7 +1273,7 @@ export interface AdhocListing {
 // plain descending string compare orders them; runs missing a start_time sort
 // last (empty key), then by id descending for a deterministic tie-break. Runs
 // without a readable overview (aborted uploads that left only default/) are
-// dropped, and so are runs that carry a `series` (they live on the Series tab).
+// dropped, and so are runs that carry a `series` (they live on the Scheduled tab).
 // `total` is the pre-limit count, so the UI can offer "Show all".
 // Exported for testing.
 export function buildAdhocRows(

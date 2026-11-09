@@ -87,7 +87,7 @@ export const SERIES: readonly SeriesDef[] = [
         key: "scribe",
         label: "Scribe",
         description:
-            "The Autopilot suite's canonical runs, read from its own container.",
+            "The Autopilot (aria/Composer) suite, run by the UiPath.Autopilot.Eval.Manual pipeline and uploaded to the aria-runs container.",
         arms: { kind: "single" },
         source: SCRIBE_SOURCE,
         membership: "canonical",
@@ -142,10 +142,23 @@ export interface SeriesRunRef {
     excluded: string | null;
 }
 
-export function isSeriesMember(def: SeriesDef, run: SeriesRunRef): boolean {
+type MembershipFields = Pick<SeriesRunRef, "series" | "dateShaped" | "adhoc">;
+
+export function isSeriesMember(def: SeriesDef, run: MembershipFields): boolean {
     return def.membership === "meta"
         ? run.series === def.key
         : run.dateShaped && !run.adhoc;
+}
+
+export function seriesForRun(
+    sourceId: string,
+    run: MembershipFields,
+): SeriesDef | null {
+    const candidates = run.series ? [seriesByKey(run.series)] : SERIES;
+    return (
+        candidates.find((d) => d.source.id === sourceId && isSeriesMember(d, run)) ??
+        null
+    );
 }
 
 export function membersOf(

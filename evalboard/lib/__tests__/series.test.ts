@@ -13,6 +13,7 @@ import {
     plotted,
     resolveArms,
     seriesByKey,
+    seriesForRun,
     sparkDomain,
     sparkLine,
     splitReason,
@@ -147,6 +148,23 @@ describe("membership", () => {
     test("plotted leaves out excluded runs", () => {
         const runs = [onDay(9), onDay(8, { excluded: "x" }), onDay(7)];
         expect(plotted(runs).map((r) => r.id)).toEqual([onDay(9).id, onDay(7).id]);
+    });
+
+    test("seriesForRun finds the series a run page links back to", () => {
+        const canonical = { series: null, dateShaped: true, adhoc: false };
+        expect(
+            seriesForRun("skills", { series: "n8n-vs-flow", dateShaped: false, adhoc: true })?.key,
+        ).toBe("n8n-vs-flow");
+        expect(seriesForRun("skills", { series: "brand-new", dateShaped: false, adhoc: true })?.label).toBe(
+            "brand-new",
+        );
+        expect(seriesForRun(SCRIBE_SOURCE.id, canonical)?.key).toBe("scribe");
+        expect(seriesForRun(SCRIBE_SOURCE.id, { ...canonical, adhoc: true })).toBeNull();
+        expect(seriesForRun("skills", canonical)).toBeNull();
+        expect(seriesForRun("skills", { series: null, dateShaped: false, adhoc: true })).toBeNull();
+        expect(
+            seriesForRun("gha", { series: "maestro-v1-v2-codex", dateShaped: false, adhoc: true }),
+        ).toBeNull();
     });
 
     test("unlistedSeriesKeys reports keys the table lacks", () => {

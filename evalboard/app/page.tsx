@@ -504,12 +504,12 @@ export default async function Page({
                     </div>
                     {isInternal && (
                         <p className="text-xs text-gray-500">
-                            Scheduled runs are on the{" "}
+                            Runs from scheduled pipelines are on the{" "}
                             <Link
                                 href="/series"
                                 className="text-studio-blue hover:underline"
                             >
-                                Series
+                                Scheduled
                             </Link>{" "}
                             tab.
                         </p>

@@ -14,7 +14,7 @@ import {
     type SeriesMetric,
     type SeriesPoint,
 } from "@/lib/series";
-import { SCRIBE_SOURCE } from "@/lib/sources";
+import { getAdhocRunListing } from "@/lib/overview";
 import {
     DETAIL_RUNS,
     loadRunLevel,
@@ -24,10 +24,12 @@ import {
 import { SkelBar, SkelTable, SkelTile } from "@/app/_components/skeleton";
 import { TrendChart, type ChartUnit } from "./trend-chart";
 import { RunList } from "./run-list";
+import { SourceRunTable } from "../_components/run-table";
 
 export const dynamic = "force-dynamic";
 
 const MAX_LIMIT = 300;
+const ADHOC_LIMIT = 20;
 
 const getDetail = cache((key: string, limit: number) =>
     loadSeriesDetail(seriesByKey(key), limit),
@@ -171,6 +173,23 @@ async function RunsSection({
     );
 }
 
+// A canonical series owns its whole container, so the container's ad-hoc runs
+// are reachable only from here.
+async function AdhocSection({ def }: { def: SeriesDef }) {
+    const adhoc = await getAdhocRunListing(ADHOC_LIMIT, def.source);
+    if (adhoc.total === 0) return null;
+    return (
+        <SourceRunTable
+            rows={adhoc.rows}
+            totalCandidates={adhoc.total}
+            showMoreHref={null}
+            sourceId={def.source.id}
+            heading="Ad-hoc runs"
+            note="Queued with adhoc=true · left off the trend and the run list above"
+        />
+    );
+}
+
 export default async function SeriesDetailPage({
     params,
     searchParams,
@@ -191,21 +210,11 @@ export default async function SeriesDetailPage({
                     href="/series"
                     className="text-xs text-studio-blue hover:underline"
                 >
-                    All series
+                    All scheduled
                 </Link>
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <h1 className="text-xl font-semibold text-gray-900">
-                        {def.label}
-                    </h1>
-                    {def.source.id === SCRIBE_SOURCE.id && (
-                        <Link
-                            href="/scribe"
-                            className="text-xs text-studio-blue hover:underline"
-                        >
-                            Scribe tab
-                        </Link>
-                    )}
-                </div>
+                <h1 className="text-xl font-semibold text-gray-900">
+                    {def.label}
+                </h1>
                 {def.description && (
                     <p className="text-sm text-gray-500 max-w-3xl">
                         {def.description}
@@ -225,6 +234,11 @@ export default async function SeriesDetailPage({
             <Suspense key={limit} fallback={<SkelTable rows={6} />}>
                 <RunsSection def={def} metric={metric} limit={limit} />
             </Suspense>
+            {def.membership === "canonical" && (
+                <Suspense fallback={<SkelTable rows={4} />}>
+                    <AdhocSection def={def} />
+                </Suspense>
+            )}
         </div>
     );
 }
