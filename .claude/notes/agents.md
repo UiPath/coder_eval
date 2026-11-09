@@ -258,6 +258,22 @@ entire headroom was 1.4 ms. Four sibling runs passed by 1.2-8.7 ms out of ~12 s,
 defect was a coin flip per run. `tests/test_antigravity_agent.py::test_a_tool_still_open_at_the_flush_is_not_generation_time`
 pins it.
 
+## Provider denials versus business text
+
+`categorize_error` prefers machine error codes and HTTP statuses, including an SDK
+exception wrapped as a cause. Its text fallback recognizes explicit provider envelopes,
+API credit denials and known Codex failure metadata. Words such as billing, payment,
+spending limit or quota exceeded, and bare numbers such as 402, also occur in valid
+business answers; they must not alone consume the terminal billing category. Vertex
+per-window quota exhaustion remains a retryable rate limit.
+
+Codex's existing failure suffix carries its machine kind and HTTP status. Keep that
+suffix on the raised exception even when the message is long; the base agent still
+truncates the stored `crash_reason`. This avoids adding a new public error protocol.
+The fallback cannot classify every provider's unstructured prose. In particular,
+"insufficient credits" without API context is ambiguous; SDK status/code metadata
+or an explicit API denial is the reliable signal.
+
 ## Why a clean exit can still be a crash
 
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every

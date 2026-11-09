@@ -996,6 +996,43 @@ async def test_claude_agent_process_error_no_stderr_at_all():
             await agent.communicate("do something")
 
 
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("Employees have a spending limit of $402 per trip.", "agent_crash"),
+        ("HTTP 402 Payment Required", "agent_billing_error"),
+    ],
+)
+async def test_claude_process_failure_classifies_its_sdk_result(detail, expected, tmp_path):
+    from claude_agent_sdk import ResultMessage
+
+    from coder_eval.errors.categorization import categorize_error
+    from coder_eval.errors.retry import should_retry
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    await agent.start(str(tmp_path))
+
+    async def failed_query(*args, **kwargs):
+        yield ResultMessage(
+            subtype="error_during_execution",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="failed",
+            usage={"input_tokens": 1, "output_tokens": 1},
+            result=detail,
+        )
+        raise ProcessError("process failed", exit_code=1, stderr="")
+
+    with patch("coder_eval.agents.claude_code_agent.query", failed_query), pytest.raises(AgentCrashError) as caught:
+        await agent.communicate("explain the process")
+
+    category = categorize_error(caught.value, {"component": "agent"})
+    assert category.value == expected
+    assert should_retry(category, 0) is (expected == "agent_crash")
+
+
 @pytest.mark.asyncio
 async def test_claude_agent_session_resumption():
     """Test that session_id from first communicate() is passed as resume on subsequent calls."""

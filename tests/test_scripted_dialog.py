@@ -51,7 +51,7 @@ TURNS = [
 
 
 class _SessionAgent(MockAgent):
-    """A ``MockAgent`` that remembers every prompt, and can time out or run out of turns on cue."""
+    """A ``MockAgent`` that records prompts and can crash, time out or exhaust turns on cue."""
 
     def __init__(
         self,
@@ -61,6 +61,7 @@ class _SessionAgent(MockAgent):
         exhaust_on_call: int | None = None,
         tokens_per_call: int = 0,
         crash_once_on_call: int | None = None,
+        crash_message: str = "Agent crashed once",
     ) -> None:
         super().__init__(task, scenario="success")
         self.prompts: list[str] = []
@@ -68,6 +69,7 @@ class _SessionAgent(MockAgent):
         self._exhaust_on_call = exhaust_on_call
         self._tokens_per_call = tokens_per_call
         self._crash_once_on_call = crash_once_on_call
+        self._crash_message = crash_message
 
     async def communicate(self, user_input: str, **kwargs: Any) -> TurnRecord:
         self.prompts.append(user_input)
@@ -75,7 +77,7 @@ class _SessionAgent(MockAgent):
         if call == self._time_out_on_call:
             raise TurnTimeoutError(30.0, task_id=self.task.task_id, iteration=call)
         if call == self._crash_once_on_call:
-            raise AgentCrashError("The billing team handles invoice requests.")
+            raise AgentCrashError(self._crash_message)
         turn = await super().communicate(user_input, **kwargs)
         if self._tokens_per_call:
             turn.token_usage = TokenUsage(
@@ -134,14 +136,14 @@ async def test_turns_reach_the_agent_verbatim_and_in_order_within_one_session(tm
     assert [turn.messages[0].text for turn in result.iterations] == TURNS
 
 
-@pytest.mark.parametrize("kind", [AgentKind.CLAUDE_CODE, AgentKind.CODEX, AgentKind.DELEGATE])
-async def test_business_text_on_failed_question_keeps_previous_answers_during_retry(tmp_path, monkeypatch, kind):
-    created = _install_agent(monkeypatch, crash_once_on_call=4)
+async def test_business_text_on_failed_question_keeps_previous_answers_during_retry(tmp_path, monkeypatch):
+    created = _install_agent(
+        monkeypatch, crash_once_on_call=4, crash_message="The payment required for invoice 402 is $50."
+    )
     monkeypatch.setattr("coder_eval.errors.executor.get_retry_delay", lambda *_: 0)
     turns = [f"QUESTION_{i}" for i in range(1, 5)]
     task = _task(
         turns=turns,
-        agent=parse_agent_config(type=kind),
         run_limits=RunLimits(max_turn_retries=2),
         sandbox=SandboxConfig(driver="tempdir", python=None, node=None),
     )

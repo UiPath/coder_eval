@@ -3095,6 +3095,61 @@ class TestFailedTurnIsACrash:
         with pytest.raises(AgentCrashError, match="no error message"):
             await agent.communicate("go")
 
+    async def test_business_text_in_failed_turn_keeps_crash_retry(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "Employees have a spending limit of $402 per trip."})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("explain the expense process")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
+
+    async def test_standard_payment_status_without_machine_kind_is_terminal(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "402 Payment Required"})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("go")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_BILLING_ERROR
+        assert not should_retry(category, 0)
+
+    @pytest.mark.parametrize(
+        "info",
+        ["usageLimitExceeded", {"responseStreamDisconnected": {"httpStatusCode": 402}}],
+    )
+    async def test_terminal_provider_denial_survives_reason_truncation(self, info):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "Provider details: " + "x" * 500, "codexErrorInfo": info})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("go")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_BILLING_ERROR
+        assert not should_retry(category, 0)
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.crash_reason is not None
+        assert len(agent.pending_turn.crash_reason) <= 201
+
     async def test_completed_turn_with_a_retried_provider_error_is_not_a_crash(self):
         notes = [
             _error_notification({"message": "Reconnecting... 1/5"}, will_retry=True),

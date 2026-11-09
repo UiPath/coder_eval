@@ -477,6 +477,25 @@ class TestCommunicate:
         assert agent._process is None
 
     @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("Employees have a spending limit of $402 per trip.", ErrorCategory.AGENT_CRASH),
+            ("HTTP 402 Payment Required", ErrorCategory.AGENT_BILLING_ERROR),
+            ("402 Payment Required", ErrorCategory.AGENT_BILLING_ERROR),
+        ],
+    )
+    async def test_host_failure_distinguishes_business_text_from_provider_denial(
+        self, patch_exec, tmp_path, message, expected
+    ):
+        agent, _ = await _started_agent(patch_exec, [_line({"type": "error", "message": message})], tmp_path)
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("explain the process")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is expected
+        assert should_retry(category, 0) is (expected is ErrorCategory.AGENT_CRASH)
+
+    @pytest.mark.parametrize(
         ("host_message", "category"),
         [
             (

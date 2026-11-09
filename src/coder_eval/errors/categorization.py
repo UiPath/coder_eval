@@ -6,7 +6,7 @@ and maps them to appropriate ErrorCategory values for retry logic.
 
 import logging
 import re
-from typing import Any
+from typing import Any, Final
 
 from .agent import AgentConfigError, AgentCrashError
 from .budget import BudgetExceededError
@@ -15,6 +15,64 @@ from .timeout import EvaluationTimeoutError
 
 
 logger = logging.getLogger(__name__)
+
+_BILLING_CODES: Final = frozenset(
+    {"insufficientquota", "billinghardlimitreached", "billingnotactive", "paymentrequired", "usagelimitexceeded"}
+)
+_PROVIDER_BILLING_SIGNATURES: Final = ("insufficient api credit", "billing hard limit")
+_HTTP_STATUS = re.compile(
+    r"\b(?:http(?:/\d(?:\.\d)?)?\s+(?:status(?:\s+code)?\s*[:=]?\s*)?"
+    + r"|(?:http[_ ]?)?status(?:[_ ]?code)?\s*[:=]\s*|error\s+code\s*:\s*)(\d{3})\b"
+)
+_STATUS_REASONS: Final = {
+    "401": "unauthorized",
+    "402": "payment required",
+    "403": "forbidden",
+    "429": "too many requests",
+    "502": "bad gateway",
+    "503": "service unavailable",
+    "504": "gateway timeout",
+}
+
+
+def _provider_code_category(code: object) -> ErrorCategory | None:
+    if isinstance(code, str):
+        normalized = code.lower().replace("_", "")
+        if normalized in _BILLING_CODES:
+            return ErrorCategory.AGENT_BILLING_ERROR
+        if normalized in {"ratelimitexceeded", "ratelimiterror"}:
+            return ErrorCategory.AGENT_RATE_LIMIT
+    return None
+
+
+def _provider_exception_category(error: BaseException) -> ErrorCategory | None:
+    seen: set[int] = set()
+    statuses: list[object] = []
+    while id(error) not in seen:
+        seen.add(id(error))
+        codes = [getattr(error, "code", None)]
+        body = getattr(error, "body", None)
+        if isinstance(body, dict):
+            detail = body.get("error", body)
+            if isinstance(detail, dict):
+                codes.extend([detail.get("code"), detail.get("type")])
+        for code in codes:
+            if (category := _provider_code_category(code)) is not None:
+                return category
+        statuses.append(getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None)))
+        cause = error.__cause__ or error.__context__
+        if cause is None:
+            break
+        error = cause
+    for status, category in (
+        (402, ErrorCategory.AGENT_BILLING_ERROR),
+        (401, ErrorCategory.AGENT_AUTH_ERROR),
+        (403, ErrorCategory.AGENT_AUTH_ERROR),
+        (429, ErrorCategory.AGENT_RATE_LIMIT),
+    ):
+        if status in statuses:
+            return category
+    return None
 
 
 def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCategory | None:
@@ -55,6 +113,9 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
     if isinstance(error, MemoryError):
         return ErrorCategory.OUT_OF_MEMORY
 
+    if (category := _provider_exception_category(error)) is not None:
+        return category
+
     # Check for known SDK exceptions (if available)
     try:
         from anthropic import AuthenticationError, RateLimitError
@@ -70,8 +131,17 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
 
 
 def _mentions_status(error_str: str, *codes: str) -> bool:
-    """True when an HTTP status code appears as a whole word, so a port or a GUID holding its digits does not match."""
-    return any(re.search(rf"\b{code}\b", error_str) for code in codes)
+    """Recognize explicit HTTP/error status envelopes, excluding amounts, invoice IDs and street numbers."""
+    if any(match.group(1) in codes for match in _HTTP_STATUS.finditer(error_str)):
+        return True
+    return any(
+        code in _STATUS_REASONS
+        and re.match(
+            rf"\s*(?:(?:delegate send failed|codex turn failed):\s*)?{code}\s+{_STATUS_REASONS[code]}\b",
+            error_str,
+        )
+        for code in codes
+    )
 
 
 def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | None:
@@ -83,34 +153,40 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
     non-agent components, so e.g. a sandbox pip failure mentioning "connection"
     reaches ``PACKAGE_INSTALL_ERROR`` (retryable) instead of ``UNKNOWN``.
     """
+    # Rationale: .claude/notes/agents.md § Provider denials versus business text
+    codex = re.fullmatch(
+        r"codex turn failed:.*\(codexerrorinfo=(\w+)(?:, httpstatuscode=(\d+))?\)", error_str, re.DOTALL
+    )
+    if codex and (category := _provider_code_category(codex.group(1))) is not None:
+        return category
+    if re.search(
+        r"['\"](?:code|type)['\"]\s*:\s*['\"](?:insufficient_quota|billing_hard_limit_reached|billing_not_active|payment_required)['\"]",
+        error_str,
+    ):
+        return ErrorCategory.AGENT_BILLING_ERROR
+
     # Authentication errors
     if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key"]) or _mentions_status(
         error_str, "401"
     ):
         return ErrorCategory.AGENT_AUTH_ERROR
 
-    # Bare finance words can be task content carried by an AgentCrashError.
-    if any(
-        pat in error_str
-        for pat in [
-            "insufficient credit",
-            "insufficient api credit",
-            "credit balance is too low",
-            "insufficient_quota",
-            "billing_hard_limit",
-            "billing hard limit",
-            "billing_not_active",
-            "payment required",
-            "payment_required",
-            "quota exceeded",
-            "spending limit",
-        ]
-    ) or _mentions_status(error_str, "402"):
+    if (
+        any(pat in error_str for pat in _PROVIDER_BILLING_SIGNATURES)
+        or re.search(r"credit balance is too low to access the (?:anthropic )?api\b", error_str)
+        or _mentions_status(error_str, "402")
+    ):
         return ErrorCategory.AGENT_BILLING_ERROR
 
     # Rate limiting
-    if any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"]) or _mentions_status(
-        error_str, "429"
+    if (
+        any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"])
+        or _mentions_status(error_str, "429")
+        or (
+            "quota exceeded" in error_str
+            and "googleapis.com/" in error_str
+            and any(window in error_str for window in ["per_minute", "per_hour", "per_day"])
+        )
     ):
         return ErrorCategory.AGENT_RATE_LIMIT
 

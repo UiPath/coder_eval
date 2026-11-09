@@ -271,8 +271,9 @@ def _failed_turn_reason(turn: Any) -> str | None:
         return None
     error = getattr(turn, "error", None)
     message = str(getattr(error, "message", "") or "").strip() or "no error message"
-    kind, _ = _codex_error_kind(error)
-    suffix = f" (codexErrorInfo={kind})" if kind else ""
+    kind, http_status = _codex_error_kind(error)
+    status = f", httpStatusCode={http_status}" if http_status is not None else ""
+    suffix = f" (codexErrorInfo={kind}{status})" if kind else ""
     return f"Codex turn failed: {message}{suffix}"
 
 
@@ -1226,7 +1227,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # Codex gave up on the turn (a provider error it would not retry),
                 # so the agent never finished: crash, never score it.
                 # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
-                self._finalize_and_raise_crash(state.finalize, truncate_crash_message(failed_reason))
+                self._finalize_and_raise_crash(state.finalize, failed_reason)
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
