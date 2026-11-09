@@ -15,10 +15,11 @@ export function Sparkline({
     arms: readonly SeriesArm[];
     sparks: Record<string, readonly (number | null)[]>;
 }) {
-    const all = arms.flatMap((a) =>
+    const perArm = arms.map((a) =>
         (sparks[a.id] ?? []).filter((v): v is number => v != null),
     );
-    if (all.length === 0) return <span className="text-gray-400">—</span>;
+    if (perArm.every((vs) => vs.length < 2)) return null;
+    const all = perArm.flat();
     const domain = sparkDomain(all);
     return (
         <svg

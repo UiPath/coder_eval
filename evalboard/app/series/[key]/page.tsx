@@ -197,12 +197,6 @@ export default async function SeriesDetailPage({
                     <h1 className="text-xl font-semibold text-gray-900">
                         {def.label}
                     </h1>
-                    <span className="text-xs text-gray-500">{def.group}</span>
-                    {def.schedule && (
-                        <span className="text-xs text-gray-500">
-                            {def.schedule}
-                        </span>
-                    )}
                     {def.source.id === SCRIBE_SOURCE.id && (
                         <Link
                             href="/scribe"

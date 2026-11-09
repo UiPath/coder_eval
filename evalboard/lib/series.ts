@@ -9,17 +9,6 @@ import {
     type Source,
 } from "./sources";
 
-export type SeriesGroup = "Maestro" | "Automation Suite" | "Autopilot";
-
-export const OTHER_GROUP = "Other";
-
-export const GROUP_ORDER: readonly string[] = [
-    "Maestro",
-    "Automation Suite",
-    "Autopilot",
-    OTHER_GROUP,
-];
-
 export interface SeriesArm {
     id: string;
     label: string;
@@ -37,18 +26,11 @@ export type Membership = "meta" | "canonical";
 export interface SeriesDef {
     key: string;
     label: string;
-    group: SeriesGroup | typeof OTHER_GROUP;
     description: string;
-    schedule: string;
-    // UTC weekdays (0 = Sunday) the pipeline is expected to run; empty when unknown.
-    cadence: readonly number[];
-    paused?: boolean;
     arms: ArmsSpec;
     source: Source;
     membership: Membership;
 }
-
-const WEEKDAYS = [1, 2, 3, 4, 5] as const;
 
 const V1_V2: ArmsSpec = {
     kind: "variants",
@@ -62,11 +44,8 @@ export const SERIES: readonly SeriesDef[] = [
     {
         key: "maestro-v1-v2-codex",
         label: "Maestro v1 vs v2 · codex",
-        group: "Maestro",
         description:
             "Maestro case and BPMN tasks on the same corpus and tenant, run once with two skill sets on the Codex harness. The only difference between the arms is which skills the agent loads.",
-        schedule: "Weekdays 16:00 UTC",
-        cadence: WEEKDAYS,
         arms: V1_V2,
         source: SKILLS_SOURCE,
         membership: "meta",
@@ -74,11 +53,8 @@ export const SERIES: readonly SeriesDef[] = [
     {
         key: "maestro-v1-v2-delegate",
         label: "Maestro v1 vs v2 · delegate",
-        group: "Maestro",
         description:
             "Maestro case and BPMN tasks on the same corpus and tenant, run once with two skill sets on the Delegate harness. The only difference between the arms is which skills the agent loads.",
-        schedule: "Mondays 19:00 UTC",
-        cadence: [1],
         arms: V1_V2,
         source: SKILLS_SOURCE,
         membership: "meta",
@@ -86,11 +62,8 @@ export const SERIES: readonly SeriesDef[] = [
     {
         key: "n8n-vs-flow",
         label: "n8n vs Flow",
-        group: "Maestro",
         description:
             "The same workflow-building scenarios built on n8n and on Flow, run as one experiment with two arms.",
-        schedule: "Tuesdays 16:05 UTC",
-        cadence: [2],
         arms: {
             kind: "variants",
             arms: [
@@ -104,11 +77,8 @@ export const SERIES: readonly SeriesDef[] = [
     {
         key: "ete-weekly",
         label: "ETE weekly",
-        group: "Automation Suite",
         description:
-            "End-to-end evaluation of the skills against Automation Suite, run on a fixed weekly cadence.",
-        schedule: "Mon + Thu 05:00, Sat 03:00 UTC",
-        cadence: [1, 4, 6],
+            "End-to-end evaluation of the skills against Automation Suite.",
         arms: { kind: "single" },
         source: SKILLS_SOURCE,
         membership: "meta",
@@ -116,11 +86,8 @@ export const SERIES: readonly SeriesDef[] = [
     {
         key: "scribe",
         label: "Scribe",
-        group: "Autopilot",
         description:
-            "The Autopilot suite, uploaded to its own container with one run per weekday.",
-        schedule: "Weekdays 03:00 UTC",
-        cadence: WEEKDAYS,
+            "The Autopilot suite's canonical runs, read from its own container.",
         arms: { kind: "single" },
         source: SCRIBE_SOURCE,
         membership: "canonical",
@@ -141,10 +108,7 @@ export function unknownSeries(key: string): SeriesDef {
     return {
         key,
         label: key,
-        group: OTHER_GROUP,
         description: "",
-        schedule: "",
-        cadence: [],
         arms: { kind: "auto" },
         source: SKILLS_SOURCE,
         membership: "meta",
@@ -155,23 +119,15 @@ export function seriesByKey(key: string): SeriesDef {
     return knownSeries(key) ?? unknownSeries(key);
 }
 
-export interface SeriesGroupRows {
-    group: string;
-    series: SeriesDef[];
-}
-
-export function groupSeries(extraKeys: readonly string[] = []): SeriesGroupRows[] {
-    const defs = [
+// The table in its own order, then keys found only in data, sorted.
+export function listSeries(extraKeys: readonly string[] = []): SeriesDef[] {
+    return [
         ...SERIES,
         ...[...new Set(extraKeys)]
             .filter((k) => !knownSeries(k))
             .sort()
             .map(unknownSeries),
     ];
-    return GROUP_ORDER.map((group) => ({
-        group,
-        series: defs.filter((d) => d.group === group),
-    })).filter((g) => g.series.length > 0);
 }
 
 // ---------- membership ----------
@@ -232,75 +188,6 @@ export function splitReason(reason: string): ReasonPart[] {
     return parts;
 }
 
-export function reasonRunIds(reason: string): string[] {
-    return splitReason(reason).flatMap((p) => ("runId" in p ? [p.runId] : []));
-}
-
-// ---------- health ----------
-
-export const HEALTH_SLOTS = 5;
-
-const DAY_MS = 86_400_000;
-
-function utcDay(ms: number): number {
-    return Math.floor(ms / DAY_MS);
-}
-
-export type SeriesHealth =
-    | { status: "on-time"; expected: number }
-    | { status: "missed"; missed: number; expected: number }
-    | { status: "paused" }
-    | { status: "no-runs" }
-    | { status: "unscheduled" };
-
-// A slot is a UTC day in the cadence and is due once the day is over. It is
-// covered by a non-excluded run that day, or by an excluded run whose reason
-// names a live run of the series. Slots before the first run are not expected.
-export function seriesHealth(
-    def: Pick<SeriesDef, "cadence" | "paused">,
-    runs: readonly Pick<SeriesRunRef, "id" | "startMs" | "excluded">[],
-    nowMs: number,
-    slots: number = HEALTH_SLOTS,
-): SeriesHealth {
-    if (def.paused) return { status: "paused" };
-    if (def.cadence.length === 0) return { status: "unscheduled" };
-    if (runs.length === 0) return { status: "no-runs" };
-
-    const live = new Set(runs.filter((r) => !r.excluded).map((r) => r.id));
-    const covered = new Set<number>();
-    for (const r of runs) {
-        const replacedByLive =
-            r.excluded != null &&
-            reasonRunIds(r.excluded).some((id) => live.has(id));
-        if (!r.excluded || replacedByLive) covered.add(utcDay(r.startMs));
-    }
-
-    const first = Math.min(...runs.map((r) => utcDay(r.startMs)));
-    const due: number[] = [];
-    for (let d = utcDay(nowMs) - 1; d >= first && due.length < slots; d--) {
-        if (def.cadence.includes(new Date(d * DAY_MS).getUTCDay())) due.push(d);
-    }
-    const missed = due.filter((d) => !covered.has(d)).length;
-    return missed > 0
-        ? { status: "missed", missed, expected: due.length }
-        : { status: "on-time", expected: due.length };
-}
-
-export function healthLabel(h: SeriesHealth): string {
-    switch (h.status) {
-        case "on-time":
-            return "on time";
-        case "missed":
-            return `missed ${h.missed} of last ${h.expected}`;
-        case "paused":
-            return "paused";
-        case "no-runs":
-            return "no runs";
-        case "unscheduled":
-            return "no schedule";
-    }
-}
-
 // ---------- arms and values ----------
 
 export const SINGLE_ARM: SeriesArm = { id: "all", label: "Pass rate" };
@@ -350,11 +237,6 @@ export function armGap(
     const a = values[arms[0].id];
     const b = values[arms[1].id];
     return a == null || b == null ? null : b - a;
-}
-
-export function formatGap(gap: number, arm: SeriesArm): string {
-    const n = Math.round(gap);
-    return `${arm.label} ${n > 0 ? "+" : n < 0 ? "-" : "±"}${Math.abs(n)}`;
 }
 
 // ---------- charts ----------

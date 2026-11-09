@@ -12,7 +12,6 @@ vi.mock("../[key]/run-cost", () => ({
 }));
 
 const { ReasonText } = await import("../_components/reason-text");
-const { HealthPill } = await import("../_components/health-pill");
 const { Sparkline } = await import("../_components/sparkline");
 const { LatestCell } = await import("../_components/series-row");
 const { TrendChart } = await import("../[key]/trend-chart");
@@ -27,11 +26,8 @@ function indexRow(over: Partial<SeriesIndexRow>): SeriesIndexRow {
     return {
         def: seriesByKey("maestro-v1-v2-codex"),
         arms: V1V2,
-        runCount: 3,
         lastRun: null,
-        health: { status: "on-time", expected: 5 },
         latest: { v1: 81.2, v2: 84.4 },
-        gap: 3.2,
         sparks: {},
         ...over,
     };
@@ -65,28 +61,12 @@ describe("ReasonText", () => {
     });
 });
 
-describe("HealthPill", () => {
-    test("says on time, or how many of the last slots were missed", () => {
-        const { rerender } = render(
-            <HealthPill health={{ status: "on-time", expected: 5 }} />,
-        );
-        expect(screen.getByText("on time")).toBeInTheDocument();
-        rerender(<HealthPill health={{ status: "missed", missed: 1, expected: 5 }} />);
-        expect(screen.getByText("missed 1 of last 5")).toBeInTheDocument();
-    });
-});
-
 describe("LatestCell", () => {
-    test("shows each arm's rate and the gap for two arms", () => {
-        render(<LatestCell row={indexRow({})} />);
-        expect(screen.getByText(/81%/)).toBeInTheDocument();
-        expect(screen.getByText(/84%/)).toBeInTheDocument();
-        expect(screen.getByText("(v2 +3)")).toBeInTheDocument();
-    });
-
-    test("a negative gap is signed", () => {
-        render(<LatestCell row={indexRow({ gap: -2.8 })} />);
-        expect(screen.getByText("(v2 -3)")).toBeInTheDocument();
+    test("shows each arm's rate, with no gap", () => {
+        const { container } = render(<LatestCell row={indexRow({})} />);
+        expect(container).toHaveTextContent("v1 81%");
+        expect(container).toHaveTextContent("v2 84%");
+        expect(container).not.toHaveTextContent("(");
     });
 
     test("a single arm shows the one rate", () => {
@@ -95,7 +75,6 @@ describe("LatestCell", () => {
                 row={indexRow({
                     arms: [SINGLE_ARM],
                     latest: { all: 74 },
-                    gap: null,
                 })}
             />,
         );
@@ -105,7 +84,7 @@ describe("LatestCell", () => {
 
     test("an arm with no value reads as a dash", () => {
         const { container } = render(
-            <LatestCell row={indexRow({ latest: { v1: 80, v2: null }, gap: null })} />,
+            <LatestCell row={indexRow({ latest: { v1: 80, v2: null } })} />,
         );
         expect(container).toHaveTextContent("v2 —");
     });
@@ -124,12 +103,11 @@ describe("Sparkline", () => {
         expect(container.querySelectorAll("circle")).toHaveLength(2);
     });
 
-    test("renders a dash when there is nothing to draw", () => {
+    test("renders nothing when no arm has two points to join", () => {
         const { container } = render(
-            <Sparkline arms={V1V2} sparks={{ v1: [], v2: [null] }} />,
+            <Sparkline arms={V1V2} sparks={{ v1: [81], v2: [null, 78] }} />,
         );
-        expect(container.querySelector("svg")).toBeNull();
-        expect(container).toHaveTextContent("—");
+        expect(container).toBeEmptyDOMElement();
     });
 });
 

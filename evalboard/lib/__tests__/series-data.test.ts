@@ -167,33 +167,30 @@ describe("loadSeriesMembers", () => {
         expect(members.every((m) => !m.id.startsWith("adhoc-2026-11-09_16"))).toBe(true);
     });
 
-    test("an unlisted key found in meta.json is reported", async () => {
+    test("the listing splits series with runs from those without, unlisted keys last", async () => {
         const { data } = await load();
-        expect(await data.loadUnlistedSeriesKeys()).toEqual(["brand-new"]);
+        const { active, empty } = await data.loadSeriesListing();
+        expect(active.map((s) => s.key)).toEqual([
+            "maestro-v1-v2-codex",
+            "n8n-vs-flow",
+            "ete-weekly",
+            "scribe",
+            "brand-new",
+        ]);
+        expect(empty.map((s) => s.key)).toEqual(["maestro-v1-v2-delegate"]);
     });
 });
 
 describe("loadSeriesIndexRow", () => {
-    test("a two-arm row reads experiment.json: latest, gap and sparks skip the excluded run", async () => {
+    test("a two-arm row reads experiment.json: latest and sparks skip the excluded run", async () => {
         const { data, series } = await load();
         const row = await data.loadSeriesIndexRow(series.seriesByKey("maestro-v1-v2-codex"));
         expect(row.arms.map((a) => a.id)).toEqual(["v1", "v2"]);
         expect(row.latest.v1).toBeCloseTo(83.64, 1);
         expect(row.latest.v2).toBeCloseTo(80.84, 1);
-        expect(row.gap).toBeCloseTo(-2.8, 1);
         expect(row.sparks.v1).toEqual([80, expect.closeTo(83.64, 1)]);
         expect(row.sparks.v2).toEqual([82, expect.closeTo(80.84, 1)]);
-        expect(row.runCount).toBe(3);
         expect(row.lastRun?.id).toBe("adhoc-2026-11-09_16-18-40");
-    });
-
-    test("the health pill counts the excluded run's slot as missed", async () => {
-        const { data, series } = await load();
-        const row = await data.loadSeriesIndexRow(
-            series.seriesByKey("maestro-v1-v2-codex"),
-            NOW.getTime(),
-        );
-        expect(row.health).toEqual({ status: "missed", missed: 1, expected: 3 });
     });
 
     test("a two-arm row never reads run.json", async () => {
@@ -211,13 +208,12 @@ describe("loadSeriesIndexRow", () => {
         const row = await data.loadSeriesIndexRow(series.seriesByKey("ete-weekly"));
         expect(row.arms).toEqual([series.SINGLE_ARM]);
         expect(row.latest.all).toBeCloseTo((2 / 4) * 100, 5);
-        expect(row.gap).toBeNull();
         expect(row.sparks.all).toEqual([50]);
     });
 
     test("Scribe reads the aria container and skips excluded and adhoc runs", async () => {
         const { data, series } = await load();
-        const row = await data.loadSeriesIndexRow(series.seriesByKey("scribe"), NOW.getTime());
+        const row = await data.loadSeriesIndexRow(series.seriesByKey("scribe"));
         expect(row.latest.all).toBeCloseTo((2 / 3) * 100, 5);
         expect(row.sparks.all).toEqual([50, expect.closeTo((2 / 3) * 100, 5)]);
         expect(row.lastRun?.id).toBe("2026-11-09_03-00-00");
@@ -227,8 +223,6 @@ describe("loadSeriesIndexRow", () => {
         const { data, series } = await load();
         const row = await data.loadSeriesIndexRow(series.seriesByKey("maestro-v1-v2-delegate"));
         expect(row.lastRun).toBeNull();
-        expect(row.runCount).toBe(0);
-        expect(row.health).toEqual({ status: "no-runs" });
         expect(row.arms.map((a) => a.id)).toEqual(["v1", "v2"]);
         expect(row.latest).toEqual({ v1: null, v2: null });
     });

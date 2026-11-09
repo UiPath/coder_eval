@@ -23,17 +23,15 @@ import { DEFAULT_SOURCE, type Source } from "./sources";
 import { isGraded, isPassStatus, statusCategory } from "./status";
 import {
     SINGLE_ARM,
+    listSeries,
     membersOf,
     plotted,
     resolveArms,
-    seriesHealth,
     unlistedSeriesKeys,
     latestValues,
-    armGap,
     type ArmValues,
     type SeriesArm,
     type SeriesDef,
-    type SeriesHealth,
     type SeriesPoint,
     type SeriesRunRef,
 } from "./series";
@@ -101,8 +99,20 @@ export async function loadSeriesMembers(def: SeriesDef): Promise<SeriesRunRef[]>
     return membersOf(def, await loadRunRefs(def.source));
 }
 
-export async function loadUnlistedSeriesKeys(): Promise<string[]> {
-    return unlistedSeriesKeys(await loadRunRefs(DEFAULT_SOURCE));
+export interface SeriesListing {
+    active: SeriesDef[];
+    empty: SeriesDef[];
+}
+
+export async function loadSeriesListing(): Promise<SeriesListing> {
+    const defs = listSeries(unlistedSeriesKeys(await loadRunRefs(DEFAULT_SOURCE)));
+    const counts = await Promise.all(
+        defs.map(async (d) => (await loadSeriesMembers(d)).length),
+    );
+    return {
+        active: defs.filter((_, i) => counts[i] > 0),
+        empty: defs.filter((_, i) => counts[i] === 0),
+    };
 }
 
 // ---------- per-run numbers ----------
@@ -276,18 +286,12 @@ async function collectPoints(
 export interface SeriesIndexRow {
     def: SeriesDef;
     arms: SeriesArm[];
-    runCount: number;
     lastRun: SeriesRunRef | null;
-    health: SeriesHealth;
     latest: ArmValues;
-    gap: number | null;
     sparks: Record<string, (number | null)[]>;
 }
 
-export async function loadSeriesIndexRow(
-    def: SeriesDef,
-    nowMs: number = Date.now(),
-): Promise<SeriesIndexRow> {
+export async function loadSeriesIndexRow(def: SeriesDef): Promise<SeriesIndexRow> {
     const members = await loadSeriesMembers(def);
     const live = plotted(members);
     const loaded = await collectPoints(def, live, SPARK_RUNS);
@@ -296,16 +300,12 @@ export async function loadSeriesIndexRow(
         def.arms,
         points.flatMap((p) => Object.keys(p.values)),
     );
-    const latest = latestValues(points, arms);
     const oldestFirst = [...points].reverse();
     return {
         def,
         arms,
-        runCount: members.length,
         lastRun: live[0] ?? null,
-        health: seriesHealth(def, members, nowMs),
-        latest,
-        gap: armGap(latest, arms),
+        latest: latestValues(points, arms),
         sparks: Object.fromEntries(
             arms.map((a) => [a.id, oldestFirst.map((p) => p.values[a.id] ?? null)]),
         ),

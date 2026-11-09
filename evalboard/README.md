@@ -43,8 +43,8 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
   and skills scored on failures, regressions and turn-budget pressure
   (`lib/watchlist.ts`).
 - `/series` — scheduled runs outside the skills nightly, one trend per series
-  (`lib/series.ts`): a row per series with its schedule, a last-run health pill, the
-  latest pass rate per arm and a sparkline. `/series/<key>` has the trend (pass
+  (`lib/series.ts`): a row per series with its last run, the latest pass rate per
+  arm and a sparkline; series with no runs are listed under the table. `/series/<key>` has the trend (pass
   rate per arm; cost per task, error share and wall-clock at run level), the gap
   between arms for a two-arm series, and the run list.
 - `/scribe` — the Autopilot (aria/Composer) suite, run by `coder_eval_uipath`'s
@@ -166,8 +166,9 @@ Two invariants worth preserving if you add a source:
 ## Series
 
 A series is a recurring pipeline whose runs are points on one trend. The table in
-`lib/series.ts` (like `lib/sources.ts`) lists each one with its label, group,
-schedule, arms and source. Two optional fields in a run's `meta.json` drive it, and
+`lib/series.ts` (like `lib/sources.ts`) lists each one with its label, arms and
+source. It holds no schedule: the crons live in `coder_eval_uipath`'s pipelines, and
+a copy here would drift. Two optional fields in a run's `meta.json` drive it, and
 every run without them behaves as before:
 
 - `series` — the series key. The run is a point on that series' trend. The run
@@ -176,7 +177,7 @@ every run without them behaves as before:
   with the reason (a run id inside it links to that run), and is left off every
   trend and out of "latest".
 
-A key found only in `meta.json` gets a page labelled by the key under "Other".
+A key found only in `meta.json` gets a page labelled by the key.
 `scribe` has no `series` field: every date-shaped, non-adhoc run in its container
 belongs to it.
 
@@ -184,13 +185,11 @@ belongs to it.
   minutes. `meta.json` is edited after upload (`excluded`, a backfilled `series`),
   so the series index refetches a copy older than a minute for a run started in the
   last two days and older than an hour for any other.
-- Per-arm numbers of a variant series come from `experiment.json`, never `run.json`.
-  Cost per task, error share and wall-clock come from the run overview and are
-  loaded only on the detail page.
+- Per-arm numbers of a variant series come from `experiment.json`, not `run.json`.
+  Cost, cost per task, error share and wall-clock come from the run overview and
+  are loaded only on the detail page, at most 8 runs at a time.
 - Each row of the index renders in its own `Suspense` boundary, so one slow series
   does not hold up the page.
-- The health pill counts the last five expected runs (UTC days in the series'
-  `cadence`, once the day is over) that have no non-excluded run. It only warns.
 - The front page's Ad-hoc list drops runs that have a `series`.
 
 ## Conventions

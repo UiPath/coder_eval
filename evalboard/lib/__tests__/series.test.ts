@@ -1,23 +1,18 @@
 import { describe, expect, test } from "vitest";
 import {
-    GROUP_ORDER,
     SERIES,
     SINGLE_ARM,
     armGap,
-    formatGap,
     gapRows,
-    groupSeries,
-    healthLabel,
     isSeriesKey,
     isSeriesMember,
     latestValues,
+    listSeries,
     membersOf,
     parseMetric,
     plotted,
-    reasonRunIds,
     resolveArms,
     seriesByKey,
-    seriesHealth,
     sparkDomain,
     sparkLine,
     splitReason,
@@ -50,7 +45,7 @@ function onDay(day: number, over: Partial<SeriesRunRef> = {}): SeriesRunRef {
 }
 
 describe("series table", () => {
-    test("lists the five series with unique keys, in a known group", () => {
+    test("lists the five series with unique keys", () => {
         expect(SERIES.map((s) => s.key)).toEqual([
             "maestro-v1-v2-codex",
             "maestro-v1-v2-delegate",
@@ -59,15 +54,9 @@ describe("series table", () => {
             "scribe",
         ]);
         expect(new Set(SERIES.map((s) => s.key)).size).toBe(SERIES.length);
-        for (const s of SERIES) expect(GROUP_ORDER).toContain(s.group);
     });
 
-    test("cadence, arms and source match each pipeline", () => {
-        expect(seriesByKey("maestro-v1-v2-codex").cadence).toEqual([1, 2, 3, 4, 5]);
-        expect(seriesByKey("maestro-v1-v2-delegate").cadence).toEqual([1]);
-        expect(seriesByKey("n8n-vs-flow").cadence).toEqual([2]);
-        expect(seriesByKey("ete-weekly").cadence).toEqual([1, 4, 6]);
-        expect(seriesByKey("scribe").cadence).toEqual([1, 2, 3, 4, 5]);
+    test("arms and source match each pipeline", () => {
         expect(seriesByKey("ete-weekly").arms).toEqual({ kind: "single" });
         expect(seriesByKey("scribe").source).toBe(SCRIBE_SOURCE);
         expect(seriesByKey("scribe").membership).toBe("canonical");
@@ -85,17 +74,13 @@ describe("series table", () => {
         ]);
     });
 
-    test("every entry has a one-sentence description and a schedule", () => {
-        for (const s of SERIES) {
-            expect(s.description.endsWith(".")).toBe(true);
-            expect(s.schedule).not.toBe("");
-        }
+    test("every entry has a one-sentence description", () => {
+        for (const s of SERIES) expect(s.description.endsWith(".")).toBe(true);
     });
 
-    test("an unknown key gets a page labelled by the key, under Other", () => {
+    test("an unknown key gets a page labelled by the key", () => {
         const def = seriesByKey("some-new-series");
         expect(def.label).toBe("some-new-series");
-        expect(def.group).toBe("Other");
         expect(def.membership).toBe("meta");
         expect(def.source).toBe(SKILLS_SOURCE);
         expect(def.arms).toEqual({ kind: "auto" });
@@ -112,26 +97,14 @@ describe("series table", () => {
     });
 });
 
-describe("groupSeries", () => {
-    test("groups the table in display order and drops empty groups", () => {
-        expect(groupSeries().map((g) => g.group)).toEqual([
-            "Maestro",
-            "Automation Suite",
-            "Autopilot",
+describe("listSeries", () => {
+    test("keeps the table order, then adds keys found only in data, sorted and deduplicated", () => {
+        expect(listSeries(["zeta", "alpha", "zeta", "scribe"]).map((s) => s.key)).toEqual([
+            ...SERIES.map((s) => s.key),
+            "alpha",
+            "zeta",
         ]);
-        expect(groupSeries()[0].series.map((s) => s.key)).toEqual([
-            "maestro-v1-v2-codex",
-            "maestro-v1-v2-delegate",
-            "n8n-vs-flow",
-        ]);
-    });
-
-    test("keys found only in data land under Other, sorted and deduplicated", () => {
-        const groups = groupSeries(["zeta", "alpha", "zeta", "scribe"]);
-        const other = groups[groups.length - 1];
-        expect(other.group).toBe("Other");
-        expect(other.series.map((s) => s.key)).toEqual(["alpha", "zeta"]);
-        expect(groups.flatMap((g) => g.series).filter((s) => s.key === "scribe")).toHaveLength(1);
+        expect(listSeries()).toEqual([...SERIES]);
     });
 });
 
@@ -211,116 +184,9 @@ describe("excluded reasons", () => {
     });
 
     test("a bare date is not a run id", () => {
-        expect(reasonRunIds("outage on 2026-11-09")).toEqual([]);
-    });
-
-    test("reasonRunIds lists every id", () => {
-        expect(
-            reasonRunIds("replaced by adhoc-2026-11-10_08-12-03 and adhoc-2026-11-10_09-00-00"),
-        ).toEqual(["adhoc-2026-11-10_08-12-03", "adhoc-2026-11-10_09-00-00"]);
-    });
-});
-
-describe("seriesHealth", () => {
-    const weekdays = { cadence: [1, 2, 3, 4, 5] as const };
-    // Tue 2026-11-10 09:00 UTC: the last five due weekdays are Nov 3 to Nov 9.
-    const now = Date.UTC(2026, 10, 10, 9);
-
-    function runs(days: number[]) {
-        return days.map((d) => onDay(d));
-    }
-
-    test("on time when every due slot has a run", () => {
-        const h = seriesHealth(weekdays, runs([2, 3, 4, 5, 6, 9, 10]), now);
-        expect(h).toEqual({ status: "on-time", expected: 5 });
-        expect(healthLabel(h)).toBe("on time");
-    });
-
-    test("counts the due slots with no run, out of the last five", () => {
-        const h = seriesHealth(weekdays, runs([2, 3, 4, 6, 9]), now);
-        expect(h).toEqual({ status: "missed", missed: 1, expected: 5 });
-        expect(healthLabel(h)).toBe("missed 1 of last 5");
-    });
-
-    test("today's slot is not due until the day is over", () => {
-        const h = seriesHealth(weekdays, runs([2, 3, 4, 5, 6, 9]), now);
-        expect(h.status).toBe("on-time");
-    });
-
-    test("an excluded run does not cover its slot", () => {
-        const all = runs([3, 4, 5, 6, 9]);
-        all[1] = onDay(4, { excluded: "infra: auth expired" });
-        expect(seriesHealth(weekdays, all, now)).toEqual({
-            status: "missed",
-            missed: 1,
-            expected: 5,
-        });
-    });
-
-    test("an excluded run covers its slot when the run that replaced it is live", () => {
-        const replacement = onDay(10, { id: "adhoc-2026-11-10_08-12-03" });
-        const all = [
-            onDay(3),
-            onDay(4, { excluded: `replaced by ${replacement.id}` }),
-            onDay(5),
-            onDay(6),
-            onDay(9),
-            replacement,
-        ];
-        expect(seriesHealth(weekdays, all, now).status).toBe("on-time");
-    });
-
-    test("a replacement that is itself excluded does not cover the slot", () => {
-        const replacement = onDay(10, {
-            id: "adhoc-2026-11-10_08-12-03",
-            excluded: "infra",
-        });
-        const all = [
-            onDay(3),
-            onDay(4, { excluded: `replaced by ${replacement.id}` }),
-            onDay(5),
-            onDay(6),
-            onDay(9),
-            replacement,
-        ];
-        expect(seriesHealth(weekdays, all, now)).toMatchObject({
-            status: "missed",
-            missed: 1,
-        });
-    });
-
-    test("slots before the series' first run are not expected", () => {
-        const h = seriesHealth(weekdays, runs([6, 9]), now);
-        expect(h).toEqual({ status: "on-time", expected: 2 });
-    });
-
-    test("a weekly series looks back over its own slots", () => {
-        const mondays = { cadence: [1] as const };
-        const weeks = [
-            Date.UTC(2026, 9, 12, 19),
-            Date.UTC(2026, 9, 26, 19),
-            Date.UTC(2026, 10, 2, 19),
-        ].map((startMs, i) => onDay(1, { id: `adhoc-w${i}`, startMs }));
-        const h = seriesHealth(mondays, weeks, Date.UTC(2026, 10, 10, 9));
-        expect(h).toEqual({ status: "missed", missed: 2, expected: 5 });
-    });
-
-    test("paused, no runs and no schedule never read as missed", () => {
-        expect(seriesHealth({ ...weekdays, paused: true }, [], now)).toEqual({
-            status: "paused",
-        });
-        expect(seriesHealth(weekdays, [], now)).toEqual({ status: "no-runs" });
-        expect(seriesHealth({ cadence: [] }, runs([9]), now)).toEqual({
-            status: "unscheduled",
-        });
-        expect(healthLabel({ status: "paused" })).toBe("paused");
-        expect(healthLabel({ status: "no-runs" })).toBe("no runs");
-        expect(healthLabel({ status: "unscheduled" })).toBe("no schedule");
-    });
-
-    test("the window is capped at the requested number of slots", () => {
-        const h = seriesHealth(weekdays, [onDay(2)], Date.UTC(2026, 10, 30), 3);
-        expect(h).toEqual({ status: "missed", missed: 3, expected: 3 });
+        expect(splitReason("outage on 2026-11-09")).toEqual([
+            { text: "outage on 2026-11-09" },
+        ]);
     });
 });
 
@@ -381,12 +247,6 @@ describe("arms and values", () => {
         expect(armGap({ v1: 81, v2: null }, arms)).toBeNull();
         expect(armGap({ all: 70 }, [SINGLE_ARM])).toBeNull();
         expect(armGap({ a: 1, b: 2, c: 3 }, [...arms, { id: "c", label: "c" }])).toBeNull();
-    });
-
-    test("formatGap signs the rounded gap and names the second arm", () => {
-        expect(formatGap(2.6, arms[1])).toBe("v2 +3");
-        expect(formatGap(-2.6, arms[1])).toBe("v2 -3");
-        expect(formatGap(0.2, arms[1])).toBe("v2 ±0");
     });
 
     test("trendRows is oldest first, keyed by position, and skips empty points", () => {
