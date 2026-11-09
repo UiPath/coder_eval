@@ -502,6 +502,18 @@ export default async function Page({
                             list, and trends above
                         </span>
                     </div>
+                    {isInternal && (
+                        <p className="text-xs text-gray-500">
+                            Scheduled runs are on the{" "}
+                            <Link
+                                href="/series"
+                                className="text-studio-blue hover:underline"
+                            >
+                                Series
+                            </Link>{" "}
+                            tab.
+                        </p>
+                    )}
                     <TableScroll
                         footer={
                             adhocExpandable || adhocExpanded ? (

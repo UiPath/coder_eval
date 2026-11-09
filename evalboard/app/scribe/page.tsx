@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
     avgRunSuccessRate,
     getAdhocRunListing,
@@ -76,7 +77,13 @@ export default async function ScribePage({
                     <span className="font-mono text-gray-700">
                         {SCRIBE_SOURCE.container}
                     </span>{" "}
-                    container.
+                    container.{" "}
+                    <Link
+                        href="/series/scribe"
+                        className="text-studio-blue hover:underline"
+                    >
+                        Trends by metric
+                    </Link>
                 </p>
             </div>
 
