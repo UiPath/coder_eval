@@ -14,6 +14,7 @@ const NAV: readonly { href: string; label: string }[] = [
     { href: "/path-to-ga", label: "Path to GA" },
     { href: "/watchlist", label: "Watchlist" },
     { href: "/trends", label: "Trends" },
+    { href: "/series", label: "Series" },
     // The Autopilot/aria suite, read from its own blob container — see lib/sources.ts.
     { href: "/scribe", label: "Scribe" },
 ];
