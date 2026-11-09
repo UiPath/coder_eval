@@ -2,32 +2,33 @@ import Link from "next/link";
 import { fmtDuration, fmtRunTime, fmtUsd } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type RunListingRow } from "@/lib/overview";
-import { SCRIBE_SOURCE } from "@/lib/sources";
-import { withSource } from "../_lib/source-param";
-import { TableScroll } from "../_components/scroll-table";
+import { withSource } from "@/app/_lib/source-param";
+import { TableScroll } from "@/app/_components/scroll-table";
 
 // Ad-hoc rows carry a title from meta.json; canonical ones don't. One table
 // renders both — the columns are identical and only the run label differs.
-type ScribeRow = RunListingRow & { title?: string | null };
+type SourceRow = RunListingRow & { title?: string | null };
 
-function passPct(row: ScribeRow): number | null {
+function passPct(row: SourceRow): number | null {
     // tasksGraded, not tasksRun: an ungraded row (`coder-eval execute`) was
     // never scored, so it leaves both sides of the rate.
     if (row.tasksGraded === 0) return null;
     return (row.tasksSucceeded / row.tasksGraded) * 100;
 }
 
-export function ScribeRunTable({
+export function SourceRunTable({
     rows,
     totalCandidates,
     showMoreHref,
+    sourceId,
     heading = "Runs",
     note,
     emptyText = "No runs to show.",
 }: {
-    rows: ScribeRow[];
+    rows: SourceRow[];
     totalCandidates: number;
     showMoreHref: string | null;
+    sourceId: string;
     heading?: string;
     note?: string;
     emptyText?: string;
@@ -107,7 +108,7 @@ export function ScribeRunTable({
                                         <Link
                                             href={withSource(
                                                 `/runs/${row.id}`,
-                                                SCRIBE_SOURCE.id,
+                                                sourceId,
                                             )}
                                             className="font-mono text-studio-blue hover:underline"
                                         >
