@@ -284,10 +284,12 @@ export interface PerRun {
     reviewTagCounts: Record<string, number>;
     // taskId -> deduped list of review tags (for task-level filter matching).
     reviewTagsByTask: Record<string, string[]>;
-    // From the optional meta.json sidecar. Both optional so callers/tests that
-    // build a PerRun without metadata stay valid; absent === non-ad-hoc.
+    // From the optional meta.json sidecar. All optional so callers/tests that
+    // build a PerRun without metadata stay valid; absent === non-ad-hoc, no series.
     adhoc?: boolean;
     title?: string | null;
+    series?: string | null;
+    excluded?: string | null;
 }
 
 async function loadPerRunForId(
@@ -348,6 +350,8 @@ async function loadPerRunForId(
         reviewTagsByTask,
         adhoc: meta?.adhoc === true,
         title: meta?.title ?? null,
+        series: meta?.series ?? null,
+        excluded: meta?.excluded ?? null,
     };
 }
 
@@ -391,7 +395,7 @@ export function adhocRunDate(id: string): Date | null {
 // Per-run rather than per-source because `unstable_cache` fixes revalidate and
 // tags at construction: one shared loader can hold neither a per-run TTL nor a
 // per-run tag for the refresh button to evict.
-type PerRunLoader = (id: string) => Promise<PerRun>;
+export type PerRunLoader = (id: string) => Promise<PerRun>;
 
 // Keyed `<source>:<run>`; grows with history, not with traffic.
 const perRunLoaders = new Map<string, () => Promise<PerRun>>();
@@ -415,7 +419,7 @@ export function runCacheTag(sourceId: string, runId: string): string {
 // date at all is treated as fresh: those are hand-uploaded and re-uploaded far
 // more often than pipeline runs. Evaluated once per run per process, so a run
 // that settles while the process is up keeps the short TTL until restart.
-function perRunRevalidate(id: string): number {
+export function perRunRevalidate(id: string): number {
     const started = parseRunIdDate(id) ?? adhocRunDate(id);
     if (started == null) return FRESH_REVALIDATE_SECONDS;
     return Date.now() - started.getTime() > SETTLED_AFTER_MS
@@ -423,7 +427,7 @@ function perRunRevalidate(id: string): number {
         : FRESH_REVALIDATE_SECONDS;
 }
 
-function cachedLoadPerRunFor(source: Source): PerRunLoader {
+export function cachedLoadPerRunFor(source: Source): PerRunLoader {
     return (id: string) => {
         const cacheKey = `${source.id}:${id}`;
         let loader = perRunLoaders.get(cacheKey);
@@ -1269,15 +1273,16 @@ export interface AdhocListing {
 // plain descending string compare orders them; runs missing a start_time sort
 // last (empty key), then by id descending for a deterministic tie-break. Runs
 // without a readable overview (aborted uploads that left only default/) are
-// dropped. `total` is the pre-limit count, so the UI can offer "Show all".
+// dropped, and so are runs that carry a `series` (they live on the Series tab).
+// `total` is the pre-limit count, so the UI can offer "Show all".
 // Exported for testing.
 export function buildAdhocRows(
     perRun: PerRun[],
     limit: number | null,
 ): AdhocListing {
     const rows: AdhocRunRow[] = [];
-    for (const { id, overview, title } of perRun) {
-        if (!overview) continue;
+    for (const { id, overview, title, series } of perRun) {
+        if (!overview || series) continue;
         rows.push({
             id,
             title: title ?? null,
@@ -1311,13 +1316,15 @@ const ADHOC_LOAD_SLACK = 10;
 // The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc" here
 // means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which is
 // exactly the set listRunIdsInWindow excludes from the chart and main table,
-// plus date-named runs from the last 30 days that meta.json flags adhoc.
+// plus date-named runs from the last 30 days that meta.json flags adhoc. Runs on
+// a series are dropped by buildAdhocRows.
 //
 // Only the newest `limit + ADHOC_LOAD_SLACK` candidates are loaded, ordered by
 // the date in the id; loading all 165 to show ten rows cost ~294 MB per cold
 // render. run.json's `start_time` stays the authoritative sort, so the id only
 // decides what to READ. Ids with no date are always loaded, so they can never be
-// ordered out by a key they don't have.
+// ordered out by a key they don't have. Further batches load while the listing
+// is short of `limit`, which happens when series runs crowd the newest ids.
 export async function getAdhocRunListing(
     limit: number | null,
     source: Source = DEFAULT_SOURCE,
@@ -1333,19 +1340,36 @@ export async function getAdhocRunListing(
         else dated.push({ id, at: at.getTime() });
     }
     dated.sort((a, b) => b.at - a.at);
+    const load = cachedLoadPerRunFor(source);
     // null limit = "load everything": allowed by the signature, never used.
-    const budget = limit == null ? dated.length : limit + ADHOC_LOAD_SLACK;
-    const loadedAll = budget >= dated.length;
-    const toLoad = [...undated, ...dated.slice(0, budget).map((d) => d.id)];
+    let cursor = Math.min(
+        limit == null ? dated.length : limit + ADHOC_LOAD_SLACK,
+        dated.length,
+    );
     const [perRun, recentDaily] = await Promise.all([
-        mapWithConcurrency(toLoad, FETCH_CONCURRENCY, cachedLoadPerRunFor(source)),
+        mapWithConcurrency(
+            [...undated, ...dated.slice(0, cursor).map((d) => d.id)],
+            FETCH_CONCURRENCY,
+            load,
+        ),
         loadWindowData("30d", source),
     ]);
     const flaggedDaily = recentDaily.filter((r) => r.adhoc);
-    const listing = buildAdhocRows([...perRun, ...flaggedDaily], limit);
-    // `total` drives "Show more", so a truncated load must report the candidate
-    // count or the section caps itself at the first page.
-    return loadedAll
+    const build = () => buildAdhocRows([...perRun, ...flaggedDaily], limit);
+    while (limit != null && cursor < dated.length && build().total < limit) {
+        const batch = dated
+            .slice(
+                cursor,
+                cursor + Math.max(limit - build().total, ADHOC_LOAD_SLACK),
+            )
+            .map((d) => d.id);
+        cursor += batch.length;
+        perRun.push(...(await mapWithConcurrency(batch, FETCH_CONCURRENCY, load)));
+    }
+    const listing = build();
+    // `total` drives "Show more": it counts the ids never read, so it is an upper
+    // bound until the section is fully expanded.
+    return cursor >= dated.length
         ? listing
-        : { ...listing, total: ids.length + flaggedDaily.length };
+        : { ...listing, total: listing.total + (dated.length - cursor) };
 }
