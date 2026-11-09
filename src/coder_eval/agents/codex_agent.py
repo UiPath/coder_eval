@@ -893,7 +893,7 @@ class _CodexTurnState:
             and self.compaction_usage_seen
             and last is not None
             and all(
-                getattr(last, key, 0) == 0
+                (getattr(last, key, 0) or 0) == 0
                 for key in (
                     "input_tokens",
                     "output_tokens",

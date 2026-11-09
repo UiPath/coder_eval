@@ -19,7 +19,7 @@ from coder_eval.agents.codex_agent import (
     _CODEX_APPROVAL_MODE,
     CodexAgent,
 )
-from coder_eval.models import AgentConfig, AgentKind, parse_agent_config
+from coder_eval.models import AgentConfig, AgentKind, AssistantMessage, ReconciliationMessage, parse_agent_config
 
 
 class TestCodexAgentInitialization:
@@ -504,6 +504,7 @@ from typing import Any  # noqa: E402
 
 from openai_codex.generated.v2_all import (  # noqa: E402
     SubAgentActivityThreadItem,
+    TokenUsageBreakdown,
     Turn,
     TurnCompletedNotification,
 )
@@ -2231,11 +2232,15 @@ class TestMaxTurnsApiCallCap:
 
     @staticmethod
     def _compaction_notifications(
-        *, estimate: bool = True, empty_response: bool = False, item_id: str = "compact"
+        *,
+        estimate: bool = True,
+        empty_response: bool = False,
+        item_id: str = "compact",
+        cache_write: int | None = 0,
     ) -> list:
         item = SimpleNamespace(type="contextCompaction", id=item_id)
         response = _token_usage(inp=10, out=5, cached=0)
-        response.payload.token_usage.last = SimpleNamespace(
+        response.payload.token_usage.last = TokenUsageBreakdown(
             input_tokens=0 if empty_response else 10,
             output_tokens=0 if empty_response else 5,
             cached_input_tokens=0,
@@ -2245,12 +2250,12 @@ class TestMaxTurnsApiCallCap:
         )
         notifications = [_item_notification("item/started", item), response]
         if estimate:
-            recomputed = _token_usage(inp=10, out=5, cached=0)
-            recomputed.payload.token_usage.last = SimpleNamespace(
+            recomputed = _token_usage(inp=20, out=5, cached=0)
+            recomputed.payload.token_usage.last = TokenUsageBreakdown(
                 input_tokens=0,
                 output_tokens=0,
                 cached_input_tokens=0,
-                cache_write_input_tokens=0,
+                cache_write_input_tokens=cache_write,
                 reasoning_output_tokens=0,
                 total_tokens=20,
             )
@@ -2258,10 +2263,15 @@ class TestMaxTurnsApiCallCap:
         notifications.append(_item_notification("item/completed", item))
         return notifications
 
-    @pytest.mark.parametrize("estimate,empty_response", [(True, False), (False, False), (True, True)])
-    async def test_compaction_estimate_does_not_spend_model_call_budget(self, estimate, empty_response):
+    @pytest.mark.parametrize(
+        "estimate,empty_response,cache_write",
+        [(True, False, 0), (False, False, 0), (True, True, 0), (True, False, None)],
+    )
+    async def test_compaction_estimate_does_not_spend_model_call_budget(self, estimate, empty_response, cache_write):
         notifications = self._cmd_notifications(1)
-        notifications[5:5] = self._compaction_notifications(estimate=estimate, empty_response=empty_response)
+        notifications[5:5] = self._compaction_notifications(
+            estimate=estimate, empty_response=empty_response, cache_write=cache_write
+        )
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
         record = await agent.communicate("go", max_turns=3)
@@ -2272,7 +2282,7 @@ class TestMaxTurnsApiCallCap:
 
     async def test_repeated_compaction_resets_before_normal_tool_calls(self):
         notifications = self._cmd_notifications(2)
-        notifications[10:10] = self._compaction_notifications(item_id="compact-2")
+        notifications[10:10] = self._compaction_notifications(item_id="compact-2", empty_response=True)
         notifications[5:5] = self._compaction_notifications(item_id="compact-1")
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
@@ -2283,8 +2293,8 @@ class TestMaxTurnsApiCallCap:
         assert len(record.commands) == 2
 
     async def test_zero_usage_outside_compaction_still_counts(self):
-        update = _token_usage(inp=0, out=0, cached=0)
-        update.payload.token_usage.last = SimpleNamespace(
+        update = _token_usage(inp=10, out=5, cached=0)
+        update.payload.token_usage.last = TokenUsageBreakdown(
             input_tokens=0,
             output_tokens=0,
             cached_input_tokens=0,
@@ -2292,12 +2302,38 @@ class TestMaxTurnsApiCallCap:
             reasoning_output_tokens=0,
             total_tokens=20,
         )
-        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), [update, _turn_completed()])
+        notifications = [_token_usage(inp=10, out=5, cached=0), update, _turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("go", max_turns=1)
+        record = await agent.communicate("go", max_turns=None)
 
-        assert record.num_turns == 1
+        assert record.num_turns == 2
         assert record.max_turns_exhausted is False
+
+    async def test_final_compaction_estimate_updates_usage_and_message_buckets(self):
+        reply = SimpleNamespace(type="agentMessage", id="preface", text="Preparing a shorter context.")
+        notifications = [
+            _item_notification("item/started", reply),
+            _item_notification("item/completed", reply),
+            *self._compaction_notifications(),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=None)
+
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 20
+        assert record.token_usage.output_tokens == 5
+        buckets = [
+            message for message in record.messages if isinstance(message, (AssistantMessage, ReconciliationMessage))
+        ]
+        assert sum(message.input_tokens for message in buckets) == record.token_usage.uncached_input_tokens
+        assert sum(message.output_tokens for message in buckets) == record.token_usage.output_tokens
+        assert sum(message.cache_read_tokens for message in buckets) == record.token_usage.cache_read_input_tokens
+        assert (
+            sum(message.cache_creation_tokens for message in buckets) == record.token_usage.cache_creation_input_tokens
+        )
 
     async def test_zero_usage_after_compaction_completion_counts_next_model_call(self):
         update = _token_usage(inp=0, out=0, cached=0)

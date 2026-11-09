@@ -89,7 +89,7 @@ still updates usage and transcript capture but does not begin another model call
 The first compaction usage update counts even when its reported deltas are zero;
 completion clears the lifecycle before ordinary model and tool calls resume.
 
-The source contract is visible in `openai/codex` tag `rust-v0.163.0`:
+The source contract is visible in the pinned CLI's `openai/codex` tag `rust-v0.156.1`:
 `compact.rs` calls `update_token_usage_info` and then `recompute_token_usage`, each of
 which emits a `TokenCount` event. The app-server forwards both as
 `thread/tokenUsage/updated`. An ordinary tool call's next-call reservation remains
