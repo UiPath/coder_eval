@@ -75,6 +75,15 @@ describe("parseExperiment", () => {
         expect(exp?.arms.b.passRate).toBeNull();
     });
 
+    test("an explicit null pass_rate stays null instead of reading as 0%", () => {
+        const exp = parseExperiment({
+            variant_aggregates: {
+                a: { tasks_succeeded: 0, tasks_error: 3, tasks_graded: 3, pass_rate: null },
+            },
+        });
+        expect(exp?.arms.a.passRate).toBeNull();
+    });
+
     test("an aggregate not named in variant_ids is still an arm", () => {
         const exp = parseExperiment({
             variant_ids: ["v1"],

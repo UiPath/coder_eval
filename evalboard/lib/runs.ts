@@ -2791,10 +2791,12 @@ export function parseExperiment(raw: RawExperiment | null): RunExperiment | null
         const tasksSucceeded = finiteOrNull(a.tasks_succeeded) ?? 0;
         const tasksGraded = finiteOrNull(a.tasks_graded);
         const reported = finiteOrNull(a.pass_rate);
+        // An explicit null means no row produced a verdict; only a file that
+        // predates the field gets a rate derived from the counts.
         const passRate =
             reported != null
                 ? reported * 100
-                : tasksGraded
+                : !("pass_rate" in a) && tasksGraded
                   ? (tasksSucceeded / tasksGraded) * 100
                   : null;
         arms[id] = {

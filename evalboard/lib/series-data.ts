@@ -18,7 +18,7 @@ import {
     type RunExperiment,
     type RunOverview,
 } from "./runs";
-import { mapWithConcurrency } from "./concurrency";
+import { createLimiter, mapWithConcurrency } from "./concurrency";
 import { DEFAULT_SOURCE, type Source } from "./sources";
 import { isGraded, isPassStatus, statusCategory } from "./status";
 import {
@@ -222,12 +222,17 @@ export function runLevel(overview: RunOverview | null): RunLevel | null {
     };
 }
 
+// Every run-list row asks for its cost at once, and each cold load parses a
+// multi-MB run.json.
+const runLevelSlot = createLimiter(STATS_CONCURRENCY);
+
 export async function loadRunLevel(
     def: SeriesDef,
     id: string,
 ): Promise<RunLevel | null> {
     try {
-        return runLevel((await cachedLoadPerRunFor(def.source)(id)).overview);
+        const run = await runLevelSlot(() => cachedLoadPerRunFor(def.source)(id));
+        return runLevel(run.overview);
     } catch (err) {
         console.error(`[evalboard] series run level ${def.source.id}/${id} failed:`, err);
         return null;
