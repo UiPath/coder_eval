@@ -42,9 +42,16 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 - `/watchlist` — what needs attention, ranked over the recent-runs window: tasks
   and skills scored on failures, regressions and turn-budget pressure
   (`lib/watchlist.ts`).
-- `/scribe` — the Autopilot (aria/Composer) suite, run by `coder_eval_uipath`'s
-  `UiPath.Autopilot.Eval.Manual` pipeline. This is the one surface that reads a
-  **different blob container** (`aria-runs`, not `runs`) — see *Sources* below.
+- `/series` (nav: "Scheduled") — pipelines that run on a schedule outside the
+  skills nightly, one trend each (`lib/series.ts`): a row per series with its last
+  run, the latest pass rate per arm and a sparkline; series with no runs are
+  listed under the table. `/series/<key>` has the trend (pass rate per arm; cost
+  per task, error share and wall-clock at run level), the gap between arms for a
+  two-arm series, and the run list. A run page links back to its series.
+- `/series/scribe` — the Autopilot (aria/Composer) suite, run by
+  `coder_eval_uipath`'s `UiPath.Autopilot.Eval.Manual` pipeline. It reads a
+  **different blob container** (`aria-runs`, not `runs`) — see *Sources* below —
+  and also lists that container's ad-hoc runs. `/scribe` redirects here.
 - `/runs/latest` — shortcut that redirects to the newest run id.
 - `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per task.
   A "Download run (.zip)" button bundles the whole run folder.
@@ -115,7 +122,7 @@ dimension threaded through the data layer as a trailing
 | Source | Container | Surface |
 |--------|-----------|---------|
 | `skills` (default) | `runs` | Everything not listed below |
-| `scribe` | `aria-runs` | `/scribe` |
+| `scribe` | `aria-runs` | `/series/scribe` |
 | `gha` | `runs-gha` | none — direct links only |
 
 Non-default sources are selected by a `?src=<id>` query param, which every
@@ -151,12 +158,41 @@ Two invariants worth preserving if you add a source:
   steady stream of ad-hoc uploads needs its own container, not a prefix in `runs`.
 - **Local mode is per-source too.** `listRunIds` resolves
   `runsDirFor(RUNS_DIR, source)` when `EVALBOARD_LOCAL_RUNS_DIR` is set, so
-  `/scribe` reads `<local>-scribe`. Listing off the bare local dir instead —
+  `/series/scribe` reads `<local>-scribe`. Listing off the bare local dir instead —
   which is what shipped first — returns the *default* source's ids for every
   source while the readers resolve under the sibling, so the listing and the
   reads disagree about which container they describe.
   `lib/__tests__/source-isolation.test.ts` pins both halves; it's the only test
   that exercises the reader layer, where the invariant above actually lives.
+
+## Series
+
+A series is a recurring pipeline whose runs are points on one trend. The table in
+`lib/series.ts` (like `lib/sources.ts`) lists each one with its label, arms and
+source. It holds no schedule: the crons live in `coder_eval_uipath`'s pipelines, and
+a copy here would drift. Two optional fields in a run's `meta.json` drive it, and
+every run without them behaves as before:
+
+- `series` — the series key. The run is a point on that series' trend. The run
+  keeps `adhoc: true`, so it stays out of the front page's chart and table.
+- `excluded` — a reason string. The run stays in its series' run list, greyed out
+  with the reason (a run id inside it links to that run), and is left off every
+  trend and out of "latest".
+
+A key found only in `meta.json` gets a page labelled by the key.
+`scribe` has no `series` field: every date-shaped, non-adhoc run in its container
+belongs to it.
+
+- Membership reads only `meta.json`, through a per-source index cached for five
+  minutes. `meta.json` is edited after upload (`excluded`, a backfilled `series`),
+  so the series index refetches a copy older than a minute for a run started in the
+  last two days and older than an hour for any other.
+- Per-arm numbers of a variant series come from `experiment.json`, not `run.json`.
+  Cost, cost per task, error share and wall-clock come from the run overview and
+  are loaded only on the detail page, at most 8 runs at a time.
+- Each row of the index renders in its own `Suspense` boundary, so one slow series
+  does not hold up the page.
+- The front page's Ad-hoc list drops runs that have a `series`.
 
 ## Conventions
 
@@ -167,9 +203,9 @@ Two invariants worth preserving if you add a source:
   Files are gathered by `collectTaskFiles` / `collectRunFiles`, which reuse the
   `walkArtifacts` noise filter, and zipped by `lib/zip.ts` (a dependency-free
   DEFLATE writer).
-- In production the server requests its own `/` 15 s after it starts and then
-  every 4 minutes (`lib/warm.ts`, started from `instrumentation.ts`), so the
-  per-run cache is rebuilt by that request rather than by a visitor.
+- In production the server requests its own `/` and `/series` 15 s after it starts
+  and then every 4 minutes (`lib/warm.ts`, started from `instrumentation.ts`), so
+  the per-run cache is rebuilt by those requests rather than by a visitor.
   `EVALBOARD_WARM_INTERVAL_SECONDS` sets the interval; `0` turns it off.
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

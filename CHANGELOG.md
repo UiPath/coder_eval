@@ -2,6 +2,59 @@
 
 <!-- version list -->
 
+## v0.12.18 (2026-11-09)
+
+### Bug Fixes
+
+- **deps**: Cap typer below 0.29 ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Keep a null arm pass rate null and cap Series run.json loads
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+### Features
+
+- **evalboard**: Add a Scheduled tab with per-pipeline trends and fold Scribe into it
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Add a Studio Web badge and keep the front-page cache warm
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Add the Series tab ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Draw the Studio Web badge in the UiPath logo's orange outline style
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Give Studio Web runs their own harness badge
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Point the Ad-hoc list and Scribe at the Series tab and warm /series
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Read series and excluded from meta.json and drop series runs from the Ad-hoc list
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Rename the nav tabs, fold Scribe into Scheduled, link runs to their trend
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Simplify the Series index and drop hand-copied schedules
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Warm the front-page cache in the background
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+
 ## v0.12.17 (2026-11-06)
 
 ### Bug Fixes
