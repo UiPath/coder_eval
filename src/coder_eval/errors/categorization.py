@@ -6,7 +6,7 @@ and maps them to appropriate ErrorCategory values for retry logic.
 
 import logging
 import re
-from typing import Any, Final
+from typing import Any
 
 from .agent import AgentConfigError, AgentCrashError
 from .budget import BudgetExceededError
@@ -16,41 +16,45 @@ from .timeout import EvaluationTimeoutError
 
 logger = logging.getLogger(__name__)
 
-_BILLING_CODES: Final = frozenset(
-    {"insufficientquota", "billinghardlimitreached", "billingnotactive", "paymentrequired", "usagelimitexceeded"}
-)
-_PROVIDER_BILLING_SIGNATURES: Final = ("insufficient api credit", "billing hard limit")
-_HTTP_STATUS = re.compile(
-    r"\b(?:http(?:/\d(?:\.\d)?)?\s+(?:status(?:\s+code)?\s*[:=]?\s*)?"
-    + r"|(?:http[_ ]?)?status(?:[_ ]?code)?\s*[:=]\s*|error\s+code\s*:\s*)(\d{3})\b"
-)
-_VERTEX_QUOTA_METRIC = re.compile(
-    r"\bquota exceeded for aiplatform\.googleapis\.com/([a-z0-9_]+)(?=$|[\s,;:)]|\.(?:\s|$))"
-)
-_STATUS_REASONS: Final = {
-    "401": "unauthorized",
-    "402": "payment required",
-    "403": "forbidden",
-    "429": "too many requests",
-    "502": "bad gateway",
-    "503": "service unavailable",
-    "504": "gateway timeout",
-}
 
-
-def _provider_code_category(code: object) -> ErrorCategory | None:
+def provider_error_category(*, code: object = None, status_code: object = None) -> ErrorCategory | None:
+    """Map provider-owned codes and HTTP statuses, never diagnostic prose."""
     if isinstance(code, str):
         normalized = code.lower().replace("_", "")
-        if normalized in _BILLING_CODES:
+        if normalized in {
+            "insufficientquota",
+            "billinghardlimitreached",
+            "billingnotactive",
+            "paymentrequired",
+            "usagelimitexceeded",
+            "billingerror",
+        }:
             return ErrorCategory.AGENT_BILLING_ERROR
-        if normalized in {"ratelimitexceeded", "ratelimiterror"}:
+        if normalized in {"ratelimitexceeded", "ratelimiterror", "ratelimit"}:
             return ErrorCategory.AGENT_RATE_LIMIT
+        if normalized in {"authenticationfailed", "authenticationerror", "unauthorized"}:
+            return ErrorCategory.AGENT_AUTH_ERROR
+        if normalized in {"invalidrequest", "contextwindowexceeded", "contentfilter"}:
+            return ErrorCategory.AGENT_INVALID_OUTPUT
+        if normalized in {"servererror", "serveroverloaded", "responsestreamdisconnected", "httpconnectionfailed"}:
+            # HTTP status is more specific than a transport envelope.
+            return provider_error_category(status_code=status_code) or ErrorCategory.AGENT_API_ERROR
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        if status_code == 402:
+            return ErrorCategory.AGENT_BILLING_ERROR
+        if status_code in {401, 403}:
+            return ErrorCategory.AGENT_AUTH_ERROR
+        if status_code == 429:
+            return ErrorCategory.AGENT_RATE_LIMIT
+        if 500 <= status_code <= 599:
+            return ErrorCategory.AGENT_API_ERROR
     return None
 
 
-def _provider_exception_category(error: BaseException) -> ErrorCategory | None:
+def provider_exception_category(error: BaseException) -> ErrorCategory | None:
+    """Read structured provider metadata through an exception chain."""
     seen: set[int] = set()
-    statuses: list[object] = []
+    statuses = []
     while id(error) not in seen:
         seen.add(id(error))
         codes = [getattr(error, "code", None)]
@@ -59,21 +63,17 @@ def _provider_exception_category(error: BaseException) -> ErrorCategory | None:
             detail = body.get("error", body)
             if isinstance(detail, dict):
                 codes.extend([detail.get("code"), detail.get("type")])
+        status = getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None))
         for code in codes:
-            if (category := _provider_code_category(code)) is not None:
+            if (category := provider_error_category(code=code, status_code=status)) is not None:
                 return category
-        statuses.append(getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None)))
+        statuses.append(status)
         cause = error.__cause__ or error.__context__
         if cause is None:
             break
         error = cause
-    for status, category in (
-        (402, ErrorCategory.AGENT_BILLING_ERROR),
-        (401, ErrorCategory.AGENT_AUTH_ERROR),
-        (403, ErrorCategory.AGENT_AUTH_ERROR),
-        (429, ErrorCategory.AGENT_RATE_LIMIT),
-    ):
-        if status in statuses:
+    for status in statuses:
+        if (category := provider_error_category(status_code=status)) is not None:
             return category
     return None
 
@@ -81,15 +81,12 @@ def _provider_exception_category(error: BaseException) -> ErrorCategory | None:
 def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCategory | None:
     """Typed-exception checks (most reliable), in precedence order.
 
-    Returns None when no typed check matches, so the caller falls through to
-    string-pattern matching. ``AgentCrashError`` is deliberately NOT checked here:
-    it is the last resort (see ``categorize_error``), after string patterns get a
-    chance to recognise auth / rate-limit / billing / content-filter signatures
-    stamped into the message. The component-gated branches also return ``None``
-    when their component doesn't match, so non-agent errors fall through to the
-    component group (e.g. a sandbox TimeoutError reaches the sandbox categories
-    with their designed retry behavior instead of dead-ending at ``UNKNOWN``).
+    AgentCrashError uses only its adapter-reported category. Other exceptions
+    can fall through to the legacy message and component classifiers.
     """
+    if isinstance(error, AgentCrashError):
+        return error.category or ErrorCategory.AGENT_CRASH
+
     # Check custom timeout exceptions first (before generic TimeoutError)
     if isinstance(error, EvaluationTimeoutError):
         return ErrorCategory.AGENT_TIMEOUT
@@ -116,7 +113,7 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
     if isinstance(error, MemoryError):
         return ErrorCategory.OUT_OF_MEMORY
 
-    if (category := _provider_exception_category(error)) is not None:
+    if (category := provider_exception_category(error)) is not None:
         return category
 
     # Check for known SDK exceptions (if available)
@@ -134,17 +131,8 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
 
 
 def _mentions_status(error_str: str, *codes: str) -> bool:
-    """Recognize explicit HTTP/error status envelopes, excluding amounts, invoice IDs and street numbers."""
-    if any(match.group(1) in codes for match in _HTTP_STATUS.finditer(error_str)):
-        return True
-    return any(
-        code in _STATUS_REASONS
-        and re.match(
-            rf"\s*(?:(?:delegate send failed|codex turn failed):\s*)?{code}\s+{_STATUS_REASONS[code]}\b",
-            error_str,
-        )
-        for code in codes
-    )
+    """True when an HTTP status code appears as a whole word, so a port or a GUID holding its digits does not match."""
+    return any(re.search(rf"\b{code}\b", error_str) for code in codes)
 
 
 def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | None:
@@ -156,39 +144,23 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
     non-agent components, so e.g. a sandbox pip failure mentioning "connection"
     reaches ``PACKAGE_INSTALL_ERROR`` (retryable) instead of ``UNKNOWN``.
     """
-    # Rationale: .claude/notes/agents.md § Provider denials versus business text
-    codex = re.fullmatch(
-        r"codex turn failed:.*\(codexerrorinfo=(\w+)(?:, httpstatuscode=(\d+))?\)", error_str, re.DOTALL
-    )
-    if codex and (category := _provider_code_category(codex.group(1))) is not None:
-        return category
-    if re.search(
-        r"['\"](?:code|type)['\"]\s*:\s*['\"](?:insufficient_quota|billing_hard_limit_reached|billing_not_active|payment_required)['\"]",
-        error_str,
-    ):
-        return ErrorCategory.AGENT_BILLING_ERROR
-
     # Authentication errors
     if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key"]) or _mentions_status(
         error_str, "401"
     ):
         return ErrorCategory.AGENT_AUTH_ERROR
 
-    if (
-        any(pat in error_str for pat in _PROVIDER_BILLING_SIGNATURES)
-        or re.search(r"credit balance is too low to access the (?:anthropic )?api\b", error_str)
-        or _mentions_status(error_str, "402")
-    ):
+    # Billing/credit errors (NOT retryable). Broad patterns are intentional: a false
+    # positive skips one retry, a false negative wastes every retry on an error that
+    # will never succeed.
+    if any(
+        pat in error_str for pat in ["credit", "billing", "payment", "insufficient", "quota exceeded", "spending limit"]
+    ) or _mentions_status(error_str, "402"):
         return ErrorCategory.AGENT_BILLING_ERROR
 
     # Rate limiting
-    if (
-        any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"])
-        or _mentions_status(error_str, "429")
-        or (
-            (quota := _VERTEX_QUOTA_METRIC.search(error_str)) is not None
-            and re.search(r"_per_(?:minute|hour|day)(?:_|$)", quota.group(1))
-        )
+    if any(pat in error_str for pat in ["rate limit", "ratelimit", "too many requests"]) or _mentions_status(
+        error_str, "429"
     ):
         return ErrorCategory.AGENT_RATE_LIMIT
 
@@ -250,12 +222,6 @@ def _categorize_by_component(error: Exception, error_str: str, component: str) -
             return ErrorCategory.AGENT_CRASH
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT
-
-        # LAST agent-side resort: by here the patterns have had their chance at the
-        # auth / rate-limit / billing signatures, so what remains is a genuinely
-        # unexpected failure the user wants retried.
-        if isinstance(error, AgentCrashError):
-            return ErrorCategory.AGENT_CRASH
 
         # Default to API error for unknown agent failures (more likely to be retryable)
         return ErrorCategory.AGENT_API_ERROR
@@ -321,11 +287,6 @@ def categorize_error(
 
     if (category := _categorize_by_component(error, error_str, component)) is not None:
         return category
-
-    # Final typed-AgentCrashError fallback for callers without a component hint:
-    # nothing more specific matched, treat as a genuinely unexpected crash.
-    if isinstance(error, AgentCrashError):
-        return ErrorCategory.AGENT_CRASH
 
     # Default to unknown
     logger.warning(f"Could not categorize error: {error} (component={component})")

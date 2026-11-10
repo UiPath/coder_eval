@@ -997,13 +997,16 @@ async def test_claude_agent_process_error_no_stderr_at_all():
 
 
 @pytest.mark.parametrize(
-    ("detail", "expected"),
+    ("detail", "status", "expected"),
     [
-        ("Employees have a spending limit of $402 per trip.", "agent_crash"),
-        ("HTTP 402 Payment Required", "agent_billing_error"),
+        ("Employees have a spending limit of $402 per trip.", None, "agent_crash"),
+        ("HTTP 402 Payment Required", None, "agent_crash"),
+        ("POST /respond → 402 Payment Required", 402, "agent_billing_error"),
+        ("API Error: Request rejected (429) · capacity unavailable", 429, "agent_rate_limit"),
+        ("Invalid invoice and payment 402", 401, "agent_auth_error"),
     ],
 )
-async def test_claude_process_failure_classifies_its_sdk_result(detail, expected, tmp_path):
+async def test_claude_process_failure_classifies_its_sdk_result(detail, status, expected, tmp_path):
     from claude_agent_sdk import ResultMessage
 
     from coder_eval.errors.categorization import categorize_error
@@ -1022,6 +1025,7 @@ async def test_claude_process_failure_classifies_its_sdk_result(detail, expected
             session_id="failed",
             usage={"input_tokens": 1, "output_tokens": 1},
             result=detail,
+            api_error_status=status,
         )
         raise ProcessError("process failed", exit_code=1, stderr="")
 
@@ -1030,7 +1034,51 @@ async def test_claude_process_failure_classifies_its_sdk_result(detail, expected
 
     category = categorize_error(caught.value, {"component": "agent"})
     assert category.value == expected
-    assert should_retry(category, 0) is (expected == "agent_crash")
+    assert should_retry(category, 0) is (expected in {"agent_crash", "agent_rate_limit"})
+
+
+@pytest.mark.parametrize(
+    ("sdk_error", "parent", "is_error", "expected"),
+    [
+        ("billing_error", None, True, "agent_billing_error"),
+        ("rate_limit", None, True, "agent_rate_limit"),
+        ("authentication_failed", None, True, "agent_auth_error"),
+        ("billing_error", "child-tool", True, None),
+        ("billing_error", None, False, None),
+    ],
+)
+async def test_claude_assistant_error_metadata_only_applies_to_failed_root_turn(
+    sdk_error, parent, is_error, expected, tmp_path
+):
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    from coder_eval.errors.categorization import categorize_error
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    await agent.start(str(tmp_path))
+
+    async def messages(**kwargs):
+        yield AssistantMessage(content=[], model="test", parent_tool_use_id=parent, error=sdk_error)
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=is_error,
+            num_turns=1,
+            session_id="session",
+            result="Invoice invalid payment 402",
+            api_error_status=429 if sdk_error == "billing_error" and parent is None and is_error else None,
+        )
+
+    with patch("coder_eval.agents.claude_code_agent.query", messages):
+        if expected is not None:
+            with pytest.raises(AgentCrashError) as caught:
+                await agent.communicate("question")
+            assert categorize_error(caught.value, {"component": "agent"}).value == expected
+            assert agent.pending_turn is not None and agent.pending_turn.crashed
+        else:
+            turn = await agent.communicate("question")
+            assert not turn.crashed
 
 
 @pytest.mark.asyncio

@@ -260,19 +260,16 @@ pins it.
 
 ## Provider denials versus business text
 
-`categorize_error` prefers machine error codes and HTTP statuses, including an SDK
-exception wrapped as a cause. Its text fallback recognizes explicit provider envelopes,
-API credit denials and known Codex failure metadata. Words such as billing, payment,
-spending limit or quota exceeded, and bare numbers such as 402, also occur in valid
-business answers; they must not alone consume the terminal billing category. Vertex
-per-window quota exhaustion remains a retryable rate limit.
+AgentCrashError carries an optional category assigned by the adapter. The categorizer
+honors it before legacy message matching; an unclassified AgentCrashError is always a
+retryable crash. Diagnostic prose, stderr and task content cannot disable its retries.
 
-Codex's existing failure suffix carries its machine kind and HTTP status. Keep that
-suffix on the raised exception even when the message is long; the base agent still
-truncates the stored `crash_reason`. This avoids adding a new public error protocol.
-The fallback cannot classify every provider's unstructured prose. In particular,
-"insufficient credits" without API context is ambiguous; SDK status/code metadata
-or an explicit API denial is the reliable signal.
+Claude reports root AssistantMessage.error and ResultMessage.api_error_status; a clean
+result clears earlier recoverable error metadata. Codex reports Turn.error.codex_error_info
+and its HTTP status. Delegate reports structured host statusCode/code fields. Wrapped
+provider exceptions retain their structured status/code at the shared crash boundary.
+HTTP 402 or a typed billing denial is terminal; HTTP 429 is rate-limited and retryable.
+No retry defaults or per-question limits change.
 
 ## Why a clean exit can still be a crash
 
@@ -986,26 +983,11 @@ when a cut turn had finished calls but no usage.
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
 window at turn start, so head and tail measure ~0.
 
-**Known host failures are recategorized** in `_describe_host_error` / `_crash_on_host_error`, ported
-from the out-of-tree `delegate-sdk` adapter that drove the same host and backend:
-
-- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>` or "not available in
-  your country"): a WAF rule matched shell-like text in the request, not a geo/auth block. A retry
-  is blocked again, so the reason carries "content filter" (`AGENT_INVALID_OUTPUT`). Two markers,
-  because the host truncates near 50 KB and the country sentence sits after ~48 KB of CSS.
-- **SSE connect timeout**: no response headers, so the backend never started the turn. Rewritten to
-  "connection" (`AGENT_API_ERROR`, retried) with "timeout" removed, which would be `AGENT_TIMEOUT`
-  (not retried).
-- **Session conflict** ("A reply is already being generated", 409): `_session_id` is dropped so the
-  retry starts a new conversation, but only while no turn of that conversation has finished
-  (`_conversation_has_history`). On a later turn a new conversation would continue the task without
-  the earlier turns, and the row would still be graded as one trajectory. So the retry keeps the
-  session. The 409 is short-lived: the backend cancels the reply when the killed host's stream
-  disconnects, then releases its turn claim, so the 5 s and 10 s `AGENT_CRASH` retries usually
-  succeed. A claim it fails to release expires after `TURN_CLAIM_TTL_SECONDS` (900 s), and the task
-  ends as an error. A `session_id` pinned in config counts as history, and dropping it would not
-  help anyway: each respawn sends it in `init`, and the SDK falls back to it when `send` carries no
-  `sessionId` (`sessionId || this.options.sessionId` in the SDK's `sendMessage`).
+**Host error frames carry optional `statusCode` and `code`.** The adapter maps those
+provider-owned fields to a retry category and preserves the original diagnostic message.
+Old hosts without those fields produce ordinary retryable crashes. Business text and
+HTML do not control retry policy. A session conflict may drop the session only before
+any question has completed; later questions keep all earlier context.
 
 Not ported: stall-timeout+resend and the S2S token-file refresher. Port them when the need shows.
 

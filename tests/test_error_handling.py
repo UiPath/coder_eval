@@ -216,87 +216,35 @@ class TestCategorizeError:
         assert result == ErrorCategory.AGENT_CRASH
 
     @pytest.mark.parametrize(
-        "message, expected",
-        [
-            # Typed-AgentCrashError fallback fires only when no message pattern matches.
-            ("Communication with agent failed: unexpected SDK error", ErrorCategory.AGENT_CRASH),
-            # Specific message patterns must win over the typed fallback so non-retryable
-            # categories (auth, billing, content-filter) don't burn the AGENT_CRASH retry budget.
-            (
-                "CLI process failed (exit code 1): authentication failed: invalid API key",
-                ErrorCategory.AGENT_AUTH_ERROR,
-            ),
-            (
-                "CLI process failed (exit code 1): Result[is_error=True]: rate limit exceeded",
-                ErrorCategory.AGENT_RATE_LIMIT,
-            ),
-            (
-                "CLI process failed (exit code 1): insufficient API credits on account",
-                ErrorCategory.AGENT_BILLING_ERROR,
-            ),
-            (
-                "Communication with agent failed: Bedrock guardrail intervened: content filtering policy",
-                ErrorCategory.AGENT_INVALID_OUTPUT,
-            ),
-            ("Communication with agent failed: invalid response format", ErrorCategory.AGENT_INVALID_OUTPUT),
-        ],
-    )
-    def test_categorize_agent_crash_routing(self, message, expected):
-        assert categorize_error(AgentCrashError(message), {"component": "agent"}) == expected
-
-    def test_categorize_agent_crash_without_component_hint(self):
-        """The typed-AgentCrashError fallback also fires when no component is provided."""
-        assert categorize_error(AgentCrashError("anything"), {}) == ErrorCategory.AGENT_CRASH
-
-    @pytest.mark.parametrize(
         "message",
         [
-            "The billing team handles invoice requests.",
-            "Check the credit note before sending payment.",
-            "There is insufficient evidence to confirm that process.",
-            "The payment required for invoice INV-7 is $50.",
-            "Employees have a spending limit of $500 per trip.",
-            "The monthly quota exceeded the travel allowance.",
-            "The customer credit balance is too low to pay invoice INV-7.",
-            "The customer has insufficient credits on account for invoice INV-7.",
-            "Delegate turn failed: Invoice 402 was rejected by the approver.",
-            "The invoice total is $402.00 and includes 429 units.",
-            "Send the documents to 429 Main St, suite 401.",
+            "Employees have a spending limit of $402 per trip.",
+            "The invoice was invalid and required payment before approval.",
+            "API Error: Request rejected (429) · capacity unavailable",
+            "POST https://example.com/respond → 402 Payment Required",
+            "Bedrock guardrail intervened: content filtering policy",
         ],
     )
-    def test_business_answer_does_not_disable_crash_retry(self, message):
-        category = categorize_error(AgentCrashError(message), {"component": "agent"})
-
-        assert category == ErrorCategory.AGENT_CRASH
-        assert should_retry(category, 0)
+    def test_unclassified_agent_crash_does_not_parse_business_or_provider_text(self, message):
+        for context in ({"component": "agent"}, {}):
+            category = categorize_error(AgentCrashError(message), context)
+            assert category is ErrorCategory.AGENT_CRASH
+            assert should_retry(category, 0)
 
     @pytest.mark.parametrize(
-        "message",
+        "category",
         [
-            "Your credit balance is too low to access the API.",
-            "Your credit balance is too low to access the Anthropic API.",
-            "Insufficient API credits on account",
-            "Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
-            "Error code: 400 - {'error': {'code': 'billing_hard_limit_reached'}}",
-            "Error code: 400 - {'error': {'code': 'billing_not_active'}}",
-            "Billing hard limit has been reached",
-            "API response: {'code': 'payment_required'}",
+            ErrorCategory.AGENT_RATE_LIMIT,
+            ErrorCategory.AGENT_AUTH_ERROR,
+            ErrorCategory.AGENT_BILLING_ERROR,
+            ErrorCategory.AGENT_INVALID_OUTPUT,
         ],
     )
-    def test_provider_quota_denial_stays_non_retryable(self, message):
-        category = categorize_error(AgentCrashError(message), {"component": "agent"})
-
-        assert category == ErrorCategory.AGENT_BILLING_ERROR
-        assert not should_retry(category, 0)
-
-    def test_http_payment_required_stays_non_retryable(self):
-        response = httpx2.Response(402, request=httpx2.Request("POST", "https://provider.invalid/messages"))
-        with pytest.raises(httpx2.HTTPStatusError) as caught:
-            response.raise_for_status()
-        category = categorize_error(caught.value, {"component": "agent"})
-
-        assert category == ErrorCategory.AGENT_BILLING_ERROR
-        assert not should_retry(category, 0)
+    def test_adapter_category_wins_over_incidental_message(self, category):
+        error = AgentCrashError("Invalid invoice 402: payment, rate limit, memory", category=category)
+        assert categorize_error(error, {"component": "agent"}) is category
+        assert categorize_error(error, {}) is category
+        assert categorize_error(error, {}, hint=ErrorCategory.AGENT_TIMEOUT) is ErrorCategory.AGENT_TIMEOUT
 
     @pytest.mark.parametrize(
         ("status", "code", "expected"),
@@ -305,40 +253,14 @@ class TestCategorizeError:
             (429, "insufficient_quota", ErrorCategory.AGENT_BILLING_ERROR),
             (400, "billing_not_active", ErrorCategory.AGENT_BILLING_ERROR),
             (429, None, ErrorCategory.AGENT_RATE_LIMIT),
+            (429, "server_error", ErrorCategory.AGENT_RATE_LIMIT),
             (401, None, ErrorCategory.AGENT_AUTH_ERROR),
         ],
     )
-    def test_wrapped_provider_status_and_code_survive_business_text(self, status, code, expected):
+    def test_structured_provider_exception(self, status, code, expected):
         response = httpx2.Response(status, request=httpx2.Request("POST", "https://provider.invalid/messages"))
-        provider = APIStatusError("provider request failed", response=response, body={"error": {"code": code}})
-        wrapper = AgentCrashError("Employees have a spending limit of $402 per trip.")
-        wrapper.__cause__ = provider
-
-        assert categorize_error(wrapper, {"component": "agent"}) is expected
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "Quota exceeded for x.test/aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model",
-            "Quota exceeded for evil-aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model",
-            "Quota exceeded for aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model.extra",
-        ],
-    )
-    def test_vertex_quota_requires_a_complete_metric_identifier(self, message):
-        category = categorize_error(AgentCrashError(message), {"component": "agent"})
-
-        assert category is ErrorCategory.AGENT_CRASH
-        assert should_retry(category, 0)
-
-    def test_transient_vertex_quota_is_retryable(self):
-        error = AgentCrashError(
-            "429 Quota exceeded for aiplatform.googleapis.com/online_prediction_tokens_per_minute_per_base_model"
-        )
-
-        category = categorize_error(error, {"component": "agent"})
-
-        assert category is ErrorCategory.AGENT_RATE_LIMIT
-        assert should_retry(category, 0)
+        provider = APIStatusError("Invoice payment is invalid", response=response, body={"error": {"code": code}})
+        assert categorize_error(provider, {"component": "agent"}) is expected
 
     def test_categorize_agent_config_error(self):
         """AgentConfigError → AGENT_CONFIG_ERROR via typed check."""

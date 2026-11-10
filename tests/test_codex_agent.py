@@ -3111,7 +3111,7 @@ class TestFailedTurnIsACrash:
         assert category is ErrorCategory.AGENT_CRASH
         assert should_retry(category, 0)
 
-    async def test_standard_payment_status_without_machine_kind_is_terminal(self):
+    async def test_unstructured_payment_message_remains_retryable(self):
         from coder_eval.errors.categories import ErrorCategory
         from coder_eval.errors.categorization import categorize_error
         from coder_eval.errors.retry import should_retry
@@ -3124,8 +3124,8 @@ class TestFailedTurnIsACrash:
             await agent.communicate("go")
 
         category = categorize_error(caught.value, {"component": "agent"})
-        assert category is ErrorCategory.AGENT_BILLING_ERROR
-        assert not should_retry(category, 0)
+        assert category is ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
 
     @pytest.mark.parametrize(
         "info",

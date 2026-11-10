@@ -28,6 +28,7 @@ from coder_eval.errors import (
     TurnTimeoutError,
     truncate_crash_message,
 )
+from coder_eval.errors.categorization import provider_error_category
 from coder_eval.models import (
     AgentKind,
     ApiRoute,
@@ -260,13 +261,7 @@ def _status_value(status: Any) -> str:
 
 
 def _failed_turn_reason(turn: Any) -> str | None:
-    """The crash message for a Turn codex ended as ``failed``, or None for any other status.
-
-    Codex ends a turn ``failed`` when it gives up on the provider, e.g. a
-    ``rateLimitExceeded`` it will not retry. The message carries the provider's
-    own text, so ``categorize_error`` routes it (``rate limit`` ->
-    ``AGENT_RATE_LIMIT``) like any other agent crash.
-    """
+    """The crash message for a Turn codex ended as ``failed``, or None for any other status."""
     if turn is None or _status_value(getattr(turn, "status", None)) != "failed":
         return None
     error = getattr(turn, "error", None)
@@ -1227,7 +1222,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # Codex gave up on the turn (a provider error it would not retry),
                 # so the agent never finished: crash, never score it.
                 # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
-                self._finalize_and_raise_crash(state.finalize, failed_reason)
+                kind, status = _codex_error_kind(getattr(state.result_turn, "error", None))
+                self._finalize_and_raise_crash(
+                    state.finalize,
+                    failed_reason,
+                    category=provider_error_category(code=kind, status_code=status),
+                )
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
