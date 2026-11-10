@@ -562,9 +562,11 @@ class _ClaudeTurnState:
         self.num_turns = getattr(message, "num_turns", None)
         self.sdk_result_summary = self._agent._summarize_result(message)
         if self.sdk_result_summary is not None and self.sdk_result_summary.is_error:
-            self.error_category = self.error_category or provider_error_category(
-                status_code=getattr(message, "api_error_status", None)
-            )
+            if self.error_category in {None, ErrorCategory.AGENT_API_ERROR}:
+                self.error_category = (
+                    provider_error_category(status_code=getattr(message, "api_error_status", None))
+                    or self.error_category
+                )
         else:
             self.error_category = None
         new_session_id = getattr(message, "session_id", None)

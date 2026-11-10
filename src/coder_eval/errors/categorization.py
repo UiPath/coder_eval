@@ -54,7 +54,8 @@ def provider_error_category(*, code: object = None, status_code: object = None) 
 def provider_exception_category(error: BaseException) -> ErrorCategory | None:
     """Read structured provider metadata through an exception chain."""
     seen: set[int] = set()
-    statuses = []
+    categories: list[ErrorCategory] = []
+    statuses: list[object] = []
     while id(error) not in seen:
         seen.add(id(error))
         codes = [getattr(error, "code", None)]
@@ -63,19 +64,23 @@ def provider_exception_category(error: BaseException) -> ErrorCategory | None:
             detail = body.get("error", body)
             if isinstance(detail, dict):
                 codes.extend([detail.get("code"), detail.get("type")])
-        status = getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None))
         for code in codes:
-            if (category := provider_error_category(code=code, status_code=status)) is not None:
-                return category
-        statuses.append(status)
+            if (category := provider_error_category(code=code)) is not None:
+                categories.append(category)
+        statuses.append(getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None)))
         cause = error.__cause__ or error.__context__
         if cause is None:
             break
         error = cause
+    if ErrorCategory.AGENT_BILLING_ERROR in categories:
+        return ErrorCategory.AGENT_BILLING_ERROR
+    for category in categories:
+        if category != ErrorCategory.AGENT_API_ERROR:
+            return category
     for status in statuses:
         if (category := provider_error_category(status_code=status)) is not None:
             return category
-    return None
+    return ErrorCategory.AGENT_API_ERROR if categories else None
 
 
 def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCategory | None:

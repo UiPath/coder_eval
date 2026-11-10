@@ -1042,6 +1042,7 @@ async def test_claude_process_failure_classifies_its_sdk_result(detail, status, 
     [
         ("billing_error", None, True, "agent_billing_error"),
         ("rate_limit", None, True, "agent_rate_limit"),
+        ("server_error", None, True, "agent_rate_limit"),
         ("authentication_failed", None, True, "agent_auth_error"),
         ("billing_error", "child-tool", True, None),
         ("billing_error", None, False, None),
@@ -1067,7 +1068,9 @@ async def test_claude_assistant_error_metadata_only_applies_to_failed_root_turn(
             num_turns=1,
             session_id="session",
             result="Invoice invalid payment 402",
-            api_error_status=429 if sdk_error == "billing_error" and parent is None and is_error else None,
+            api_error_status=429
+            if sdk_error in {"billing_error", "server_error"} and parent is None and is_error
+            else None,
         )
 
     with patch("coder_eval.agents.claude_code_agent.query", messages):
