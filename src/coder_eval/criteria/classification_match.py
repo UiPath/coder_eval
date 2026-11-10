@@ -50,11 +50,15 @@ class ClassificationMatchChecker(BaseCriterion[ClassificationMatchCriterion]):
         context: CheckContext | None = None,
     ) -> CriterionResult:
         expected = self._canonicalize(criterion.expected_label, criterion)
+        unreadable = ""
 
         try:
             raw = sandbox.get_file_content(criterion.path)
         except FileNotFoundError:
             observed = _SENTINEL_NONE
+        except (OSError, ValueError) as e:
+            observed = _SENTINEL_OTHER
+            unreadable = f" (unreadable: {type(e).__name__}: {e})"
         else:
             content = raw.strip()
             observed = self._canonicalize(content, criterion) if content else _SENTINEL_NONE
@@ -63,7 +67,7 @@ class ClassificationMatchChecker(BaseCriterion[ClassificationMatchCriterion]):
                 observed = _SENTINEL_OTHER
 
         score = 1.0 if observed == expected else 0.0
-        details = f"observed={observed!r}, expected={expected!r}"
+        details = f"observed={observed!r}, expected={expected!r}{unreadable}"
 
         return ClassificationCriterionResult(
             criterion_type=criterion.type,

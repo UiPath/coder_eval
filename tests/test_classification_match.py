@@ -26,13 +26,16 @@ from coder_eval.reports.markdown import _compute_suite_rollup, _render_suite_mar
 class _FakeSandbox:
     """Minimal sandbox surface needed by ClassificationMatchChecker.get_file_content."""
 
-    def __init__(self, files: dict[str, str]):
+    def __init__(self, files: dict[str, str | Exception]):
         self._files = files
 
     def get_file_content(self, path: str) -> str:
         if path not in self._files:
             raise FileNotFoundError(path)
-        return self._files[path]
+        content = self._files[path]
+        if isinstance(content, Exception):
+            raise content
+        return content
 
 
 def _check(
@@ -40,7 +43,7 @@ def _check(
     path: str,
     expected_label: str,
     allowed_labels: list[str],
-    files: dict[str, str],
+    files: dict[str, str | Exception],
     case_sensitive: bool = False,
 ) -> ClassificationCriterionResult:
     crit = ClassificationMatchCriterion(
@@ -149,6 +152,25 @@ class TestClassificationMatchChecker:
         )
         assert result.score == 0.0
         assert result.observed_label == "(none)"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("Pattern 'out/*.txt' matches 2 files — refusing to guess which to grade"),
+            UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte"),
+            IsADirectoryError("result.txt"),
+        ],
+    )
+    def test_unreadable_file_becomes_other_sentinel(self, error: Exception) -> None:
+        result = _check(
+            path="result.txt",
+            expected_label="positive",
+            allowed_labels=["positive", "negative"],
+            files={"result.txt": error},
+        )
+        assert result.score == 0.0
+        assert result.observed_label == "(other)"
+        assert type(error).__name__ in (result.details or "")
 
 
 class TestClassificationMatchAggregate:
@@ -351,6 +373,20 @@ class TestSuiteRollupWithAggregate:
         assert by_metric["accuracy"].passed is True
         assert by_metric["recall.negative"].passed is False
         assert by_metric["recall.negative"].actual_value == pytest.approx(0.5)
+
+    def test_unreadable_row_counts_as_a_miss(self, tmp_path: Path) -> None:
+        crit = self._criterion(suite_thresholds={"accuracy": 0.9})
+        checker = ClassificationMatchChecker()
+        rows = self._mislabeled_rows()
+        unreadable = _FakeSandbox({"result.txt": ValueError("Pattern 'result.txt' matches 2 files")})
+        r3_crit = crit.model_copy(update={"expected_label": "negative"})
+        rows[2].result.success_criteria_results = [checker.check(r3_crit, unreadable)]  # type: ignore[arg-type]
+
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path, task_criteria=[crit])
+        agg = rollup.criterion_aggregates[0]
+        assert agg.metrics["accuracy"] == pytest.approx(2 / 3)
+        assert agg.details["total_pairs"] == 3
+        assert agg.passed is False
 
     def test_threshold_on_missing_metric_fails(self, tmp_path: Path) -> None:
         rows = self._mislabeled_rows()

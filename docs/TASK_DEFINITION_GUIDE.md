@@ -1349,7 +1349,7 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 
 Matches a single label the agent wrote to a file against ground truth — the file-based classifier. Reads the file, normalizes the content (strip, and lowercase unless `case_sensitive`), and compares it to `expected_label`. **Binary scoring:** `1.0` on a match, else `0.0`.
 
-The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set. Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
+The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set or the file can't be read (for example, it isn't UTF-8, or a glob matches more than one file). Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
 
 ```yaml
 - type: "classification_match"

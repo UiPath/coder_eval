@@ -987,7 +987,7 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     compares it to ``expected_label``. The observed label is the canonical form
     from ``allowed_labels`` when it matches; otherwise ``'(none)'`` when the
     file is missing / empty and ``'(other)'`` when the content is not in the
-    allowed set. Both are recorded as sentinels so the suite rollup can show
+    allowed set or the file cannot be read. Both are recorded as sentinels so the suite rollup can show
     them as real failure classes in the confusion matrix.
 
     The checker returns a ``ClassificationCriterionResult`` (subclass of
