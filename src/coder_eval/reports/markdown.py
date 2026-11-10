@@ -27,6 +27,7 @@ from ..models import (
     sum_costs,
 )
 from ..path_utils import TASK_JSON_FILENAME, build_task_run_dir
+from .junit import _category_of
 
 
 if TYPE_CHECKING:
@@ -470,7 +471,13 @@ class ReportGenerator:
         ]
 
         # Aggregate P0 metrics
-        scores = [t["weighted_score"] for t in summary.task_results if t.get("weighted_score") is not None]
+        # An unscored row that was not NOT_GRADED is a miss (0.0), as in VariantAggregate.average_score.
+        # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
+        scores = [
+            t["weighted_score"] if t.get("weighted_score") is not None else 0.0
+            for t in summary.task_results
+            if _category_of(t["status"]) != "ungraded"
+        ]
         durations = [t["duration"] for t in summary.task_results if t["duration"] > 0]
         similarities = [
             t["reference_similarity"] for t in summary.task_results if t.get("reference_similarity") is not None

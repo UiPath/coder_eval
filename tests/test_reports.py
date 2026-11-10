@@ -451,6 +451,39 @@ def test_generate_markdown_aggregate_metrics():
     assert "Avg End-to-end Latency**: 50.0s" in report_md
 
 
+@pytest.mark.parametrize(
+    ("third_status", "expected_line"),
+    [
+        # An unscored ERROR row is a miss, so it cannot lift the average above a clean run's.
+        ("ERROR", "Avg Reliability Score**: 0.333"),
+        # NOT_GRADED was never measured, so it leaves the mean.
+        ("NOT_GRADED", "Avg Reliability Score**: 0.500"),
+    ],
+)
+def test_avg_reliability_score_counts_unscored_rows_as_zero(third_status: str, expected_line: str):
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 2, 0),
+        total_duration_seconds=120.0,
+        tasks_run=3,
+        tasks_succeeded=1,
+        tasks_failed=1,
+        tasks_error=1 if third_status == "ERROR" else 0,
+        tasks_not_graded=1 if third_status == "NOT_GRADED" else 0,
+        tasks_measured=2,
+        task_results=[
+            _make_task_result("task1", "SUCCESS", 1.0, 40.0),
+            _make_task_result("task2", "FAILURE", 0.0, 40.0),
+            _make_task_result("task3", third_status, None, 40.0),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    assert expected_line in ReportGenerator.generate_markdown(summary)
+
+
 def test_generate_markdown_backward_compatible_task_results():
     """Test that old-format task_results (without new fields) still render correctly."""
     summary = RunSummary(
