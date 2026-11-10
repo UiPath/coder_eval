@@ -553,8 +553,11 @@ Each harness finds the call boundary in its own stream (the table above):
   `error_max_turns` stop. The CLI does not apply it on every route, so the harness
   also counts distinct main-thread `message_id`s and ends the turn itself when call
   N+1 begins.
-- **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
-  tools finish. An item starts as its tool runs, so waiting for the next call's
+- **Codex** sends `thread/tokenUsage/updated` after a call's tools finish. Context
+  compaction also sends a zero-delta context-size estimate; that bookkeeping
+  update does not count as another call. The compaction model call itself counts,
+  unlike Claude Code's compaction, which emits no main-thread assistant message.
+  An item starts as its tool runs, so waiting for the next call's
   first item would let one tool of call N+1 act. A call that ran tools therefore
   opens the next call at its `tokenUsage`, since the results always go back to the
   model, and the cap fires before call N+1 can run anything.
