@@ -7,7 +7,7 @@ import {
 } from "@/app/_components/skeleton";
 
 // Fallback for the front page and, by nesting, for every route without a
-// closer one: /trends, /watchlist, /path-to-ga, /scribe and /runs/latest.
+// closer one: /trends, /watchlist, /path-to-ga, /series and /runs/latest.
 // Warm server time on those ranges from 3ms (/watchlist) to 2.3s
 // (/path-to-ga), and the slow ones are slow because they read run.json off the
 // Azure Files mount, which is worse in production than locally.

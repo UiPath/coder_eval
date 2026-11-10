@@ -58,15 +58,17 @@ describe("startFrontPageWarmer", () => {
         await vi.advanceTimersByTimeAsync(14_999);
         expect(fetchImpl).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1);
-        expect(fetchImpl).toHaveBeenCalledTimes(1);
-        expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:8080/");
+        expect(fetchImpl.mock.calls.map((c) => c[0])).toEqual([
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.1:8080/series",
+        ]);
         await vi.advanceTimersByTimeAsync(240_000);
-        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(fetchImpl).toHaveBeenCalledTimes(4);
         await vi.advanceTimersByTimeAsync(240_000);
-        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(fetchImpl).toHaveBeenCalledTimes(6);
         stop?.();
         await vi.advanceTimersByTimeAsync(600_000);
-        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(fetchImpl).toHaveBeenCalledTimes(6);
     });
 
     test("skips a round while the previous warm is still rendering", async () => {
@@ -84,8 +86,21 @@ describe("startFrontPageWarmer", () => {
         startFrontPageWarmer({ ...PROD, EVALBOARD_WARM_INTERVAL_SECONDS: "10" }, fetchImpl);
         await vi.advanceTimersByTimeAsync(15_000);
         await vi.advanceTimersByTimeAsync(10_000);
-        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(fetchImpl).toHaveBeenCalledTimes(4);
         expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("ECONNREFUSED"));
         expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("answered 500"));
+    });
+
+    test("a failure on one page does not stop the next from warming", async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+            .mockResolvedValue(new Response("", { status: 200 }));
+        startFrontPageWarmer({ ...PROD, PORT: "8080" }, fetchImpl);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(fetchImpl.mock.calls.map((c) => c[0])).toEqual([
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.1:8080/series",
+        ]);
     });
 });

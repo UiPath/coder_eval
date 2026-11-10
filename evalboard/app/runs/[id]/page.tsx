@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import {
@@ -12,7 +13,13 @@ import {
     readRunSummary,
     readRunTasks,
 } from "@/lib/runs";
-import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
+import {
+    indexByTask,
+    parseRunIdDate,
+    readRunReviewIndex,
+    tagCountsForRun,
+} from "@/lib/reviews";
+import { seriesForRun } from "@/lib/series";
 import { sourceById } from "@/lib/sources";
 import { scalarParam } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
@@ -78,6 +85,13 @@ export default async function RunPage({
     const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
     const human = fmtRunTime(id);
+    const series = isInternal
+        ? seriesForRun(source.id, {
+              series: meta?.series ?? null,
+              adhoc: meta?.adhoc ?? false,
+              dateShaped: parseRunIdDate(id) != null,
+          })
+        : null;
 
     return (
         <div className="space-y-5">
@@ -90,6 +104,14 @@ export default async function RunPage({
                         <span className="text-[10px] uppercase tracking-wide font-semibold text-amber-700 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5">
                             Ad-hoc
                         </span>
+                    )}
+                    {series && (
+                        <Link
+                            href={`/series/${series.key}`}
+                            className="text-xs text-studio-blue hover:underline"
+                        >
+                            {series.label} trend
+                        </Link>
                     )}
                     {/* Refresh re-pulls the run from blob storage — an
                         internal-hosting surface (the public OSS edition has no
