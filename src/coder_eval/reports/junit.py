@@ -25,7 +25,7 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Literal
+from typing import Any
 
 from ..evaluation.judge_context import truncate
 from ..models import FinalStatus, RunSummary, SuiteRollup
@@ -50,19 +50,6 @@ _KNOWN_STATUSES = frozenset(s.value for s in FinalStatus)
 def _xml_safe(text: str) -> str:
     """Strip characters outside XML 1.0's legal set (ET handles ``<>&`` itself)."""
     return _ILLEGAL_XML.sub("", text)
-
-
-def _category_of(status: str) -> Literal["succeeded", "failed", "error", "ungraded"]:
-    """Map a serialized status string to a reporting category via the SSOT.
-
-    Goes through ``FinalStatus(value).category`` (an explicit allowlist, CE018);
-    an unknown status value (older/newer schema) falls to the error bucket
-    explicitly rather than via a denylist.
-    """
-    try:
-        return FinalStatus(status).category
-    except ValueError:
-        return "error"
 
 
 def _set_counts(elem: ET.Element, cases: list[ET.Element]) -> None:
@@ -296,7 +283,7 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
             ET.SubElement(properties, "property", {"name": key, "value": _xml_safe(str(value))})
 
     status = _status_of(row)
-    category = _category_of(status)
+    category = FinalStatus.category_of(status)
     if category == "succeeded":
         return case
 

@@ -27,7 +27,7 @@ from ..models import (
     sum_costs,
 )
 from ..path_utils import TASK_JSON_FILENAME, build_task_run_dir
-from .junit import _category_of
+from ..result_metrics import measured_scores
 
 
 if TYPE_CHECKING:
@@ -471,19 +471,14 @@ class ReportGenerator:
         ]
 
         # Aggregate P0 metrics
-        # An unscored row that was not NOT_GRADED is a miss (0.0), as in VariantAggregate.average_score.
-        # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
-        scores = [
-            t["weighted_score"] if t.get("weighted_score") is not None else 0.0
-            for t in summary.task_results
-            if _category_of(t["status"]) != "ungraded"
-        ]
+        scores = measured_scores((t["status"], t.get("weighted_score")) for t in summary.task_results)
         durations = [t["duration"] for t in summary.task_results if t["duration"] > 0]
         similarities = [
             t["reference_similarity"] for t in summary.task_results if t.get("reference_similarity") is not None
         ]
 
-        if scores:
+        # Gated like the pass rate: a 0.000 beside "Pass Rate: n/a" would read as "scored zero".
+        if scores and not nothing_was_measured(not_graded=summary.tasks_not_graded, measured=summary.tasks_measured):
             lines.append(f"- **Avg Reliability Score**: {sum(scores) / len(scores):.3f}")
         if durations:
             # `duration` is END-TO-END (setup + agent + grading), so the label says so.
@@ -965,6 +960,9 @@ def _compute_suite_rollup(
     # Verdict evidence, distinct from `rows_graded` (a bucket complement): a
     # TIMEOUT counts as graded while no criterion ever ran on it.
     rows_measured = len(scored)
+    # Not yet `measured_scores`: an errored row still leaves this mean. A known gap, kept apart
+    # because closing it changes suite.json's `average_weighted_score`.
+    # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
     average_weighted_score = sum(scored) / len(scored) if scored else None
 
     # Per-criterion-type tallies (scores + errors) for the type-level summary.

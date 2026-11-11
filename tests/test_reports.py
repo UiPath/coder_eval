@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from coder_eval.models import RunSummary
+from coder_eval.models import FinalStatus, RunSummary
 from coder_eval.reports import ReportGenerator
 from tests._fixtures.report_snapshots import assert_matches_snapshot
 
@@ -291,6 +291,8 @@ def test_generate_markdown_with_null_scores():
     assert "task_error" in report_md
     assert "ERROR" in report_md
     assert "N/A" in report_md  # Should show N/A for null weighted_score
+    # A graded run whose only row errored was attempted and missed: it scores 0.0.
+    assert "- **Avg Reliability Score**: 0.000" in report_md
 
 
 def test_generate_markdown_no_similarity_column():
@@ -451,37 +453,58 @@ def test_generate_markdown_aggregate_metrics():
     assert "Avg End-to-end Latency**: 50.0s" in report_md
 
 
-@pytest.mark.parametrize(
-    ("third_status", "expected_line"),
-    [
-        # An unscored ERROR row is a miss, so it cannot lift the average above a clean run's.
-        ("ERROR", "Avg Reliability Score**: 0.333"),
-        # NOT_GRADED was never measured, so it leaves the mean.
-        ("NOT_GRADED", "Avg Reliability Score**: 0.500"),
-    ],
-)
-def test_avg_reliability_score_counts_unscored_rows_as_zero(third_status: str, expected_line: str):
-    summary = RunSummary(
+def _score_line_summary(rows: list[tuple[str, float | None]]) -> RunSummary:
+    """A RunSummary whose bucket counts and verdict evidence agree with ``rows``."""
+    categories = [FinalStatus.category_of(status) for status, _ in rows]
+    return RunSummary(
         run_id="test-run",
         start_time=datetime(2025, 10, 11, 12, 0, 0),
         end_time=datetime(2025, 10, 11, 12, 2, 0),
         total_duration_seconds=120.0,
-        tasks_run=3,
-        tasks_succeeded=1,
-        tasks_failed=1,
-        tasks_error=1 if third_status == "ERROR" else 0,
-        tasks_not_graded=1 if third_status == "NOT_GRADED" else 0,
-        tasks_measured=2,
-        task_results=[
-            _make_task_result("task1", "SUCCESS", 1.0, 40.0),
-            _make_task_result("task2", "FAILURE", 0.0, 40.0),
-            _make_task_result("task3", third_status, None, 40.0),
-        ],
+        tasks_run=len(rows),
+        tasks_succeeded=categories.count("succeeded"),
+        tasks_failed=categories.count("failed"),
+        tasks_error=categories.count("error"),
+        tasks_not_graded=categories.count("ungraded"),
+        tasks_measured=sum(1 for _, score in rows if score is not None),
+        task_results=[_make_task_result(f"task{i}", status, score, 40.0) for i, (status, score) in enumerate(rows)],
         framework_version="0.1.0",
         environment_info={},
     )
 
-    assert expected_line in ReportGenerator.generate_markdown(summary)
+
+_GRADED_ROWS: list[tuple[str, float | None]] = [("SUCCESS", 1.0), ("FAILURE", 0.0)]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_score"),
+    [
+        pytest.param([*_GRADED_ROWS, ("ERROR", None)], "0.333", id="error-counts-as-zero"),
+        pytest.param([*_GRADED_ROWS, ("TIMEOUT", None)], "0.333", id="unscored-timeout-counts-as-zero"),
+        pytest.param([*_GRADED_ROWS, ("NO_SUCH_STATUS", None)], "0.333", id="unknown-status-counts-as-zero"),
+        pytest.param([*_GRADED_ROWS, ("NOT_GRADED", None)], "0.500", id="not-graded-leaves-the-mean"),
+        pytest.param([("ERROR", None), ("ERROR", None)], "0.000", id="all-error-run-scores-zero"),
+        pytest.param([("NOT_GRADED", None), ("NOT_GRADED", None)], None, id="all-not-graded-run-has-no-score"),
+        pytest.param([("NOT_GRADED", None)] * 9 + [("ERROR", None)], None, id="execute-run-with-a-crash-has-no-score"),
+    ],
+)
+def test_avg_reliability_score_zeroes_unscored_rows_and_drops_ungraded(
+    rows: list[tuple[str, float | None]], expected_score: str | None
+):
+    report_md = ReportGenerator.generate_markdown(_score_line_summary(rows))
+
+    if expected_score is None:
+        assert "Avg Reliability Score" not in report_md
+    else:
+        assert f"- **Avg Reliability Score**: {expected_score}" in report_md
+
+
+def test_execute_run_with_a_crash_shows_no_score_beside_pass_rate_na():
+    """A 0.000 next to "Pass Rate: n/a" would read as "measured and scored zero"."""
+    report_md = ReportGenerator.generate_markdown(_score_line_summary([("NOT_GRADED", None)] * 9 + [("ERROR", None)]))
+
+    assert "- **Pass Rate**: n/a" in report_md
+    assert "Avg Reliability Score" not in report_md
 
 
 def test_generate_markdown_backward_compatible_task_results():
