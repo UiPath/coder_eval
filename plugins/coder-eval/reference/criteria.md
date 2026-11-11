@@ -70,7 +70,7 @@ Match a single label written by the agent to a file against ground truth.
 | --- | --- |
 | `path` | Path to the file (relative to sandbox) containing the agent's predicted label; may be a glob matching exactly one file |
 | `expected_label` | Ground-truth label for this row |
-| `allowed_labels` | Canonical label set. File content not in this set is treated as '(other)'. |
+| `allowed_labels` | Canonical label set. File content not in this set, or a file that cannot be read, is treated as '(other)'. |
 
 Optional:
 
