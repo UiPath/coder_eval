@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from coder_eval.criteria.classification_match import ClassificationMatchChecker
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.models import (
     AgentKind,
     ClassificationCriterionResult,
@@ -17,22 +18,27 @@ from coder_eval.models import (
     CriterionResult,
     EvaluationResult,
     FinalStatus,
+    SandboxConfig,
     TaskDefinition,
     TaskResult,
 )
 from coder_eval.reports.markdown import _compute_suite_rollup, _render_suite_markdown
+from coder_eval.sandbox import Sandbox
 
 
 class _FakeSandbox:
     """Minimal sandbox surface needed by ClassificationMatchChecker.get_file_content."""
 
-    def __init__(self, files: dict[str, str]):
+    def __init__(self, files: dict[str, str | Exception]):
         self._files = files
 
     def get_file_content(self, path: str) -> str:
         if path not in self._files:
             raise FileNotFoundError(path)
-        return self._files[path]
+        content = self._files[path]
+        if isinstance(content, Exception):
+            raise content
+        return content
 
 
 def _check(
@@ -40,7 +46,7 @@ def _check(
     path: str,
     expected_label: str,
     allowed_labels: list[str],
-    files: dict[str, str],
+    files: dict[str, str | Exception],
     case_sensitive: bool = False,
 ) -> ClassificationCriterionResult:
     crit = ClassificationMatchCriterion(
@@ -149,6 +155,65 @@ class TestClassificationMatchChecker:
         )
         assert result.score == 0.0
         assert result.observed_label == "(none)"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("Pattern 'out/*.txt' matches 2 files — refusing to guess which to grade"),
+            UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte"),
+            IsADirectoryError("result.txt"),
+            PermissionError("result.txt"),
+        ],
+    )
+    def test_unreadable_file_becomes_other_sentinel(self, error: Exception) -> None:
+        result = _check(
+            path="result.txt",
+            expected_label="positive",
+            allowed_labels=["positive", "negative"],
+            files={"result.txt": error},
+        )
+        assert result.score == 0.0
+        assert result.observed_label == "(other)"
+        assert result.error is not None
+        assert result.error.startswith(f"{type(error).__name__}: ")
+
+    def test_checker_misuse_still_escalates(self) -> None:
+        crit = ClassificationMatchCriterion(
+            description="label match",
+            path="../outside.txt",
+            expected_label="positive",
+            allowed_labels=["positive", "negative"],
+        )
+        sandbox = _FakeSandbox({"../outside.txt": CheckerMisuseError("path escapes the sandbox")})
+        with pytest.raises(CheckerMisuseError):
+            ClassificationMatchChecker().check(crit, sandbox)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("case", ["ambiguous_glob", "not_utf8", "directory"])
+    def test_unreadable_file_in_a_real_sandbox(self, tmp_path: Path, case: str) -> None:
+        work = tmp_path / "work"
+        (work / "out").mkdir(parents=True)
+        if case == "ambiguous_glob":
+            (work / "out" / "a.txt").write_text("positive")
+            (work / "out" / "b.txt").write_text("positive")
+        elif case == "not_utf8":
+            (work / "out" / "a.txt").write_bytes(b"\xff\xfe")
+        else:
+            (work / "out" / "a.txt").mkdir()
+        sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id="t")
+        sandbox.sandbox_dir = work
+        crit = ClassificationMatchCriterion(
+            description="label match",
+            path="out/*.txt" if case == "ambiguous_glob" else "out/a.txt",
+            expected_label="negative",
+            allowed_labels=["positive", "negative"],
+        )
+
+        result = ClassificationMatchChecker().check(crit, sandbox)
+
+        assert isinstance(result, ClassificationCriterionResult)
+        assert result.observed_label == "(other)"
+        assert result.score == 0.0
+        assert result.error is not None
 
 
 class TestClassificationMatchAggregate:
@@ -351,6 +416,23 @@ class TestSuiteRollupWithAggregate:
         assert by_metric["accuracy"].passed is True
         assert by_metric["recall.negative"].passed is False
         assert by_metric["recall.negative"].actual_value == pytest.approx(0.5)
+
+    def test_unreadable_row_counts_as_a_miss(self, tmp_path: Path) -> None:
+        crit = self._criterion(suite_thresholds={"accuracy": 0.9})
+        checker = ClassificationMatchChecker()
+        rows = self._mislabeled_rows()
+        unreadable = _FakeSandbox({"result.txt": ValueError("Pattern 'result.txt' matches 2 files")})
+        r3_crit = crit.model_copy(update={"expected_label": "negative"})
+        rows[2].result.success_criteria_results = [checker.check(r3_crit, unreadable)]  # type: ignore[arg-type]
+
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path, task_criteria=[crit])
+        agg = rollup.criterion_aggregates[0]
+        assert agg.metrics["accuracy"] == pytest.approx(2 / 3)
+        assert agg.details["total_pairs"] == 3
+        assert {"expected": "negative", "observed": "(other)", "count": 1} in agg.details["confusion"]
+        assert agg.passed is False
+        stats = next(cs for cs in rollup.criterion_stats if cs.criterion_type == "classification_match")
+        assert stats.error_count == 1
 
     def test_threshold_on_missing_metric_fails(self, tmp_path: Path) -> None:
         rows = self._mislabeled_rows()

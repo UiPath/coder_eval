@@ -987,8 +987,9 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     compares it to ``expected_label``. The observed label is the canonical form
     from ``allowed_labels`` when it matches; otherwise ``'(none)'`` when the
     file is missing / empty and ``'(other)'`` when the content is not in the
-    allowed set. Both are recorded as sentinels so the suite rollup can show
-    them as real failure classes in the confusion matrix.
+    allowed set or the file cannot be read. Both are recorded as sentinels
+    so the suite rollup can show them as real failure classes in the
+    confusion matrix.
 
     The checker returns a ``ClassificationCriterionResult`` (subclass of
     ``CriterionResult``) carrying observed + expected labels, which the
@@ -1015,7 +1016,9 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     expected_label: str = Field(description="Ground-truth label for this row")
     allowed_labels: list[str] = Field(
         min_length=1,
-        description="Canonical label set. File content not in this set is treated as '(other)'.",
+        description=(
+            "Canonical label set. File content not in this set, or a file that cannot be read, is treated as '(other)'."
+        ),
     )
     case_sensitive: bool = Field(
         default=False,
