@@ -18,6 +18,8 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, NamedTuple
 from urllib.parse import urlparse
 
+import tomli_w
+
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
@@ -81,8 +83,8 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
 # Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
 _CODEX_APPROVAL_MODE = "deny_all"
 
-# Provider id registered in thread config when CODEX_BASE_URL routes to a
-# custom endpoint.
+# Provider id selected on the app-server and the thread when CODEX_BASE_URL
+# routes to a custom endpoint.
 _CUSTOM_PROVIDER_ID = "custom"
 
 # apply_patch statuses meaning the patch did not apply. Used ONLY to classify the
@@ -386,6 +388,14 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supports the Responses API (it rejects `wire_api = "chat"` as "no longer
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
+
+
+def _toml_inline(value: str | dict[str, Any]) -> str:
+    """Render a string or a (nested) string table as one TOML inline value, for ``codex --config``."""
+    if isinstance(value, str):
+        return tomli_w.dumps({"v": value}).removeprefix("v = ").rstrip("\n")
+    return "{" + ", ".join(f"{_toml_inline(k)} = {_toml_inline(v)}" for k, v in value.items()) + "}"
+
 
 # Login-shell profiles generated into the per-task HOME. ``.bash_profile`` is
 # what ``bash -l`` reads and ``.profile`` covers sh/dash; the zsh trio covers
@@ -1068,9 +1078,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         try:
             from openai_codex import Codex, CodexConfig
 
-            # Build CodexConfig with environment variables for custom API configuration
             env_override = self._build_codex_env()
-            config = CodexConfig(env=env_override) if env_override else None
+            config_overrides = self._app_server_config_overrides()
+            config = (
+                CodexConfig(env=env_override, config_overrides=config_overrides)
+                if env_override or config_overrides
+                else None
+            )
 
             # Close any prior client FIRST: start() runs through
             # execute_with_retry, so a retried start would otherwise orphan the
@@ -1488,6 +1502,29 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         return os.getenv("CODEX_API_VERSION") or None
 
+    @staticmethod
+    def _custom_provider() -> dict[str, Any] | None:
+        """The CODEX_BASE_URL model provider definition, or None on the default endpoint.
+
+        The binary has no base-URL env var, so the provider is defined in config and
+        selected by id; ``env_key`` names the key's variable, so the key itself never
+        appears here. On Azure, CODEX_API_VERSION adds the required ``api-version`` query
+        param and CODEX_MODEL is the deployment name.
+        """
+        base_url = CodexAgent._resolve_base_url()
+        if not base_url:
+            return None
+        provider: dict[str, Any] = {
+            "name": "Custom",
+            "base_url": base_url,
+            "env_key": "CODEX_API_KEY",
+            "wire_api": _CODEX_WIRE_API,
+        }
+        api_version = CodexAgent._resolve_api_version()
+        if api_version:
+            provider["query_params"] = {"api-version": api_version}
+        return provider
+
     def _effective_model(self) -> str | None:
         """Resolve the model: task/CLI ``agent.model`` wins, else CODEX_MODEL.
 
@@ -1528,6 +1565,22 @@ class CodexAgent(Agent[CodexAgentConfig]):
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
         return env if env else None
+
+    def _app_server_config_overrides(self) -> tuple[str, ...]:
+        """``--config`` overrides that select the custom provider on the app-server itself.
+
+        openai-codex 0.167.x rejects ``turn/start`` (-32600) when only the thread names the
+        provider, so the app-server carries the same definition as the thread options.
+
+        Rationale: .claude/notes/agents.md § Codex custom provider on the app-server
+        """
+        provider = self._custom_provider()
+        if provider is None:
+            return ()
+        return (
+            f"model_provider={_toml_inline(_CUSTOM_PROVIDER_ID)}",
+            f"model_providers.{_CUSTOM_PROVIDER_ID}={_toml_inline(provider)}",
+        )
 
     @staticmethod
     def _login_shell_profiles_supported() -> bool:
@@ -1705,34 +1758,18 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 + "do not rely on it as a security boundary."
             )
 
-        # The codex binary has no base-URL env var: a model provider must be
-        # defined in config and selected, with env_key naming the key's variable.
-        # For Azure, CODEX_API_VERSION adds the required query param and
-        # CODEX_MODEL is the deployment name.
-        base_url = self._resolve_base_url()
-        if base_url:
+        provider = self._custom_provider()
+        if provider is not None:
             options["model_provider"] = _CUSTOM_PROVIDER_ID
             if not effective_model:
                 self._log.warning(
                     "CODEX_BASE_URL is set but no model resolved (agent.model / CODEX_MODEL) "
                     + "— the provider may reject the request."
                 )
-            provider: dict[str, Any] = {
-                "name": "Custom",
-                "base_url": base_url,
-                "env_key": "CODEX_API_KEY",
-                # Fixed, not configurable: the pinned binary rejects
-                # `wire_api = "chat"` as "no longer supported".
-                "wire_api": _CODEX_WIRE_API,
-            }
-            api_version = self._resolve_api_version()
-            if api_version:
-                # Azure requires ?api-version=... on every request.
-                provider["query_params"] = {"api-version": api_version}
             tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
             self._log.debug(
-                f"Codex routed via custom provider (host={urlparse(base_url).hostname or '(unknown)'}, "
-                + f"api_version={'set' if api_version else 'unset'})"
+                f"Codex routed via custom provider (host={urlparse(provider['base_url']).hostname or '(unknown)'}, "
+                + f"api_version={'set' if 'query_params' in provider else 'unset'})"
             )
 
         if self.config.context_window is not None:

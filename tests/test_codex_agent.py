@@ -5,6 +5,7 @@ The Codex SDK is an optional extra; this entire test module is skipped when
 it isn't installed, so `make test` / CI stay green without the extra.
 """
 
+import tomllib
 from datetime import datetime
 
 import pytest
@@ -252,6 +253,49 @@ class TestCodexEnvironmentConfiguration:
 
         assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
 
+    @pytest.mark.asyncio
+    async def test_start_passes_provider_overrides_to_codex_config(self, monkeypatch, tmp_path):
+        """A base URL alone (no key, no prepend) still builds a CodexConfig carrying the overrides."""
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
+        captured: dict = {}
+        monkeypatch.setattr(
+            openai_codex, "Codex", lambda **kw: captured.update(kw) or SimpleNamespace(close=lambda: None)
+        )
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        await agent.start(str(tmp_path))
+
+        config = captured["config"]
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.config_overrides == agent._app_server_config_overrides()
+        assert config.config_overrides
+        assert config.env is None
+
+    @pytest.mark.asyncio
+    async def test_start_default_endpoint_passes_no_config(self, monkeypatch, tmp_path):
+        """No base URL, no key, no prepend: the client starts with config=None, as before."""
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        captured: dict = {}
+        monkeypatch.setattr(
+            openai_codex, "Codex", lambda **kw: captured.update(kw) or SimpleNamespace(close=lambda: None)
+        )
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path))
+
+        assert captured["config"] is None
+
 
 class TestCustomProviderRouting:
     """Test that CODEX_BASE_URL injects a custom model provider."""
@@ -262,6 +306,7 @@ class TestCustomProviderRouting:
         opts = agent._build_thread_options()
         assert "model_provider" not in opts
         assert "model_providers" not in opts.get("config", {})
+        assert agent._app_server_config_overrides() == ()
 
     def test_base_url_injects_custom_provider(self, monkeypatch):
         monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
@@ -328,6 +373,48 @@ class TestCustomProviderRouting:
         provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
         assert "query_params" not in provider
         assert provider["wire_api"] == "responses"
+
+    @pytest.mark.parametrize("api_version", [None, "", "2025-04-01-preview"])
+    def test_app_server_overrides_match_thread_provider(self, monkeypatch, api_version):
+        """The app-server overrides select the same provider table the thread options carry."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_API_KEY", "test-key-not-in-argv")
+        if api_version is None:
+            monkeypatch.delenv("CODEX_API_VERSION", raising=False)
+        else:
+            monkeypatch.setenv("CODEX_API_VERSION", api_version)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        overrides = agent._app_server_config_overrides()
+
+        assert len(overrides) == 2
+        assert overrides[0] == 'model_provider="custom"'
+        assert overrides[1].startswith("model_providers.custom=")
+        table = tomllib.loads(overrides[1])["model_providers"]["custom"]
+        assert table == agent._build_thread_options()["config"]["model_providers"]["custom"]
+        assert not any("test-key-not-in-argv" in o for o in overrides)
+        if api_version:
+            assert table["query_params"] == {"api-version": "2025-04-01-preview"}
+            assert overrides[1] == (
+                'model_providers.custom={"name" = "Custom", '
+                + '"base_url" = "https://my-res.openai.azure.com/openai", '
+                + '"env_key" = "CODEX_API_KEY", "wire_api" = "responses", '
+                + '"query_params" = {"api-version" = "2025-04-01-preview"}}'
+            )
+        else:
+            assert "query_params" not in table
+
+    def test_app_server_overrides_escape_toml_specials(self, monkeypatch):
+        """Quotes, backslashes, DEL and newlines in the base URL round-trip on one line."""
+        base_url = 'https://gw.local/v1?x="q"\\b\x7f\n'
+        monkeypatch.setenv("CODEX_BASE_URL", base_url)
+        monkeypatch.delenv("CODEX_API_VERSION", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        overrides = agent._app_server_config_overrides()
+
+        assert tomllib.loads(overrides[1])["model_providers"]["custom"]["base_url"] == base_url
+        assert "\n" not in overrides[1]
 
 
 class TestCodexEnvironmentInfo:

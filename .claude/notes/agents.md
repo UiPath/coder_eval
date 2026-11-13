@@ -753,6 +753,30 @@ profiles and loses the prepend again. Nested zsh keeps it, because `ZDOTDIR` sta
 exported. No-op on Windows, where Codex shells through PowerShell (`-NoProfile`) or
 `cmd /c`, neither of which re-sources a profile chain.
 
+## Codex custom provider on the app-server
+
+With `CODEX_BASE_URL` set, openai-codex 0.167.0-0.167.2 rejects every turn with JSON-RPC
+`-32600 "This chat uses custom, but your current provider is openai"` when only the thread
+names the custom provider. The check is in the bundled `openai-codex-cli-bin` binary; the
+Python SDK surface (`CodexConfig.config_overrides`) is identical from 0.155.1 to 0.169.0.
+An offline probe against a local stub showed thread-only routing works on 0.156.1, 0.168.0
+and 0.169.0 and fails on 0.167.2; app-server plus thread works on all of them.
+
+`_custom_provider()` builds the provider once. The thread options embed it as before, and
+`start()` passes it to the app-server as two `--config` overrides (`model_provider` and the
+`model_providers.custom` inline table). Both seams are kept (PI decision D1): the thread
+seam is the tested production path, and both read the one helper. The TOML value is
+written with `tomli_w`, already a runtime dependency, with quoted keys, so `api-version`
+needs no bare-key rules and `"`, `\`, control characters and U+007F are escaped. `json.dumps`
+is not valid TOML for U+007F or surrogate escapes.
+
+The base URL is now on the app-server command line. It is not a secret and already
+travels in the thread-start payload; the key stays in the env (`env_key`), and a
+credential embedded in the URL is unsupported. CI runs only the lock-pinned binary, so a
+binary bump needs a manual live check: a fresh venv per version built with
+`uv pip install --no-config` (without it the repo's `[tool.uv]` override pins cli-bin
+0.156.1 for every version), then `tests/test_codex_provider_binary.py` and one real turn.
+
 ## Reaping the CLI harnesses
 
 `opencode run` leaves a local server child alive after the CLI exits, and it INHERITS the
