@@ -16,7 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app, run_helpers
-from coder_eval.errors import TurnTimeoutError
+from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     EvaluationResult,
@@ -51,7 +51,7 @@ TURNS = [
 
 
 class _SessionAgent(MockAgent):
-    """A ``MockAgent`` that remembers every prompt, and can time out or run out of turns on cue."""
+    """A ``MockAgent`` that records prompts and can crash, time out or exhaust turns on cue."""
 
     def __init__(
         self,
@@ -60,18 +60,24 @@ class _SessionAgent(MockAgent):
         time_out_on_call: int | None = None,
         exhaust_on_call: int | None = None,
         tokens_per_call: int = 0,
+        crash_once_on_call: int | None = None,
+        crash_message: str = "Agent crashed once",
     ) -> None:
         super().__init__(task, scenario="success")
         self.prompts: list[str] = []
         self._time_out_on_call = time_out_on_call
         self._exhaust_on_call = exhaust_on_call
         self._tokens_per_call = tokens_per_call
+        self._crash_once_on_call = crash_once_on_call
+        self._crash_message = crash_message
 
     async def communicate(self, user_input: str, **kwargs: Any) -> TurnRecord:
         self.prompts.append(user_input)
         call = len(self.prompts)
         if call == self._time_out_on_call:
             raise TurnTimeoutError(30.0, task_id=self.task.task_id, iteration=call)
+        if call == self._crash_once_on_call:
+            raise AgentCrashError(self._crash_message)
         turn = await super().communicate(user_input, **kwargs)
         if self._tokens_per_call:
             turn.token_usage = TokenUsage(
@@ -128,6 +134,27 @@ async def test_turns_reach_the_agent_verbatim_and_in_order_within_one_session(tm
     assert created[0].prompts == TURNS
     assert [turn.user_input for turn in result.iterations] == TURNS
     assert [turn.messages[0].text for turn in result.iterations] == TURNS
+
+
+async def test_business_text_on_failed_question_keeps_previous_answers_during_retry(tmp_path, monkeypatch):
+    created = _install_agent(
+        monkeypatch, crash_once_on_call=4, crash_message="The payment required for invoice 402 is $50."
+    )
+    monkeypatch.setattr("coder_eval.errors.executor.get_retry_delay", lambda *_: 0)
+    turns = [f"QUESTION_{i}" for i in range(1, 5)]
+    task = _task(
+        turns=turns,
+        run_limits=RunLimits(max_turn_retries=2),
+        sandbox=SandboxConfig(driver="tempdir", python=None, node=None),
+    )
+
+    result = await _run(tmp_path, task)
+
+    assert result.final_status == FinalStatus.SUCCESS
+    assert len(created) == 1
+    assert created[0].prompts == [*turns, turns[-1]]
+    assert [turn.user_input for turn in result.iterations] == turns
+    assert [turn.iteration for turn in result.iterations] == [1, 2, 3, 4]
 
 
 async def test_dataset_turns_reach_each_row_agent_after_substitution(tmp_path, monkeypatch):

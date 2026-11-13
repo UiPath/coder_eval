@@ -6,7 +6,9 @@ Tests error categorization, retry logic, exponential backoff, and error context 
 
 from unittest.mock import AsyncMock, patch
 
+import httpx2
 import pytest
+from anthropic import APIStatusError
 
 from coder_eval.errors import AgentConfigError, AgentCrashError, BudgetExceededError, EvaluationTimeoutError
 from coder_eval.errors.categories import ERROR_TIPS, RETRY_CONFIG, ErrorCategory, RetryConfig
@@ -117,7 +119,7 @@ class TestErrorCategory:
             ErrorCategory.AGENT_API_ERROR: (Exception("network connection error"), {"component": "agent"}),
             ErrorCategory.AGENT_RATE_LIMIT: (Exception("rate limit hit"), {}),
             ErrorCategory.AGENT_AUTH_ERROR: (Exception("authentication failed"), {}),
-            ErrorCategory.AGENT_BILLING_ERROR: (Exception("billing problem"), {}),
+            ErrorCategory.AGENT_BILLING_ERROR: (Exception("insufficient API credits on account"), {}),
             ErrorCategory.AGENT_CRASH: (AgentCrashError("unexpected exit"), {"component": "agent"}),
             ErrorCategory.AGENT_INVALID_OUTPUT: (Exception("content filter blocked"), {}),
             ErrorCategory.AGENT_CONFIG_ERROR: (AgentConfigError("missing prerequisite"), {}),
@@ -214,34 +216,51 @@ class TestCategorizeError:
         assert result == ErrorCategory.AGENT_CRASH
 
     @pytest.mark.parametrize(
-        "message, expected",
+        "message",
         [
-            # Typed-AgentCrashError fallback fires only when no message pattern matches.
-            ("Communication with agent failed: unexpected SDK error", ErrorCategory.AGENT_CRASH),
-            # Specific message patterns must win over the typed fallback so non-retryable
-            # categories (auth, billing, content-filter) don't burn the AGENT_CRASH retry budget.
-            (
-                "CLI process failed (exit code 1): authentication failed: invalid API key",
-                ErrorCategory.AGENT_AUTH_ERROR,
-            ),
-            (
-                "CLI process failed (exit code 1): Result[is_error=True]: rate limit exceeded",
-                ErrorCategory.AGENT_RATE_LIMIT,
-            ),
-            ("CLI process failed (exit code 1): insufficient credits on account", ErrorCategory.AGENT_BILLING_ERROR),
-            (
-                "Communication with agent failed: Bedrock guardrail intervened: content filtering policy",
-                ErrorCategory.AGENT_INVALID_OUTPUT,
-            ),
-            ("Communication with agent failed: invalid response format", ErrorCategory.AGENT_INVALID_OUTPUT),
+            "Employees have a spending limit of $402 per trip.",
+            "The invoice was invalid and required payment before approval.",
+            "API Error: Request rejected (429) · capacity unavailable",
+            "POST https://example.com/respond → 402 Payment Required",
+            "Bedrock guardrail intervened: content filtering policy",
         ],
     )
-    def test_categorize_agent_crash_routing(self, message, expected):
-        assert categorize_error(AgentCrashError(message), {"component": "agent"}) == expected
+    def test_unclassified_agent_crash_does_not_parse_business_or_provider_text(self, message):
+        for context in ({"component": "agent"}, {}):
+            category = categorize_error(AgentCrashError(message), context)
+            assert category is ErrorCategory.AGENT_CRASH
+            assert should_retry(category, 0)
 
-    def test_categorize_agent_crash_without_component_hint(self):
-        """The typed-AgentCrashError fallback also fires when no component is provided."""
-        assert categorize_error(AgentCrashError("anything"), {}) == ErrorCategory.AGENT_CRASH
+    @pytest.mark.parametrize(
+        "category",
+        [
+            ErrorCategory.AGENT_RATE_LIMIT,
+            ErrorCategory.AGENT_AUTH_ERROR,
+            ErrorCategory.AGENT_BILLING_ERROR,
+            ErrorCategory.AGENT_INVALID_OUTPUT,
+        ],
+    )
+    def test_adapter_category_wins_over_incidental_message(self, category):
+        error = AgentCrashError("Invalid invoice 402: payment, rate limit, memory", category=category)
+        assert categorize_error(error, {"component": "agent"}) is category
+        assert categorize_error(error, {}) is category
+        assert categorize_error(error, {}, hint=ErrorCategory.AGENT_TIMEOUT) is ErrorCategory.AGENT_TIMEOUT
+
+    @pytest.mark.parametrize(
+        ("status", "code", "expected"),
+        [
+            (402, None, ErrorCategory.AGENT_BILLING_ERROR),
+            (429, "insufficient_quota", ErrorCategory.AGENT_BILLING_ERROR),
+            (400, "billing_not_active", ErrorCategory.AGENT_BILLING_ERROR),
+            (429, None, ErrorCategory.AGENT_RATE_LIMIT),
+            (429, "server_error", ErrorCategory.AGENT_RATE_LIMIT),
+            (401, None, ErrorCategory.AGENT_AUTH_ERROR),
+        ],
+    )
+    def test_structured_provider_exception(self, status, code, expected):
+        response = httpx2.Response(status, request=httpx2.Request("POST", "https://provider.invalid/messages"))
+        provider = APIStatusError("Invoice payment is invalid", response=response, body={"error": {"code": code}})
+        assert categorize_error(provider, {"component": "agent"}) is expected
 
     def test_categorize_agent_config_error(self):
         """AgentConfigError → AGENT_CONFIG_ERROR via typed check."""
@@ -428,7 +447,7 @@ class TestCategorizeError:
             (MemoryError("oom"), {}, ErrorCategory.OUT_OF_MEMORY),
             # --- message-string group (component-agnostic patterns first) ---
             (Exception("Unauthorized request"), {}, ErrorCategory.AGENT_AUTH_ERROR),
-            (Exception("insufficient credit on account"), {}, ErrorCategory.AGENT_BILLING_ERROR),
+            (Exception("insufficient API credit on account"), {}, ErrorCategory.AGENT_BILLING_ERROR),
             (Exception("rate limit reached"), {}, ErrorCategory.AGENT_RATE_LIMIT),
             (Exception("blocked by content filter"), {}, ErrorCategory.AGENT_INVALID_OUTPUT),
             (Exception("connection refused"), {"component": "agent"}, ErrorCategory.AGENT_API_ERROR),

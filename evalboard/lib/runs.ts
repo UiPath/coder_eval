@@ -6,6 +6,7 @@ import {
     LOCAL_RUNS_DIR,
     ensureActivationSummary,
     ensureRunAnalysis,
+    ensureRunExperiment,
     ensureRunMeta,
     ensureRunSummary,
     ensureTaskDir,
@@ -2684,31 +2685,143 @@ export async function readRunAnalysis(
 // Optional, user-supplied at upload time. Null on pipeline runs and any run
 // uploaded before the feature — every consumer must treat null as "no
 // metadata" (title falls back to the run id, adhoc defaults false).
+//
+// `series` puts the run on a series' trend (lib/series.ts). `excluded` is a
+// reason string: the run stays in its series' run list but leaves every trend.
 export interface RunMeta {
     title: string | null;
     description: string | null;
     adhoc: boolean;
+    series: string | null;
+    excluded: string | null;
 }
 
 interface RawRunMeta {
     title?: string | null;
     description?: string | null;
     adhoc?: boolean;
+    series?: unknown;
+    excluded?: unknown;
+}
+
+const SERIES_KEY_RE = /^[\w.-]{1,64}$/;
+const EXCLUDED_MAX_CHARS = 500;
+
+export function parseSeriesKey(raw: unknown): string | null {
+    return typeof raw === "string" && SERIES_KEY_RE.test(raw) ? raw : null;
+}
+
+export function parseExcludedReason(raw: unknown): string | null {
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    return trimmed ? trimmed.slice(0, EXCLUDED_MAX_CHARS) : null;
 }
 
 export async function readRunMeta(
     runId: string,
     source: Source = DEFAULT_SOURCE,
+    refreshAfterMs?: number,
 ): Promise<RunMeta | null> {
     const dir = runsDirFor(RUNS_DIR, source);
-    await ensureRunMeta(source.container, runId, dir);
+    await ensureRunMeta(source.container, runId, dir, refreshAfterMs);
     const raw = await readJson<RawRunMeta>(path.join(dir, runId, "meta.json"));
     if (!raw) return null;
     return {
         title: raw.title ?? null,
         description: raw.description ?? null,
         adhoc: raw.adhoc === true,
+        series: parseSeriesKey(raw.series),
+        excluded: parseExcludedReason(raw.excluded),
     };
+}
+
+// ---------- experiment.json (per-arm aggregates) ----------
+
+export interface ExperimentArm {
+    variantId: string;
+    tasksRun: number;
+    tasksSucceeded: number;
+    tasksFailed: number;
+    tasksError: number;
+    // The pass-rate denominator; null when the file predates the field.
+    tasksGraded: number | null;
+    // 0-100. Null when nothing was graded.
+    passRate: number | null;
+    averageDuration: number | null;
+}
+
+export interface RunExperiment {
+    variantIds: string[];
+    arms: Record<string, ExperimentArm>;
+}
+
+interface RawVariantAggregate {
+    tasks_run?: unknown;
+    tasks_succeeded?: unknown;
+    tasks_failed?: unknown;
+    tasks_error?: unknown;
+    tasks_graded?: unknown;
+    pass_rate?: unknown;
+    average_duration?: unknown;
+}
+
+interface RawExperiment {
+    variant_ids?: unknown;
+    variant_aggregates?: Record<string, RawVariantAggregate> | null;
+}
+
+function finiteOrNull(v: unknown): number | null {
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+export function parseExperiment(raw: RawExperiment | null): RunExperiment | null {
+    const aggregates = raw?.variant_aggregates;
+    if (!aggregates || typeof aggregates !== "object") return null;
+    const declared = Array.isArray(raw?.variant_ids)
+        ? raw.variant_ids.filter((v): v is string => typeof v === "string")
+        : [];
+    const ids = [
+        ...declared.filter((id) => Object.hasOwn(aggregates, id)),
+        ...Object.keys(aggregates).filter((id) => !declared.includes(id)),
+    ].filter(isValidVariantId);
+    if (ids.length === 0) return null;
+    const arms: Record<string, ExperimentArm> = {};
+    for (const id of ids) {
+        const a = aggregates[id] ?? {};
+        const tasksSucceeded = finiteOrNull(a.tasks_succeeded) ?? 0;
+        const tasksGraded = finiteOrNull(a.tasks_graded);
+        const reported = finiteOrNull(a.pass_rate);
+        // An explicit null means no row produced a verdict; only a file that
+        // predates the field gets a rate derived from the counts.
+        const passRate =
+            reported != null
+                ? reported * 100
+                : !("pass_rate" in a) && tasksGraded
+                  ? (tasksSucceeded / tasksGraded) * 100
+                  : null;
+        arms[id] = {
+            variantId: id,
+            tasksRun: finiteOrNull(a.tasks_run) ?? 0,
+            tasksSucceeded,
+            tasksFailed: finiteOrNull(a.tasks_failed) ?? 0,
+            tasksError: finiteOrNull(a.tasks_error) ?? 0,
+            tasksGraded,
+            passRate,
+            averageDuration: finiteOrNull(a.average_duration),
+        };
+    }
+    return { variantIds: ids, arms };
+}
+
+export async function readRunExperiment(
+    runId: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RunExperiment | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunExperiment(source.container, runId, dir);
+    return parseExperiment(
+        await readJson<RawExperiment>(path.join(dir, runId, "experiment.json")),
+    );
 }
 
 export async function readLogTail(

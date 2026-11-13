@@ -17,3 +17,21 @@ export async function mapWithConcurrency<T, U>(
     );
     return out;
 }
+
+export function createLimiter(
+    limit: number,
+): <T>(fn: () => Promise<T>) => Promise<T> {
+    let active = 0;
+    const waiting: (() => void)[] = [];
+    return async (fn) => {
+        if (active < limit) active++;
+        else await new Promise<void>((resolve) => waiting.push(resolve));
+        try {
+            return await fn();
+        } finally {
+            const next = waiting.shift();
+            if (next) next();
+            else active--;
+        }
+    };
+}

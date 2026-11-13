@@ -2,6 +2,7 @@
 const DEFAULT_INTERVAL_SECONDS = 240;
 const FIRST_WARM_DELAY_MS = 15_000;
 const WARM_TIMEOUT_MS = 120_000;
+const WARM_PATHS = ["/", "/series"];
 
 type Env = Record<string, string | undefined>;
 
@@ -28,11 +29,10 @@ export function startFrontPageWarmer(
 ): (() => void) | null {
     const interval = warmIntervalMs(env);
     if (interval === null) return null;
-    const url = warmUrl(env);
+    const base = warmUrl(env);
     let inFlight = false;
-    const warm = async () => {
-        if (inFlight) return;
-        inFlight = true;
+    const warmOne = async (path: string) => {
+        const url = new URL(path, base).toString();
         try {
             const res = await fetchImpl(url, {
                 cache: "no-store",
@@ -42,6 +42,13 @@ export function startFrontPageWarmer(
             if (!res.ok) console.warn(`evalboard warm: ${url} answered ${res.status}`);
         } catch (err) {
             console.warn(`evalboard warm: ${url} failed: ${String(err)}`);
+        }
+    };
+    const warm = async () => {
+        if (inFlight) return;
+        inFlight = true;
+        try {
+            for (const path of WARM_PATHS) await warmOne(path);
         } finally {
             inFlight = false;
         }
