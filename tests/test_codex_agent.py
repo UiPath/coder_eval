@@ -7,6 +7,7 @@ it isn't installed, so `make test` / CI stay green without the extra.
 
 import tomllib
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +21,7 @@ from coder_eval.agents.codex_agent import (
     _CODEX_APPROVAL_MODE,
     CodexAgent,
 )
+from coder_eval.errors import AgentConfigError
 from coder_eval.models import AgentConfig, AgentKind, AssistantMessage, ReconciliationMessage, parse_agent_config
 
 
@@ -291,17 +293,53 @@ class TestCodexEnvironmentConfiguration:
 
         config = codex_spy.config
         assert isinstance(config, openai_codex.CodexConfig)
+        assert config.config_overrides[0] == 'model_provider="custom"'
         assert config.config_overrides == agent._app_server_config_overrides()
-        assert config.config_overrides
         assert config.env is None
 
     @pytest.mark.asyncio
-    async def test_start_default_endpoint_passes_no_config(self, tmp_path, codex_spy):
-        """No base URL, no key, no prepend: the client starts with config=None."""
+    async def test_start_azure_shape_carries_key_env_and_overrides(self, monkeypatch, tmp_path, codex_spy):
+        """Key and base URL together: the CodexConfig carries both the key env and the provider overrides."""
+        import openai_codex
+
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai/v1")
+        monkeypatch.setenv("CODEX_API_VERSION", "2025-04-01-preview")
+        monkeypatch.setenv("CODEX_API_KEY", "test-key-not-in-argv")
+        monkeypatch.setattr(CodexAgent, "_run_async", AsyncMock())
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        await agent.start(str(tmp_path))
+
+        config = codex_spy.config
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.env is not None
+        assert config.env["CODEX_API_KEY"] == "test-key-not-in-argv"
+        assert config.config_overrides == agent._app_server_config_overrides()
+        assert "api-version" in config.config_overrides[1]
+
+    @pytest.mark.asyncio
+    async def test_start_default_endpoint_passes_empty_config(self, tmp_path, codex_spy):
+        """No base URL, no key, no prepend: the client config carries no env and no overrides."""
+        import openai_codex
+
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         await agent.start(str(tmp_path))
 
-        assert codex_spy.config is None
+        config = codex_spy.config
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.env is None
+        assert config.config_overrides == ()
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_credential_in_base_url_before_spawning(self, monkeypatch, tmp_path, codex_spy):
+        """A credential in CODEX_BASE_URL fails start() with a non-retryable config error; no app-server starts."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://user:s3cret-pw@gw.local/v1")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        with pytest.raises(AgentConfigError):
+            await agent.start(str(tmp_path))
+
+        assert codex_spy.config == "never constructed"
 
 
 class TestCustomProviderRouting:
@@ -424,26 +462,25 @@ class TestCustomProviderRouting:
         assert "\n" not in overrides[1]
 
     @pytest.mark.parametrize(
-        ("base_url", "warns"),
+        ("base_url", "reason"),
         [
-            ("https://user:s3cret-pw@gw.local/v1", True),
-            ("https://token-only@gw.local/v1", True),
-            ("https://gw.local/v1", False),
-            ("http://[::1/v1", False),
+            ("https://user:s3cret-pw@gw.local/v1", "embeds a credential"),
+            ("https://token-only@gw.local/v1", "embeds a credential"),
+            ("http://u:s3cret-pw@[::1/v1", "not a valid URL"),
         ],
     )
-    def test_credential_in_base_url_warns_without_echoing_it(self, monkeypatch, caplog, base_url, warns):
-        """Userinfo in CODEX_BASE_URL logs a warning that names neither the URL nor the credential."""
+    def test_unsafe_base_url_raises_without_echoing_it(self, monkeypatch, base_url, reason):
+        """Userinfo or an unparseable CODEX_BASE_URL raises a config error naming neither the URL nor the credential."""
         monkeypatch.setenv("CODEX_BASE_URL", base_url)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
 
-        with caplog.at_level("WARNING", logger="coder_eval.agents.codex_agent"):
-            overrides = agent._app_server_config_overrides()
+        with pytest.raises(AgentConfigError, match=reason) as exc_info:
+            agent._app_server_config_overrides()
 
-        assert len(overrides) == 2
-        warnings = [r.getMessage() for r in caplog.records if "embeds a credential" in r.getMessage()]
-        assert bool(warnings) is warns
-        assert not any("s3cret-pw" in w or "gw.local" in w for w in warnings)
+        message = str(exc_info.value)
+        assert "s3cret-pw" not in message
+        assert "gw.local" not in message
+        assert exc_info.value.__cause__ is None
 
 
 class TestCodexEnvironmentInfo:

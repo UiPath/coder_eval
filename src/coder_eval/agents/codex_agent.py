@@ -26,6 +26,7 @@ from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
 from coder_eval.errors import (
+    AgentConfigError,
     AgentCrashError,
     TurnTimeoutError,
     truncate_crash_message,
@@ -399,13 +400,20 @@ def _toml_inline(value: _TomlValue) -> str:
     return "{" + ", ".join(f"{_toml_inline(k)} = {_toml_inline(v)}" for k, v in value.items()) + "}"
 
 
-def _url_has_userinfo(url: str) -> bool:
-    """Whether ``url`` carries a username or password; False for a URL that does not parse."""
+def _require_credential_free_base_url(url: str) -> None:
+    """Raise ``AgentConfigError`` when CODEX_BASE_URL does not parse or embeds a credential.
+
+    The message names the variable, never its value: the URL goes on the app-server command line.
+    """
     try:
         parts = urlsplit(url)
     except ValueError:
-        return False
-    return parts.username is not None or parts.password is not None
+        raise AgentConfigError("CODEX_BASE_URL is not a valid URL.") from None
+    if parts.username is not None or parts.password is not None:
+        raise AgentConfigError(
+            "CODEX_BASE_URL embeds a credential, which would be visible on the codex app-server "
+            + "command line; put the key only in CODEX_API_KEY."
+        )
 
 
 # Login-shell profiles generated into the per-task HOME. ``.bash_profile`` is
@@ -1085,17 +1093,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._env_path_prepend = list(env_path_prepend or [])
         self._setup_login_shell_home()
         self._state = AgentState.WORKING
+        config_overrides = self._app_server_config_overrides()
 
         try:
             from openai_codex import Codex, CodexConfig
 
-            env_override = self._build_codex_env()
-            config_overrides = self._app_server_config_overrides()
-            config = (
-                CodexConfig(env=env_override, config_overrides=config_overrides)
-                if env_override or config_overrides
-                else None
-            )
+            config = CodexConfig(env=self._build_codex_env(), config_overrides=config_overrides)
 
             # Close any prior client FIRST: start() runs through
             # execute_with_retry, so a retried start would otherwise orphan the
@@ -1520,17 +1523,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
         The binary has no base-URL env var, so the provider is defined in config and
         selected by id; ``env_key`` names the key's variable, so the key itself never
         appears here. On Azure, CODEX_API_VERSION adds the required ``api-version`` query
-        param and CODEX_MODEL is the deployment name. A credential embedded in the URL
-        logs a warning, because the URL reaches the app-server command line.
+        param and CODEX_MODEL is the deployment name.
         """
         base_url = CodexAgent._resolve_base_url()
         if not base_url:
             return None
-        if _url_has_userinfo(base_url):
-            logger.warning(
-                "CODEX_BASE_URL embeds a credential, which is visible on the codex app-server "
-                + "command line; put the key only in CODEX_API_KEY."
-            )
         provider: dict[str, _TomlValue] = {
             "name": "Custom",
             "base_url": base_url,
@@ -1587,11 +1584,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         The definition is the one the thread options carry; empty on the default endpoint.
 
+        Raises:
+            AgentConfigError: CODEX_BASE_URL does not parse or embeds a credential.
+
         Rationale: .claude/notes/agents.md § Codex custom provider on the app-server
         """
         provider = self._custom_provider()
         if provider is None:
             return ()
+        _require_credential_free_base_url(str(provider["base_url"]))
         return (
             f"model_provider={_toml_inline(_CUSTOM_PROVIDER_ID)}",
             f"model_providers.{_CUSTOM_PROVIDER_ID}={_toml_inline(provider)}",
@@ -1782,9 +1783,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     + "— the provider may reject the request."
                 )
             tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
-            host = urlparse(self._resolve_base_url() or "").hostname or "(unknown)"
-            api_version = "set" if self._resolve_api_version() else "unset"
-            self._log.debug(f"Codex routed via custom provider (host={host}, api_version={api_version})")
+            host = urlparse(str(provider["base_url"])).hostname or "(unknown)"
+            api_version_state = "set" if "query_params" in provider else "unset"
+            self._log.debug(f"Codex routed via custom provider (host={host}, api_version={api_version_state})")
 
         if self.config.context_window is not None:
             # Codex then auto-compacts at 90% of this window.

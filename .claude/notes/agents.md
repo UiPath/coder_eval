@@ -773,8 +773,10 @@ are escaped. `json.dumps` is not valid TOML for U+007F or surrogate escapes. The
 
 The base URL is on the app-server command line. It is not a secret and also travels in the
 thread-start payload; the key stays in the env (`env_key`). A credential embedded in the URL
-is unsupported: `_custom_provider()` logs a warning that names neither the URL nor the
-credential, and does not raise, so the run continues. CI runs only the lock-pinned binary,
+or a URL that does not parse fails `start()` with a non-retryable `AgentConfigError`
+before the app-server spawns, because the URL would go on its command line (visible in
+`ps` and `/proc/<pid>/cmdline`). The message names the variable, never the value. A warning
+was rejected: it leaves the credential on argv. CI runs only the lock-pinned binary,
 so a binary bump needs a manual live check: a fresh venv per version built with
 `uv pip install --no-config` (without it the repo's `[tool.uv]` override pins cli-bin
 0.156.1 for every version), then `tests/test_codex_provider_binary.py` and one real turn.
