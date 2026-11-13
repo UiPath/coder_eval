@@ -255,8 +255,8 @@ retried itself; filled by the codex adapter, empty on other backends), `crashed`
 resolved inference-profile id (e.g. `eu.anthropic.claude-sonnet-5`), and the SDK's alias
 stays on each `messages[].model`. On every other route it is the id the agent reports.
 `EvaluationResult.model_used` takes the last iteration's value, else the configured
-model unresolved. Strip the region and `anthropic.` prefixes before you group rows by
-model.
+model unresolved. Strip the region and `anthropic.` prefixes and any Bedrock version suffix
+(`-v1:0`) before you group rows by model.
 
 `record_kind` records producer provenance: `agent` for collected agent attempts and
 `standalone_user` for an unconsumed simulator utterance preserved by the dialog driver.
