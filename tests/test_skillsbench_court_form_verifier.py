@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import re
+import tomllib
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -11,7 +13,8 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
 
 
-_TASK_DIR = Path(__file__).resolve().parents[1] / "tasks" / "samples" / "skillsbench" / "court-form-filling"
+_REPO = Path(__file__).resolve().parents[1]
+_TASK_DIR = _REPO / "tasks" / "samples" / "skillsbench" / "court-form-filling"
 _BLANK_PDF = _TASK_DIR / "environment" / "sc100-blank.pdf"
 _SPEC = importlib.util.spec_from_file_location("court_form_verifier", _TASK_DIR / "verifier" / "test_outputs.py")
 assert _SPEC is not None and _SPEC.loader is not None
@@ -88,7 +91,7 @@ def test_expected_fields_exist_in_shipped_pdf() -> None:
         assert all(field["/FT"] == "/Btn" for field in matches), pattern
 
 
-def test_correct_pdf_field_roundtrip_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_correct_pdf_field_roundtrip_passes(tmp_path: Path) -> None:
     reader = PdfReader(_BLANK_PDF)
     fields = reader.get_fields()
     assert fields is not None
@@ -102,9 +105,8 @@ def test_correct_pdf_field_roundtrip_passes(tmp_path: Path, monkeypatch: pytest.
     writer = PdfWriter(clone_from=reader)
     writer.update_page_form_field_values(list(writer.pages), values, auto_regenerate=False)
     writer.write(output)
-    monkeypatch.setattr(_VERIFIER, "OUTPUT_FILE", output)
-    checkboxes = _VERIFIER.checkbox_data.__wrapped__()
-    field_values = _VERIFIER.pdf_field_values.__wrapped__()
+    checkboxes = _VERIFIER.extract_checkbox_values(output)
+    field_values = _VERIFIER.extract_field_values(output)
     for case in _VERIFIER.REQUIRED_CHECKBOXES:
         _VERIFIER.TestCheckboxes().test_checkbox_value(checkboxes, *case)
     for case in _VERIFIER.UNCHECKED_CHECKBOXES:
@@ -120,13 +122,12 @@ def test_blank_pdf_required_checkboxes_fail() -> None:
             _VERIFIER.TestCheckboxes().test_checkbox_value(checkboxes, *case)
 
 
-def test_pdf_without_form_fields_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pdf_without_form_fields_fails(tmp_path: Path) -> None:
     output = tmp_path / "no-form.pdf"
     writer = PdfWriter()
     writer.add_blank_page(width=612, height=792)
     writer.write(output)
-    monkeypatch.setattr(_VERIFIER, "OUTPUT_FILE", output)
-    values = _VERIFIER.pdf_field_values.__wrapped__()
+    values = _VERIFIER.extract_field_values(output)
     assert values == {}
     for case in _VERIFIER.EMPTY_FIELDS:
         with pytest.raises(AssertionError, match="not found"):
@@ -144,6 +145,17 @@ def test_field_extraction_preserves_dereference_error(monkeypatch: pytest.Monkey
     value = Mock()
     value.get_object.side_effect = RuntimeError("broken field reference")
     monkeypatch.setattr("pypdf.PdfReader", Mock(return_value=Mock(get_fields=lambda: {"field": {"/V": value}})))
-    monkeypatch.setattr(_VERIFIER, "OUTPUT_FILE", _BLANK_PDF)
     with pytest.raises(RuntimeError, match="broken field reference"):
-        _VERIFIER.pdf_field_values.__wrapped__()
+        _VERIFIER.extract_field_values(_BLANK_PDF)
+
+
+def test_dockerfile_pypdf_pin_matches_dev_pin() -> None:
+    """The regression tests above only vouch for the pypdf the verifier image installs."""
+    dev = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["optional-dependencies"][
+        "dev"
+    ]
+    dev_pins = [re.fullmatch(r"pypdf(?:\[[^]]*\])?==(\S+)", dep) for dep in dev]
+    dockerfile_pins = re.findall(
+        r"\bpypdf==(\S+)", (_TASK_DIR / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    )
+    assert [m.group(1) for m in dev_pins if m] == dockerfile_pins

@@ -16,7 +16,10 @@ coder_eval task wiring were added locally, along with two verifier patches:
   remain blank are missing (issue #234). Its blank-field checks also replace
   a nonexistent county field with the omitted third trial court address field.
   AcroForm read and field dereference errors propagate to the test runner.
-  Its environment pins pypdf 6.21.4 (upstream 5.1.0) to remove known advisories.
+  Its environment pins pypdf 7.0.1 (upstream 5.1.0) and cryptography 50.0.2
+  (upstream 43.0.3) to pick up their security fixes. It keeps upstream's
+  `PyPDF2==3.0.1`, the final release of that deprecated package, which has
+  known advisories with no fixed version.
 
 The `dialogue-parser` verifier is unchanged and takes part of its ground truth
 from the agent-writable `/app/script.txt`. The `court-form-filling` verifier

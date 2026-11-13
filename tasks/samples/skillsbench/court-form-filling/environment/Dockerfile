@@ -11,12 +11,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
-        pypdf==6.21.4 \
+        pypdf==7.0.1 \
         fillpdf==0.7.3 \
         pdfrw==0.4 \
         PyPDF2==3.0.1 \
         reportlab==4.2.5 \
-        cryptography==43.0.3 \
+        cryptography==50.0.2 \
         pytest==8.4.1 \
         pytest-json-ctrf==0.3.5
 

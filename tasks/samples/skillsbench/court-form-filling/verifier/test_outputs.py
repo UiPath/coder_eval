@@ -1,4 +1,4 @@
-# Modified from benchflow-ai/skillsbench@95b3e60: require form fields and preserve AcroForm read and field dereference errors (issue #234).
+# Modified from benchflow-ai/skillsbench@95b3e60: require form fields, preserve AcroForm read and field dereference errors, and expose extract_field_values (issue #234).
 """
 Tests for court-form-filling task (SC-100 Small Claims Court form).
 
@@ -332,12 +332,17 @@ def checkbox_data():
 @pytest.fixture(scope="module")
 def pdf_field_values():
     """Extract all field values from the filled PDF using pypdf."""
-    from pypdf import PdfReader
-
     if not OUTPUT_FILE.exists():
         pytest.fail(f"Output file not found at {OUTPUT_FILE}")
 
-    reader = PdfReader(str(OUTPUT_FILE))
+    return extract_field_values(OUTPUT_FILE)
+
+
+def extract_field_values(pdf_path: Path) -> dict:
+    """Return every AcroForm field value as a string ("" when unset)."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(pdf_path))
     fields = reader.get_fields() or {}
 
     field_values = {}
