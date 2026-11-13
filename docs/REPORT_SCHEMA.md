@@ -71,6 +71,8 @@ publishing different numbers for the same run.
 | `tasks_cost_incomplete` | `int` | Rows whose recorded spend is missing money (unpriced model, or a hard kill that lost an in-flight turn). |
 | `cost_complete` | `bool` | `tasks_cost_incomplete == 0`. When false, every cost figure above is a **floor**, not the bill. A run is never failed for this — see [Missing cost is never fatal](#missing-cost-is-never-fatal). |
 
+run.md's **Avg Reliability Score** is not stored in `run.json`. It is the mean `weighted_score` over every row except `NOT_GRADED` ones, and a row with no score (`ERROR`, `BUILD_FAILED`, an unscored `TIMEOUT`) counts as `0.0`: the same rule as `VariantAggregate.average_score`. It is left out when no row produced a verdict, as `pass_rate` is.
+
 ### `task_results[]` — the flat per-task row
 
 Each entry is an **untyped dict** (a denormalization, not a Pydantic model) with keys

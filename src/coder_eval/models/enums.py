@@ -25,6 +25,18 @@ class FinalStatus(StrEnum):
         """Classify this status into a reporting category (the SSOT for failed/succeeded/error)."""
         return _STATUS_CATEGORIES[self]
 
+    @classmethod
+    def category_of(cls, status: str) -> Literal["succeeded", "failed", "error", "ungraded"]:
+        """``category`` of a serialized status string, as read back from ``run.json``.
+
+        An unknown value (an older or newer schema) counts as ``error``: it is
+        classified explicitly rather than slipping past a denylist (CE018).
+        """
+        try:
+            return cls(status).category
+        except ValueError:
+            return "error"
+
     @property
     def icon(self) -> str:
         """Single-character icon for reports and CLI output."""

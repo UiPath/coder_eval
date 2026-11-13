@@ -39,6 +39,7 @@ from ..models import (
     apply_prompt_mutations,
 )
 from ..path_utils import resolve_dir_template
+from ..result_metrics import measured_scores
 from .config import BatchRunConfig
 from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
 from .task_loader import (
@@ -798,26 +799,9 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
 
 
 def _measured_scores(rows: Sequence[VariantResult] | Sequence[TaskResult]) -> list[float]:
-    """The scores of every row that was actually GRADED, errors included as 0.0.
-
-    The filter is on ``final_status.category``, deliberately not on
-    ``weighted_score is not None``. Those look equivalent and are not: an
-    ERROR / BUILD_FAILED row also has no score, and dropping it removes it from
-    BOTH sides of the mean. A nightly where one image build failed would then
-    report a HIGHER headline score than a clean one, and A/B comparisons would
-    be biased toward whichever variant errored more — the exact "bonus for
-    erroring" the run-level rates are written to avoid.
-
-    Only ``ungraded`` rows leave both sides: nothing measured them, so they are
-    not a miss. Everything else that ran and produced no score IS a miss.
-    """
-    scores: list[float] = []
-    for row in rows:
-        result = row if isinstance(row, VariantResult) else row.result
-        if result.final_status.category == "ungraded":
-            continue
-        scores.append(result.weighted_score if result.weighted_score is not None else 0.0)
-    return scores
+    """``result_metrics.measured_scores`` over typed rows: errors count as 0.0, ungraded rows leave."""
+    results = [row if isinstance(row, VariantResult) else row.result for row in rows]
+    return measured_scores((r.final_status, r.weighted_score) for r in results)
 
 
 def _mean_graded_score(vr_list: list[VariantResult]) -> float | None:

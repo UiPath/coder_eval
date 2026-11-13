@@ -17,7 +17,7 @@ import math
 from collections.abc import Iterable
 from typing import NamedTuple
 
-from coder_eval.models import AssistantMessage, EvaluationResult, TurnRecord
+from coder_eval.models import AssistantMessage, EvaluationResult, FinalStatus, TurnRecord
 from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
@@ -115,6 +115,23 @@ def agent_wall_ms(result: EvaluationResult) -> float | None:
         if isinstance(t.duration_seconds, (int, float)) and math.isfinite(t.duration_seconds) and t.duration_seconds > 0
     ]
     return sum(seconds) * 1000.0 if seconds else None
+
+
+def measured_scores(rows: Iterable[tuple[str, float | None]]) -> list[float]:
+    """The scores a headline mean is taken over, from ``(status, weighted_score)`` pairs.
+
+    Filters on the status category, not on ``weighted_score is not None``. An
+    ``ungraded`` row was never measured, so it leaves both sides of the mean.
+    Any other row without a score (ERROR, BUILD_FAILED, an unscored TIMEOUT) was
+    attempted and missed, so it counts as ``0.0`` -- dropping it would let a run
+    report a higher mean for having errored. ``status`` may be a ``FinalStatus``
+    or a serialized string; an unknown string counts as ``error``.
+
+    Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
+    """
+    return [
+        score if score is not None else 0.0 for status, score in rows if FinalStatus.category_of(status) != "ungraded"
+    ]
 
 
 def _sum_measured(values: Iterable[float | None]) -> float | None:

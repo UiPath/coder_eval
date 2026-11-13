@@ -933,6 +933,18 @@ Ungraded replicates — and ONLY those — drop out of a mean entirely: `or 0.0`
 a clean `execute` run down to a real-looking zero, while dropping an ERRORED one would pay
 it a bonus.
 
+The rule lives once, in `result_metrics.measured_scores`, read by `VariantAggregate.average_score`
+and run.md's Avg Reliability Score. run.md also hides that score whenever `nothing_was_measured`
+holds, as the pass rate beside it does. Two known gaps remain. Closing either one changes a
+serialized field that downstream consumers read, so each is a separate change:
+
+- `SuiteRollup.average_weighted_score` (suite.json) still averages scored rows only, so an
+  errored row leaves it.
+- `aggregate_results` counts `VariantAggregate.tasks_measured` after `_fold_replicates` has
+  turned an errored replicate's missing score into 0.0, so an `execute` run with a crash
+  reports `pass_rate` 0.0 and `average_score` 0.0 in experiment.json where run.json reports
+  `None`.
+
 Only graded variants can win or set a spread; including ungraded ones at 0.0 would name an
 arbitrary "best" among scores that do not exist. When NOTHING was scored there is no
 winner, and the fallback must not invent one — `variants[0]` is whichever arm the input
