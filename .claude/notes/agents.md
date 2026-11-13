@@ -753,6 +753,34 @@ profiles and loses the prepend again. Nested zsh keeps it, because `ZDOTDIR` sta
 exported. No-op on Windows, where Codex shells through PowerShell (`-NoProfile`) or
 `cmd /c`, neither of which re-sources a profile chain.
 
+## Codex custom provider on the app-server
+
+With `CODEX_BASE_URL` set, openai-codex 0.167.0-0.167.2 rejects every turn with JSON-RPC
+`-32600 "This chat uses custom, but your current provider is openai"` when only the thread
+names the custom provider. The check is in the bundled `openai-codex-cli-bin` binary; the
+Python SDK surface (`CodexConfig.config_overrides`) is identical from 0.155.1 to 0.169.0.
+An offline probe against a local stub showed thread-only routing works on 0.156.1, 0.168.0
+and 0.169.0 and fails on 0.167.2; app-server plus thread works on all of them.
+
+`_custom_provider()` builds the provider once. The thread options embed it, and `start()`
+passes it to the app-server as two `--config` overrides (`model_provider` and the
+`model_providers.custom` inline table). Both seams select the provider: the thread seam is
+the path that every other binary version accepts, and both read the one helper, so they
+cannot disagree. The TOML value is written with `tomli_w`, a runtime dependency, with quoted
+keys, so `api-version` needs no bare-key rules and `"`, `\`, control characters and U+007F
+are escaped. `json.dumps` is not valid TOML for U+007F or surrogate escapes. The
+`_TomlValue` alias admits only string leaves, because `_toml_inline` renders only those.
+
+The base URL is on the app-server command line. It is not a secret and also travels in the
+thread-start payload; the key stays in the env (`env_key`). A credential embedded in the URL
+or a URL that does not parse fails `start()` with a non-retryable `AgentConfigError`
+before the app-server spawns, because the URL would go on its command line (visible in
+`ps` and `/proc/<pid>/cmdline`). The message names the variable, never the value. A warning
+was rejected: it leaves the credential on argv. CI runs only the lock-pinned binary,
+so a binary bump needs a manual live check: a fresh venv per version built with
+`uv pip install --no-config` (without it the repo's `[tool.uv]` override pins cli-bin
+0.156.1 for every version), then `tests/test_codex_provider_binary.py` and one real turn.
+
 ## Reaping the CLI harnesses
 
 `opencode run` leaves a local server child alive after the CLI exits, and it INHERITS the
