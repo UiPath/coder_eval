@@ -347,7 +347,10 @@ class TurnRecord(BaseModel):
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )
     model_used: str | None = Field(
-        default=None, description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514')"
+        default=None,
+        description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514'). On a Bedrock "
+        + "route the Claude Code agent records the resolved inference-profile id (e.g., "
+        + "'eu.anthropic.claude-sonnet-5'), not the SDK's alias, so normalize the id before grouping across routes.",
     )
     assistant_turn_count: int = Field(
         default=0,
@@ -550,7 +553,10 @@ class EvaluationResult(BaseModel):
     variant_id: str = Field(default="default", description="ID of the experiment variant")
     agent_type: str = Field(description="Type of agent used (registered kind string, e.g. 'claude-code')")
     model_used: str | None = Field(
-        default=None, description="Model identifier used for the evaluation (resolved from iterations or agent config)"
+        default=None,
+        description="Model identifier used for the evaluation: the last iteration's TurnRecord.model_used, else "
+        + "the configured agent model. The config fallback is not route-resolved, so a Bedrock row with no "
+        + "recorded iteration carries the bare configured alias.",
     )
 
     # Execution metadata

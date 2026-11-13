@@ -282,7 +282,7 @@ Tasks are YAML. Full reference: [Task Definition Guide](docs/TASK_DEFINITION_GUI
 ## Dependencies
 
 **Runtime**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic,
-claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema
+claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema, tomli-w
 
 **Runtime (optional, `[uipath]` extra)**: uipath — for local sandbox parity with tasks
 that invoke `uv run uipath eval ...`. Base installs run end-to-end without it;

@@ -38,9 +38,12 @@ from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
 from coder_eval.errors import (
+    AgentCrashError,
     TurnTimeoutError,
     format_timeout_reason,
 )
+from coder_eval.errors.categories import ErrorCategory
+from coder_eval.errors.categorization import provider_error_category
 from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
     AgentKind,
@@ -299,6 +302,7 @@ class _ClaudeTurnState:
         # Distinct from timeout_hit: a clean, non-crash stop that must NOT raise.
         self.stopped_early_hit = False
         self.max_turns_hit = False
+        self.error_category: ErrorCategory | None = None
         self.main_turn_ids: set[str] = set()
         # Resolved by _build_claude_query, set on the state before any finalize
         # path. Stays None if we crash before setup (finalize reads it for cost
@@ -394,6 +398,8 @@ class _ClaudeTurnState:
 
     def on_assistant_message(self, message: Message) -> None:
         """Capture ToolUseBlocks + build the AssistantMessage telemetry record."""
+        if getattr(message, "parent_tool_use_id", None) is None:
+            self.error_category = provider_error_category(code=getattr(message, "error", None))
         message_arrival_wall = self.clock.now()
         generation_started_wall = self.last_event_wall
 
@@ -555,6 +561,14 @@ class _ClaudeTurnState:
         )
         self.num_turns = getattr(message, "num_turns", None)
         self.sdk_result_summary = self._agent._summarize_result(message)
+        if self.sdk_result_summary is not None and self.sdk_result_summary.is_error:
+            if self.error_category in {None, ErrorCategory.AGENT_API_ERROR}:
+                self.error_category = (
+                    provider_error_category(status_code=getattr(message, "api_error_status", None))
+                    or self.error_category
+                )
+        else:
+            self.error_category = None
         new_session_id = getattr(message, "session_id", None)
         # Every ResultMessage, error or not: the CLI saves its running totals on exit.
         if isinstance(model_usage, dict) and model_usage and isinstance(new_session_id, str):
@@ -700,6 +714,18 @@ class _ClaudeTurnState:
             self._agent._reprice_for_litellm(usage, self.effective_model)
         return usage
 
+    @property
+    def model_used(self) -> str | None:
+        """The model recorded on ``AgentEndEvent.model_used``: the resolved route model on Bedrock, else the SDK's.
+
+        On Bedrock the SDK reports a friendly alias (``claude-sonnet-5``) for the
+        inference profile the run was pinned to (``eu.anthropic.claude-sonnet-5``).
+        That raw alias stays on each ``AssistantMessage.model``.
+        """
+        if isinstance(self._agent.route, BedrockRoute) and self.effective_model:
+            return self.effective_model
+        return self.sdk_model_used
+
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools + the open turn, emit the terminal AgentEndEvent,
         and on a crash build the partial TurnRecord. Idempotent."""
@@ -757,7 +783,7 @@ class _ClaudeTurnState:
                 iteration=self.iteration,
                 user_input=self.user_input,
                 agent_output=agent_output,
-                model_used=self.sdk_model_used,
+                model_used=self.model_used,
                 assistant_turn_count=self.assistant_turn_count,
                 messages=list(self.sdk_messages),
                 num_turns=self.num_turns,
@@ -1145,7 +1171,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 error_info = self._format_error_summary(state.sdk_result_summary)
                 detail = error_info or stderr
                 message = f"CLI process failed (exit code {e.exit_code}): {detail}"
-                self._finalize_and_raise_crash(state.finalize, message, cause=e)
+                self._finalize_and_raise_crash(state.finalize, message, cause=e, category=state.error_category)
         except Exception as e:
             # The SDK may re-raise a watchdog kill as a generic Exception. Check
             # both the flag AND the wall clock, in case the flip races this catch.
@@ -1164,7 +1190,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 elif stderr:
                     error_details += f"\nStderr output:\n{stderr}"
                 message = f"Communication with agent failed: {error_details}"
-                self._finalize_and_raise_crash(state.finalize, message, cause=e)
+                self._finalize_and_raise_crash(state.finalize, message, cause=e, category=state.error_category)
         finally:
             # Auto-finalize any path the except blocks did not. Idempotent, so
             # exactly one AgentEndEvent is produced on every exit path.
@@ -1235,6 +1261,19 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 self._log.debug("Cooperative stop requested; ending message loop at this boundary")
                 self._kill_transport(self._active_transport)
                 break
+
+        if (
+            state.sdk_result_summary is not None
+            and state.sdk_result_summary.is_error
+            and state.error_category is not None
+            and not state.stopped_early_hit
+            and not state.timeout_hit
+            and not state.max_turns_hit
+        ):
+            raise AgentCrashError(
+                self._format_error_summary(state.sdk_result_summary) or "Agent API failed",
+                category=state.error_category,
+            )
 
     def _build_claude_query(
         self,

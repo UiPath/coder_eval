@@ -356,6 +356,22 @@ extension points (new criteria, new agents).
 - **Bugs & questions** — open a [GitHub issue](https://github.com/UiPath/coder_eval/issues).
 - **Everything else** — reach the maintainers privately at **coder-eval@uipath.com**.
 
+## Citation
+
+If you use Coder Eval in your research, please cite it:
+
+```bibtex
+@software{coder_eval,
+  author       = {Religa, Tomasz and Shanbhogue, Akshaya Vishnu Kudlu and Li, Bai and Balsells-Rodas, Carles and Ma, Tao},
+  title        = {{Coder Eval}: Evaluate and Benchmark {AI} Coding Agents and Their Skills},
+  year         = {2026},
+  organization = {UiPath},
+  publisher    = {GitHub},
+  url          = {https://github.com/UiPath/coder_eval},
+  license      = {Apache-2.0}
+}
+```
+
 ## License
 
 © 2026 UiPath. Licensed under the Apache License, Version 2.0 — see

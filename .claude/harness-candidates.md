@@ -1028,3 +1028,16 @@ re-derive from scratch.
 - [ ] `raise X(...) from exc` where `exc` came from parsing an env/URL value leaks the value through `__cause__` in a traceback (urlsplit put a URL password in its port error). Needs data-flow from env reads; not cheap — caught in the network: llm_only Phase 3 review.
 - [ ] `await asyncio.to_thread(subprocess.run, ...)` that CREATES a resource inside a try whose `finally` removes it: a cancel leaves the worker thread running, so teardown races the create and leaks it (fixed in `isolation/egress.py` by `_run_to_completion`). Detecting "creates a resource" is not mechanical — caught in the network: llm_only Phase 4 review.
 - [ ] The single-`asyncio.shield` join in `fs_permissions.set_permissions` does not survive a SECOND cancel of the caller; `isolation/egress._run_to_completion` loops on the shield. Promote that helper to a shared module and use it in both places — caught in the network: llm_only Phase 4 review.
+
+## From 2026-11-13 Codex app-server provider review
+
+- [ ] A CI job that runs `tests/test_codex_provider_binary.py` against the latest
+  openai-codex release, in a venv built with `uv pip install --no-config`. CI runs only the
+  lock-pinned cli-bin 0.156.1, so the 0.167.x `-32600` rejection reached pip installs of the
+  `[codex]` extra and no check saw it. Deferred because a floating dependency makes the job
+  flaky by design; it fits a nightly job, not the PR gate — caught in the code review.
+- [ ] A doc-surface check that checked-in Markdown (`.claude/notes/`, `.claude/shared/`,
+  `docs/`, `plugins/coder-eval/`) never references the git-ignored `c/` plan tree
+  (`c/YYYY-MM-DD-*.md`) or a plan decision id (`decision D<n>`). A notes section cited
+  "PI decision D1", which a reader of the repo cannot open. Deferred because there was one
+  hit and review caught it; promote it on a second hit — caught in the code review.

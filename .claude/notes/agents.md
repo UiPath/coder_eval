@@ -80,6 +80,21 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   table's to state, not this file's. Full table + rationale:
   docs/agents/HARNESS_PARITY.md.
 
+## Codex compaction usage metadata
+
+Codex emits usage for the compaction model response, then emits another usage update
+after estimating the replacement context. The estimate has zero input, output, cache
+and reasoning deltas. Within a compaction lifecycle, that later bookkeeping update
+still updates usage and transcript capture but does not begin another model call.
+The first compaction usage update counts even when its reported deltas are zero;
+completion clears the lifecycle before ordinary model and tool calls resume.
+
+The source contract is visible in the pinned CLI's `openai/codex` tag `rust-v0.156.1`:
+`compact.rs` calls `update_token_usage_info` and then `recompute_token_usage`, each of
+which emits a `TokenCount` event. The app-server forwards both as
+`thread/tokenUsage/updated`. An ordinary tool call's next-call reservation remains
+unchanged. An estimate outside compaction keeps the existing accounting behavior.
+
 ## Shared turn lifecycle
 
 Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the
@@ -257,6 +272,19 @@ with a live gemini-3.1-pro-preview: a `Bash` opening 1.7 ms before the flush dro
 entire headroom was 1.4 ms. Four sibling runs passed by 1.2-8.7 ms out of ~12 s, so the
 defect was a coin flip per run. `tests/test_antigravity_agent.py::test_a_tool_still_open_at_the_flush_is_not_generation_time`
 pins it.
+
+## Provider denials versus business text
+
+AgentCrashError carries an optional category assigned by the adapter. The categorizer
+honors it before legacy message matching; an unclassified AgentCrashError is always a
+retryable crash. Diagnostic prose, stderr and task content cannot disable its retries.
+
+Claude reports root AssistantMessage.error and ResultMessage.api_error_status; a clean
+result clears earlier recoverable error metadata. Codex reports Turn.error.codex_error_info
+and its HTTP status. Delegate reports structured host statusCode/code fields. Wrapped
+provider exceptions retain their structured status/code at the shared crash boundary.
+HTTP 402 or a typed billing denial is terminal; HTTP 429 is rate-limited and retryable.
+No retry defaults or per-question limits change.
 
 ## Why a clean exit can still be a crash
 
@@ -725,6 +753,34 @@ profiles and loses the prepend again. Nested zsh keeps it, because `ZDOTDIR` sta
 exported. No-op on Windows, where Codex shells through PowerShell (`-NoProfile`) or
 `cmd /c`, neither of which re-sources a profile chain.
 
+## Codex custom provider on the app-server
+
+With `CODEX_BASE_URL` set, openai-codex 0.167.0-0.167.2 rejects every turn with JSON-RPC
+`-32600 "This chat uses custom, but your current provider is openai"` when only the thread
+names the custom provider. The check is in the bundled `openai-codex-cli-bin` binary; the
+Python SDK surface (`CodexConfig.config_overrides`) is identical from 0.155.1 to 0.169.0.
+An offline probe against a local stub showed thread-only routing works on 0.156.1, 0.168.0
+and 0.169.0 and fails on 0.167.2; app-server plus thread works on all of them.
+
+`_custom_provider()` builds the provider once. The thread options embed it, and `start()`
+passes it to the app-server as two `--config` overrides (`model_provider` and the
+`model_providers.custom` inline table). Both seams select the provider: the thread seam is
+the path that every other binary version accepts, and both read the one helper, so they
+cannot disagree. The TOML value is written with `tomli_w`, a runtime dependency, with quoted
+keys, so `api-version` needs no bare-key rules and `"`, `\`, control characters and U+007F
+are escaped. `json.dumps` is not valid TOML for U+007F or surrogate escapes. The
+`_TomlValue` alias admits only string leaves, because `_toml_inline` renders only those.
+
+The base URL is on the app-server command line. It is not a secret and also travels in the
+thread-start payload; the key stays in the env (`env_key`). A credential embedded in the URL
+or a URL that does not parse fails `start()` with a non-retryable `AgentConfigError`
+before the app-server spawns, because the URL would go on its command line (visible in
+`ps` and `/proc/<pid>/cmdline`). The message names the variable, never the value. A warning
+was rejected: it leaves the credential on argv. CI runs only the lock-pinned binary,
+so a binary bump needs a manual live check: a fresh venv per version built with
+`uv pip install --no-config` (without it the repo's `[tool.uv]` override pins cli-bin
+0.156.1 for every version), then `tests/test_codex_provider_binary.py` and one real turn.
+
 ## Reaping the CLI harnesses
 
 `opencode run` leaves a local server child alive after the CLI exits, and it INHERITS the
@@ -970,26 +1026,11 @@ when a cut turn had finished calls but no usage.
 per-round-trip split; today `isStepStart` only merges streamed deltas. `close_window` opens the one
 window at turn start, so head and tail measure ~0.
 
-**Known host failures are recategorized** in `_describe_host_error` / `_crash_on_host_error`, ported
-from the out-of-tree `delegate-sdk` adapter that drove the same host and backend:
-
-- **Cloudflare WAF block page** (`<title>Continue with UiPath Platform</title>` or "not available in
-  your country"): a WAF rule matched shell-like text in the request, not a geo/auth block. A retry
-  is blocked again, so the reason carries "content filter" (`AGENT_INVALID_OUTPUT`). Two markers,
-  because the host truncates near 50 KB and the country sentence sits after ~48 KB of CSS.
-- **SSE connect timeout**: no response headers, so the backend never started the turn. Rewritten to
-  "connection" (`AGENT_API_ERROR`, retried) with "timeout" removed, which would be `AGENT_TIMEOUT`
-  (not retried).
-- **Session conflict** ("A reply is already being generated", 409): `_session_id` is dropped so the
-  retry starts a new conversation, but only while no turn of that conversation has finished
-  (`_conversation_has_history`). On a later turn a new conversation would continue the task without
-  the earlier turns, and the row would still be graded as one trajectory. So the retry keeps the
-  session. The 409 is short-lived: the backend cancels the reply when the killed host's stream
-  disconnects, then releases its turn claim, so the 5 s and 10 s `AGENT_CRASH` retries usually
-  succeed. A claim it fails to release expires after `TURN_CLAIM_TTL_SECONDS` (900 s), and the task
-  ends as an error. A `session_id` pinned in config counts as history, and dropping it would not
-  help anyway: each respawn sends it in `init`, and the SDK falls back to it when `send` carries no
-  `sessionId` (`sessionId || this.options.sessionId` in the SDK's `sendMessage`).
+**Host error frames carry optional `statusCode` and `code`.** The adapter maps those
+provider-owned fields to a retry category and preserves the original diagnostic message.
+Old hosts without those fields produce ordinary retryable crashes. Business text and
+HTML do not control retry policy. A session conflict may drop the session only before
+any question has completed; later questions keep all earlier context.
 
 Not ported: stall-timeout+resend and the S2S token-file refresher. Port them when the need shows.
 
