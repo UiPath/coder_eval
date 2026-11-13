@@ -1,14 +1,15 @@
-"""The real bundled codex binary accepts the app-server provider overrides and routes a turn through them.
+"""The real bundled codex binary accepts the custom provider and routes a turn through it.
 
-Starts the app-server against a local HTTP stub, with no network and a throw-away CODEX_HOME. The
-thread options lose their provider here, so only the app-server seam can reach the stub.
+Starts the app-server against a local HTTP stub, with no network and a throw-away CODEX_HOME.
+The ``app-server-only`` case strips the provider from the thread options, so only the
+app-server seam can reach the stub; ``app-server-and-thread`` sends the production shape.
 Skips when the codex extra or its binary is absent.
 """
 
 import asyncio
-import contextlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -16,7 +17,7 @@ from coder_eval.agents.codex_agent import CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
 
 
-pytest.importorskip("openai_codex")
+codex_client = pytest.importorskip("openai_codex.client")
 codex_cli_bin = pytest.importorskip("codex_cli_bin")
 try:
     codex_cli_bin.bundled_codex_path()
@@ -26,12 +27,18 @@ except FileNotFoundError:
 pytestmark = pytest.mark.integration
 
 _STUB_ERROR = b'{"error":{"message":"stub","type":"invalid_request_error"}}'
+_SCENARIO_TIMEOUT_S = 60
 
 
-def _start_stub(paths: list[str]) -> ThreadingHTTPServer:
+class _Request(NamedTuple):
+    path: str
+    authorization: str | None
+
+
+def _start_stub(requests: list[_Request]) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _reply(self) -> None:
-            paths.append(self.path)
+            requests.append(_Request(self.path, self.headers.get("Authorization")))
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(400)
             self.send_header("Content-Type", "application/json")
@@ -53,9 +60,24 @@ def _start_stub(paths: list[str]) -> ThreadingHTTPServer:
     return server
 
 
-def test_app_server_overrides_route_turn_to_custom_endpoint(monkeypatch, tmp_path):
-    paths: list[str] = []
-    server = _start_stub(paths)
+def _track_clients(monkeypatch) -> list[Any]:
+    """Record every ``CodexClient`` that spawns an app-server, so a hung one can be reaped."""
+    clients: list[Any] = []
+    original_start = codex_client.CodexClient.start
+
+    def start(self: Any) -> None:
+        clients.append(self)
+        original_start(self)
+
+    monkeypatch.setattr(codex_client.CodexClient, "start", start)
+    return clients
+
+
+@pytest.mark.parametrize("thread_provider", [False, True], ids=["app-server-only", "app-server-and-thread"])
+def test_provider_routes_turn_to_custom_endpoint(monkeypatch, tmp_path, thread_provider):
+    requests: list[_Request] = []
+    errors: list[BaseException] = []
+    server = _start_stub(requests)
     try:
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
@@ -67,26 +89,27 @@ def test_app_server_overrides_route_turn_to_custom_endpoint(monkeypatch, tmp_pat
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        clients = _track_clients(monkeypatch)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="stub-model"))
-        build_thread_options = agent._build_thread_options
+        if not thread_provider:
+            build_thread_options = agent._build_thread_options
 
-        def thread_options_without_provider() -> dict:
-            options = build_thread_options()
-            options.pop("model_provider")
-            options["config"].pop("model_providers")
-            return options
+            def thread_options_without_provider() -> dict:
+                options = build_thread_options()
+                options.pop("model_provider")
+                options["config"].pop("model_providers")
+                return options
 
-        monkeypatch.setattr(agent, "_build_thread_options", thread_options_without_provider)
+            monkeypatch.setattr(agent, "_build_thread_options", thread_options_without_provider)
 
         async def scenario() -> None:
             await agent.start(str(tmp_path))
             try:
-                with contextlib.suppress(Exception):
-                    await agent.communicate("say hi", timeout=20)
+                await agent.communicate("say hi", timeout=20)
+            except Exception as exc:
+                errors.append(exc)
             finally:
                 await agent.stop()
-
-        errors: list[BaseException] = []
 
         def run() -> None:
             try:
@@ -96,15 +119,20 @@ def test_app_server_overrides_route_turn_to_custom_endpoint(monkeypatch, tmp_pat
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
-        worker.join(timeout=60)
+        worker.join(timeout=_SCENARIO_TIMEOUT_S)
         if worker.is_alive():
             agent.kill_sync()
-            worker.join(timeout=5)
-            pytest.fail("codex app-server scenario did not finish within 60 s")
+            for client in clients:
+                client.close()
+            worker.join(timeout=10)
+            pytest.fail(
+                f"codex app-server scenario did not finish within {_SCENARIO_TIMEOUT_S} s; "
+                + f"stub saw {requests}; errors: {errors!r}"
+            )
     finally:
         server.shutdown()
         server.server_close()
 
-    assert any(p.startswith("/v1/responses") and "api-version=2025-04-01-preview" in p for p in paths), (
-        f"stub saw {paths}; scenario errors: {errors}"
-    )
+    routed = [r for r in requests if r.path.startswith("/v1/responses") and "api-version=2025-04-01-preview" in r.path]
+    assert routed, f"stub saw {requests}; errors: {errors!r}"
+    assert all(r.authorization == "Bearer dummy" for r in routed), f"stub saw {requests}"

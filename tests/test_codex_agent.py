@@ -23,6 +23,32 @@ from coder_eval.agents.codex_agent import (
 from coder_eval.models import AgentConfig, AgentKind, AssistantMessage, ReconciliationMessage, parse_agent_config
 
 
+class _CodexSpy:
+    """Stands in for ``openai_codex.Codex``: records the config it was built with."""
+
+    def __init__(self) -> None:
+        self.config: object = "never constructed"
+
+    def __call__(self, config: object = None) -> "_CodexSpy":
+        self.config = config
+        return self
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def codex_spy(monkeypatch) -> _CodexSpy:
+    """Clear the Codex routing env and replace ``openai_codex.Codex`` with a recording spy."""
+    import openai_codex
+
+    for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    spy = _CodexSpy()
+    monkeypatch.setattr(openai_codex, "Codex", spy)
+    return spy
+
+
 class TestCodexAgentInitialization:
     """Test CodexAgent initialization and basic properties."""
 
@@ -254,47 +280,28 @@ class TestCodexEnvironmentConfiguration:
         assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
 
     @pytest.mark.asyncio
-    async def test_start_passes_provider_overrides_to_codex_config(self, monkeypatch, tmp_path):
+    async def test_start_passes_provider_overrides_to_codex_config(self, monkeypatch, tmp_path, codex_spy):
         """A base URL alone (no key, no prepend) still builds a CodexConfig carrying the overrides."""
-        from types import SimpleNamespace
-
         import openai_codex
 
-        for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
-            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
-        captured: dict = {}
-        monkeypatch.setattr(
-            openai_codex, "Codex", lambda **kw: captured.update(kw) or SimpleNamespace(close=lambda: None)
-        )
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
         await agent.start(str(tmp_path))
 
-        config = captured["config"]
+        config = codex_spy.config
         assert isinstance(config, openai_codex.CodexConfig)
         assert config.config_overrides == agent._app_server_config_overrides()
         assert config.config_overrides
         assert config.env is None
 
     @pytest.mark.asyncio
-    async def test_start_default_endpoint_passes_no_config(self, monkeypatch, tmp_path):
-        """No base URL, no key, no prepend: the client starts with config=None, as before."""
-        from types import SimpleNamespace
-
-        import openai_codex
-
-        for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
-            monkeypatch.delenv(var, raising=False)
-        captured: dict = {}
-        monkeypatch.setattr(
-            openai_codex, "Codex", lambda **kw: captured.update(kw) or SimpleNamespace(close=lambda: None)
-        )
-
+    async def test_start_default_endpoint_passes_no_config(self, tmp_path, codex_spy):
+        """No base URL, no key, no prepend: the client starts with config=None."""
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         await agent.start(str(tmp_path))
 
-        assert captured["config"] is None
+        assert codex_spy.config is None
 
 
 class TestCustomProviderRouting:
@@ -415,6 +422,28 @@ class TestCustomProviderRouting:
 
         assert tomllib.loads(overrides[1])["model_providers"]["custom"]["base_url"] == base_url
         assert "\n" not in overrides[1]
+
+    @pytest.mark.parametrize(
+        ("base_url", "warns"),
+        [
+            ("https://user:s3cret-pw@gw.local/v1", True),
+            ("https://token-only@gw.local/v1", True),
+            ("https://gw.local/v1", False),
+            ("http://[::1/v1", False),
+        ],
+    )
+    def test_credential_in_base_url_warns_without_echoing_it(self, monkeypatch, caplog, base_url, warns):
+        """Userinfo in CODEX_BASE_URL logs a warning that names neither the URL nor the credential."""
+        monkeypatch.setenv("CODEX_BASE_URL", base_url)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        with caplog.at_level("WARNING", logger="coder_eval.agents.codex_agent"):
+            overrides = agent._app_server_config_overrides()
+
+        assert len(overrides) == 2
+        warnings = [r.getMessage() for r in caplog.records if "embeds a credential" in r.getMessage()]
+        assert bool(warnings) is warns
+        assert not any("s3cret-pw" in w or "gw.local" in w for w in warnings)
 
 
 class TestCodexEnvironmentInfo:

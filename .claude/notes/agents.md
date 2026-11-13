@@ -762,18 +762,20 @@ Python SDK surface (`CodexConfig.config_overrides`) is identical from 0.155.1 to
 An offline probe against a local stub showed thread-only routing works on 0.156.1, 0.168.0
 and 0.169.0 and fails on 0.167.2; app-server plus thread works on all of them.
 
-`_custom_provider()` builds the provider once. The thread options embed it as before, and
-`start()` passes it to the app-server as two `--config` overrides (`model_provider` and the
-`model_providers.custom` inline table). Both seams are kept (PI decision D1): the thread
-seam is the tested production path, and both read the one helper. The TOML value is
-written with `tomli_w`, already a runtime dependency, with quoted keys, so `api-version`
-needs no bare-key rules and `"`, `\`, control characters and U+007F are escaped. `json.dumps`
-is not valid TOML for U+007F or surrogate escapes.
+`_custom_provider()` builds the provider once. The thread options embed it, and `start()`
+passes it to the app-server as two `--config` overrides (`model_provider` and the
+`model_providers.custom` inline table). Both seams select the provider: the thread seam is
+the path that every other binary version accepts, and both read the one helper, so they
+cannot disagree. The TOML value is written with `tomli_w`, a runtime dependency, with quoted
+keys, so `api-version` needs no bare-key rules and `"`, `\`, control characters and U+007F
+are escaped. `json.dumps` is not valid TOML for U+007F or surrogate escapes. The
+`_TomlValue` alias admits only string leaves, because `_toml_inline` renders only those.
 
-The base URL is now on the app-server command line. It is not a secret and already
-travels in the thread-start payload; the key stays in the env (`env_key`), and a
-credential embedded in the URL is unsupported. CI runs only the lock-pinned binary, so a
-binary bump needs a manual live check: a fresh venv per version built with
+The base URL is on the app-server command line. It is not a secret and also travels in the
+thread-start payload; the key stays in the env (`env_key`). A credential embedded in the URL
+is unsupported: `_custom_provider()` logs a warning that names neither the URL nor the
+credential, and does not raise, so the run continues. CI runs only the lock-pinned binary,
+so a binary bump needs a manual live check: a fresh venv per version built with
 `uv pip install --no-config` (without it the repo's `[tool.uv]` override pins cli-bin
 0.156.1 for every version), then `tests/test_codex_provider_binary.py` and one real turn.
 

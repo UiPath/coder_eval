@@ -16,7 +16,7 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import tomli_w
 
@@ -389,12 +389,23 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
 
+type _TomlValue = str | dict[str, _TomlValue]
 
-def _toml_inline(value: str | dict[str, Any]) -> str:
+
+def _toml_inline(value: _TomlValue) -> str:
     """Render a string or a (nested) string table as one TOML inline value, for ``codex --config``."""
     if isinstance(value, str):
         return tomli_w.dumps({"v": value}).removeprefix("v = ").rstrip("\n")
     return "{" + ", ".join(f"{_toml_inline(k)} = {_toml_inline(v)}" for k, v in value.items()) + "}"
+
+
+def _url_has_userinfo(url: str) -> bool:
+    """Whether ``url`` carries a username or password; False for a URL that does not parse."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.username is not None or parts.password is not None
 
 
 # Login-shell profiles generated into the per-task HOME. ``.bash_profile`` is
@@ -1503,18 +1514,24 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return os.getenv("CODEX_API_VERSION") or None
 
     @staticmethod
-    def _custom_provider() -> dict[str, Any] | None:
+    def _custom_provider() -> dict[str, _TomlValue] | None:
         """The CODEX_BASE_URL model provider definition, or None on the default endpoint.
 
         The binary has no base-URL env var, so the provider is defined in config and
         selected by id; ``env_key`` names the key's variable, so the key itself never
         appears here. On Azure, CODEX_API_VERSION adds the required ``api-version`` query
-        param and CODEX_MODEL is the deployment name.
+        param and CODEX_MODEL is the deployment name. A credential embedded in the URL
+        logs a warning, because the URL reaches the app-server command line.
         """
         base_url = CodexAgent._resolve_base_url()
         if not base_url:
             return None
-        provider: dict[str, Any] = {
+        if _url_has_userinfo(base_url):
+            logger.warning(
+                "CODEX_BASE_URL embeds a credential, which is visible on the codex app-server "
+                + "command line; put the key only in CODEX_API_KEY."
+            )
+        provider: dict[str, _TomlValue] = {
             "name": "Custom",
             "base_url": base_url,
             "env_key": "CODEX_API_KEY",
@@ -1536,8 +1553,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Build the environment passed to the Codex app-server.
 
         Carries ``CODEX_API_KEY`` and, when the sandbox resolved mock dirs, a PATH
-        with those prepended. The base URL is NOT an env var the binary honors —
-        it goes through the model provider config instead.
+        with those prepended.
 
         The SDK merges this PARTIAL dict over ``os.environ`` (normalizing the PATH
         key case-insensitively), so a full PATH value here safely replaces the
@@ -1569,8 +1585,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _app_server_config_overrides(self) -> tuple[str, ...]:
         """``--config`` overrides that select the custom provider on the app-server itself.
 
-        openai-codex 0.167.x rejects ``turn/start`` (-32600) when only the thread names the
-        provider, so the app-server carries the same definition as the thread options.
+        The definition is the one the thread options carry; empty on the default endpoint.
 
         Rationale: .claude/notes/agents.md § Codex custom provider on the app-server
         """
@@ -1767,10 +1782,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     + "— the provider may reject the request."
                 )
             tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
-            self._log.debug(
-                f"Codex routed via custom provider (host={urlparse(provider['base_url']).hostname or '(unknown)'}, "
-                + f"api_version={'set' if 'query_params' in provider else 'unset'})"
-            )
+            host = urlparse(self._resolve_base_url() or "").hostname or "(unknown)"
+            api_version = "set" if self._resolve_api_version() else "unset"
+            self._log.debug(f"Codex routed via custom provider (host={host}, api_version={api_version})")
 
         if self.config.context_window is not None:
             # Codex then auto-compacts at 90% of this window.
