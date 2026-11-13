@@ -21,6 +21,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
+from coder_eval.errors import GradingError
 from coder_eval.models import FinalStatus
 
 
@@ -300,17 +301,18 @@ def test_run_resume_keeps_the_row_regradeable_when_grading_crashes(tmp_path: Pat
 
     with patch(
         "coder_eval.orchestration.regrade.regrade_in_place",
-        new=AsyncMock(side_effect=RuntimeError("checker exploded")),
+        new=AsyncMock(side_effect=GradingError(RuntimeError("checker exploded"), component="fixture.grading")),
     ):
         result = runner.invoke(app, ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
 
     assert result.exit_code != 0, "a resume that graded nothing must not report success"
     assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
-    # The reason is durable, not console-only. It lands in run.json rather than
-    # task.json: task.json stays the pristine execute record, which is what keeps
-    # the row re-gradeable below.
+    row = _row(_task_dir(run_dir))
+    assert row["error_history"][-1]["message"] == "checker exploded"
+    assert row["error_message"] is None
     summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    assert "checker exploded" in str(summary["task_results"])
+    assert summary["task_results"][0]["status"] == row["final_status"]
+    assert summary["task_results"][0]["weighted_score"] == row["weighted_score"]
 
     # And the row really is still re-gradeable.
     _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
@@ -761,3 +763,278 @@ def test_the_baseline_post_run_alone_does_not_prompt(tmp_path: Path) -> None:
     assert "rm -rf node_modules .npm-prefix" in _post_run_commands(task_dir), (
         "exempt from the PROMPT is not exempt from RUNNING — the command still has to execute"
     )
+
+
+@pytest.mark.parametrize("command", ["evaluate", "resume"])
+@pytest.mark.parametrize("verdict", [FinalStatus.SUCCESS, FinalStatus.FAILURE])
+def test_repaired_grading_error_reaches_a_verdict_without_replaying_execution(
+    tmp_path: Path,
+    command: str,
+    verdict: FinalStatus,
+) -> None:
+    from coder_eval.errors import JudgeInfrastructureError
+
+    run_dir = tmp_path / "grading-error"
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=JudgeInfrastructureError("offline judge unavailable")),
+    ):
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+    task_dir = _task_dir(run_dir)
+    failed = _row(task_dir)
+    assert failed["error_phase"] == "grading"
+    assert failed["error_message"] == "offline judge unavailable"
+    if verdict is FinalStatus.FAILURE:
+        next(run_dir.glob("**/artifacts/**/proof.txt")).unlink()
+
+    args = (
+        ["evaluate", str(task_dir)]
+        if command == "evaluate"
+        else ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"]
+    )
+    _invoke(args, expect_exit=0 if verdict is FinalStatus.SUCCESS else 1)
+
+    repaired = _row(task_dir)
+    assert repaired["final_status"] == verdict.value
+    assert repaired["iterations"] == failed["iterations"]
+    assert repaired["error_phase"] is None
+    assert repaired["error_message"] is None
+    assert "grading_error" not in repaired
+    assert [error["message"] for error in repaired["error_history"]] == ["offline judge unavailable"]
+
+
+def test_repeated_grading_errors_remain_auditable_and_can_be_repaired(tmp_path: Path) -> None:
+    from coder_eval.errors import JudgeInfrastructureError
+
+    run_dir = tmp_path / "grading-error"
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=JudgeInfrastructureError("first judge incident")),
+    ):
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+    task_dir = _task_dir(run_dir)
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=JudgeInfrastructureError("second judge incident")),
+    ):
+        result = _invoke(["evaluate", str(task_dir)], expect_exit=1)
+    failed = _row(task_dir)
+    assert "second judge incident" in result.output
+    assert failed["error_history"][-1]["message"] == "second judge incident"
+    assert [error["message"] for error in failed["error_history"]] == ["second judge incident"]
+
+    _invoke(["evaluate", str(task_dir)])
+
+    repaired = _row(task_dir)
+    assert repaired["final_status"] == FinalStatus.SUCCESS.value
+    assert "grading_error" not in repaired
+    assert [error["message"] for error in repaired["error_history"]] == [
+        "first judge incident",
+        "second judge incident",
+    ]
+
+
+@pytest.mark.parametrize(
+    "status,phase",
+    [
+        (FinalStatus.ERROR, "execution"),
+        (FinalStatus.ERROR, None),
+        (FinalStatus.TIMEOUT, "execution"),
+    ],
+)
+@pytest.mark.parametrize("fault_kind", ["judge", "timeout", "budget"])
+def test_failed_regrade_preserves_execution_fact_and_records_the_grader_incident(
+    tmp_path: Path,
+    status: FinalStatus,
+    phase: str | None,
+    fault_kind: str,
+) -> None:
+    from coder_eval.errors import BudgetExceededError, JudgeInfrastructureError, TaskTimeoutError
+
+    error = {
+        "judge": JudgeInfrastructureError("current grader incident"),
+        "timeout": TaskTimeoutError(30),
+        "budget": BudgetExceededError("usd", actual=2, limit=1),
+    }[fault_kind]
+
+    run_dir = tmp_path / "execution-fact"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    prior = _row(task_dir)
+    prior.update(
+        final_status=status.value,
+        error_phase=phase,
+        error_message="original execution incident",
+        error_details={"original": True},
+    )
+    (task_dir / "task.json").write_text(json.dumps(prior))
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=error),
+    ):
+        result = _invoke(["evaluate", str(task_dir)], expect_exit=1)
+    failed = _row(task_dir)
+    assert str(error) in result.output
+    assert "Result count mismatch" not in result.output
+    assert failed["final_status"] == status.value
+    assert failed["error_message"] == prior["error_message"]
+    assert failed["error_details"] == prior["error_details"]
+    assert failed["error_phase"] == phase
+    assert failed["error_history"][-1]["message"] == str(error)
+
+    _invoke(["evaluate", str(task_dir)], expect_exit=1)
+
+    repaired = _row(task_dir)
+    assert repaired["final_status"] == status.value
+    assert repaired["error_message"] == prior["error_message"]
+    assert "grading_error" not in repaired
+    assert repaired["error_history"][-1]["message"] == str(error)
+
+
+def test_checker_failure_does_not_start_agent_failure_diagnostics(tmp_path: Path) -> None:
+    from coder_eval.errors import AgentCrashError, JudgeInfrastructureError
+
+    run_dir = tmp_path / "two-checker-failures"
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(
+            side_effect=[
+                AgentCrashError("primary checker incident"),
+                JudgeInfrastructureError("secondary diagnostic incident"),
+            ]
+        ),
+    ):
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+    failed = _row(_task_dir(run_dir))
+    assert failed["error_phase"] == "grading"
+    assert failed["error_message"] == "primary checker incident"
+    assert failed["error_history"] == []
+
+
+@pytest.mark.parametrize("kind", ["error", "timeout", "budget"])
+def test_execution_failure_keeps_canonical_empty_score(tmp_path: Path, kind: str) -> None:
+    from coder_eval.errors import AgentConfigError, BudgetExceededError, TaskTimeoutError
+
+    error = {
+        "error": AgentConfigError("original execution error"),
+        "timeout": TaskTimeoutError(30),
+        "budget": BudgetExceededError("usd", actual=2, limit=1),
+    }[kind]
+    expected = {
+        "error": FinalStatus.ERROR,
+        "timeout": FinalStatus.TIMEOUT,
+        "budget": FinalStatus.COST_BUDGET_EXCEEDED,
+    }[kind]
+    run_dir = tmp_path / "execution-and-grading-errors"
+    with patch("coder_eval.agents.noop_agent.NoOpAgent.communicate", new=AsyncMock(side_effect=error)) as communicate:
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+
+    communicate.assert_awaited_once()
+    row = _row(_task_dir(run_dir))
+    assert row["final_status"] == expected.value
+    assert row["error_phase"] == "execution"
+    assert row["error_message"] == str(error)
+    assert row["error_details"]["error_message"] == str(error)
+    assert row["weighted_score"] == 0.0
+    assert not row["success_criteria_results"]
+    assert "grading_error" not in row
+
+
+@pytest.mark.parametrize("kind", ["timeout", "budget"])
+def test_checker_origin_timeout_or_budget_exception_is_a_grading_error(tmp_path: Path, kind: str) -> None:
+    from coder_eval.errors import BudgetExceededError, TaskTimeoutError
+
+    error = TaskTimeoutError(30) if kind == "timeout" else BudgetExceededError("usd", actual=2, limit=1)
+    run_dir = tmp_path / "grading-origin"
+    with patch("coder_eval.evaluation.checker.SuccessChecker.check_all_async", new=AsyncMock(side_effect=error)):
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+
+    row = _row(_task_dir(run_dir))
+    assert row["final_status"] == FinalStatus.ERROR.value
+    assert row["error_phase"] == "grading"
+    assert row["error_message"] == str(error)
+
+
+@pytest.mark.parametrize("verdict", [FinalStatus.SUCCESS, FinalStatus.FAILURE])
+def test_failed_regrade_restores_the_immediate_verdict_not_the_original_backup(
+    tmp_path: Path,
+    verdict: FinalStatus,
+) -> None:
+    from coder_eval.errors import JudgeInfrastructureError
+
+    run_dir = tmp_path / "latest-verdict"
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=JudgeInfrastructureError("initial grading incident")),
+    ):
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+    task_dir = _task_dir(run_dir)
+    if verdict is FinalStatus.FAILURE:
+        next(run_dir.glob("**/artifacts/**/proof.txt")).unlink()
+    _invoke(["evaluate", str(task_dir)], expect_exit=0 if verdict is FinalStatus.SUCCESS else 1)
+    immediate = _row(task_dir)
+    original_backup = (task_dir / "task.execute.json").read_bytes()
+
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=JudgeInfrastructureError("later grading incident")),
+    ):
+        _invoke(["evaluate", str(task_dir)], expect_exit=1)
+
+    restored = _row(task_dir)
+    assert restored["final_status"] == verdict.value
+    assert restored["weighted_score"] == immediate["weighted_score"]
+    assert restored["success_criteria_results"] == immediate["success_criteria_results"]
+    assert restored["error_history"][-1]["message"] == "later grading incident"
+    assert (task_dir / "task.execute.json").read_bytes() == original_backup
+
+
+def test_resume_successfully_grades_an_execution_error_without_discarding_the_verdict(tmp_path: Path) -> None:
+    from coder_eval.errors import AgentConfigError
+
+    run_dir = tmp_path / "execution-error-resume"
+    with patch(
+        "coder_eval.agents.noop_agent.NoOpAgent.communicate",
+        new=AsyncMock(side_effect=AgentConfigError("original agent failure")),
+    ) as communicate:
+        _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)], expect_exit=1)
+        task_dir = _task_dir(run_dir)
+        original = _row(task_dir)
+        assert original["final_status"] == FinalStatus.ERROR.value
+        assert original["error_phase"] == "execution"
+        assert original["weighted_score"] is None
+
+        _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"], expect_exit=1)
+
+        graded = _row(task_dir)
+        assert graded["final_status"] == FinalStatus.ERROR.value
+        assert graded["error_message"] == original["error_message"]
+        assert graded["weighted_score"] == 1.0
+        assert len(graded["success_criteria_results"]) == 2
+        assert "grading_error" not in graded
+    communicate.assert_awaited_once()
+
+
+@pytest.mark.parametrize("command", ["evaluate", "resume"])
+def test_new_reference_failure_during_regrade_remains_an_execution_fact(tmp_path: Path, command: str) -> None:
+    from coder_eval.errors import ReferenceTamperedError
+
+    run_dir = tmp_path / "new-reference-error"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    args = (
+        ["evaluate", str(task_dir)]
+        if command == "evaluate"
+        else ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"]
+    )
+    with patch(
+        "coder_eval.evaluation.checker.SuccessChecker.check_all_async",
+        new=AsyncMock(side_effect=ReferenceTamperedError("new answer-key integrity violation")),
+    ):
+        _invoke(args, expect_exit=1)
+
+    row = _row(task_dir)
+    assert row["final_status"] == FinalStatus.ERROR.value
+    assert row["error_phase"] == "execution"
+    assert row["error_message"] == "new answer-key integrity violation"
+    assert "grading_error" not in row

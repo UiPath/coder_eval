@@ -2,6 +2,309 @@
 
 <!-- version list -->
 
+## v0.12.18 (2026-11-09)
+
+### Bug Fixes
+
+- **deps**: Cap typer below 0.29 ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Keep a null arm pass rate null and cap Series run.json loads
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+### Features
+
+- **evalboard**: Add a Scheduled tab with per-pipeline trends and fold Scribe into it
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Add a Studio Web badge and keep the front-page cache warm
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Add the Series tab ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Draw the Studio Web badge in the UiPath logo's orange outline style
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Give Studio Web runs their own harness badge
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+- **evalboard**: Point the Ad-hoc list and Scribe at the Series tab and warm /series
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Read series and excluded from meta.json and drop series runs from the Ad-hoc list
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Rename the nav tabs, fold Scribe into Scheduled, link runs to their trend
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Simplify the Series index and drop hand-copied schedules
+  ([#255](https://github.com/UiPath/coder_eval/pull/255),
+  [`bf4e638`](https://github.com/UiPath/coder_eval/commit/bf4e6382eb1eed65243ff26253f50caf6b8bb89b))
+
+- **evalboard**: Warm the front-page cache in the background
+  ([#251](https://github.com/UiPath/coder_eval/pull/251),
+  [`68cd17f`](https://github.com/UiPath/coder_eval/commit/68cd17f3ca19c9de3f7f435a2351ec9e3c1b8467))
+
+
+## v0.12.17 (2026-11-06)
+
+### Bug Fixes
+
+- Address grading recovery before-merge feedback
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Align Delegate smoke prompt with automation use
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Make grading failure and budget returns explicit
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Preserve execution facts during grading recovery
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Preserve logical turn identity across retries
+  ([#250](https://github.com/UiPath/coder_eval/pull/250),
+  [`291ac2a`](https://github.com/UiPath/coder_eval/commit/291ac2a7cf7b01ec348f1cc141df7f349df94df3))
+
+- Recover grading errors without erasing execution failures
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Recover grading failures without replaying agents
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Reject scripted prompt overrides and derive dialog length
+  ([#246](https://github.com/UiPath/coder_eval/pull/246),
+  [`51f4ab3`](https://github.com/UiPath/coder_eval/commit/51f4ab3cd78d9b993aa6043b6216f2ee1b56f45d))
+
+- Require patched oauthlib dependency ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Separate grading attempts from execution facts
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Skip budget grading when grading is disabled
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- **deps**: Bump filelock to 4.2.4 for pip-audit
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **deps**: Bump filelock, litellm, msgpack, oauthlib, virtualenv for new CVEs
+  ([#240](https://github.com/UiPath/coder_eval/pull/240),
+  [`e8904d9`](https://github.com/UiPath/coder_eval/commit/e8904d9bf60613496f4b83c4394233ae774c082f))
+
+- **deps**: Bump pyasn1 to 0.6.5 for four High advisories
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- **deps**: Bump pyasn1 to 0.6.5 for four High advisories
+  ([#247](https://github.com/UiPath/coder_eval/pull/247),
+  [`48791f6`](https://github.com/UiPath/coder_eval/commit/48791f6af01f389f811111def212bdf34400cb4d))
+
+- **deps**: Bump pyasn1 to 0.6.5 for four High advisories
+  ([#246](https://github.com/UiPath/coder_eval/pull/246),
+  [`51f4ab3`](https://github.com/UiPath/coder_eval/commit/51f4ab3cd78d9b993aa6043b6216f2ee1b56f45d))
+
+- **deps**: Bump urllib3 to 2.8.0 and virtualenv to 21.7.13 for pip-audit
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **deps**: Bump virtualenv to 21.14.13 for osv-scanner
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Accept only bridge for grading_network and refuse a stray grading allowlist
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Allow only the model hosts each llm_only task uses
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Code review fixes for network: llm_only
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Keep the row status on refused grading hosts and harden the grading handshake
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Let a re-grade replace the recorded grading denials
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Make the egress probe's model-host check work on every harness
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Reclaim leaked egress networks and report hosts refused during grading
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Suppress the grading watcher's own cancel without an empty except
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **evalboard**: Fold delegate-sdk into the delegate harness
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- **evalboard**: Guard harness lookups against Object.prototype keys
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- **evalboard**: Keep criterion defaults for rows without the fields
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- **reports**: Gate judge cards on the result class and fix a vacuous token test
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- **samples**: Address review on 3d-scan-calc verifier
+  ([#237](https://github.com/UiPath/coder_eval/pull/237),
+  [`021534c`](https://github.com/UiPath/coder_eval/commit/021534ce3272dbbbcb0c8b61506559e696b71d1b))
+
+- **samples**: Grade 3d-scan-calc against fixed expected values
+  ([#237](https://github.com/UiPath/coder_eval/pull/237),
+  [`021534c`](https://github.com/UiPath/coder_eval/commit/021534ce3272dbbbcb0c8b61506559e696b71d1b))
+
+- **simulation**: Export DialogUser as a plain alias for CodeQL
+  ([#246](https://github.com/UiPath/coder_eval/pull/246),
+  [`51f4ab3`](https://github.com/UiPath/coder_eval/commit/51f4ab3cd78d9b993aa6043b6216f2ee1b56f45d))
+
+- **simulation**: Retain exhaustion facts and expand scripted dataset turns
+  ([#246](https://github.com/UiPath/coder_eval/pull/246),
+  [`51f4ab3`](https://github.com/UiPath/coder_eval/commit/51f4ab3cd78d9b993aa6043b6216f2ee1b56f45d))
+
+### Build System
+
+- **deps**: Bump opentelemetry to 1.45.1 for CVE-2026-114603
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+### Chores
+
+- **docker**: Remove redundant parts of the llm_only change
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+### Documentation
+
+- Fix text that still describes removed fallbacks
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- Remove text that still describes removed fallbacks
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- **docker**: 5/5 — document network: llm_only and add a negative egress task
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Record the OpenCode and Pi llm_only runs
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **tasks**: List docker_egress_llm_only among the smoke members
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+### Features
+
+- Configure whole-turn agent retry limits ([#247](https://github.com/UiPath/coder_eval/pull/247),
+  [`48791f6`](https://github.com/UiPath/coder_eval/commit/48791f6af01f389f811111def212bdf34400cb4d))
+
+- **docker**: 1/5 — add network: llm_only and egress_allowlist to DockerDriverConfig
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: 2/5 — add the stdlib-only egress proxy for network: llm_only
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: 3/5 — derive the llm_only egress allowlist on the host
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: 4/5 — run llm_only containers behind a per-task egress sidecar
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Add network: llm_only with a separate grading allowlist
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Give grading its own egress allowlist under network: llm_only
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **simulation**: Add scripted user turns (simulation.turns)
+  ([#246](https://github.com/UiPath/coder_eval/pull/246),
+  [`51f4ab3`](https://github.com/UiPath/coder_eval/commit/51f4ab3cd78d9b993aa6043b6216f2ee1b56f45d))
+
+### Refactoring
+
+- Drop run-format fallbacks no recent run needs
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+- Fold delegate-sdk into delegate, drop run-format fallbacks older than 30 days
+  ([#235](https://github.com/UiPath/coder_eval/pull/235),
+  [`a253f34`](https://github.com/UiPath/coder_eval/commit/a253f3478ac0f51aa9bcd200237807f24d7650b3))
+
+### Testing
+
+- Avoid retry backoff in grading provenance fixtures
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- Preserve unmeasured scores and Windows event loops
+  ([#248](https://github.com/UiPath/coder_eval/pull/248),
+  [`bc45225`](https://github.com/UiPath/coder_eval/commit/bc45225fe4b836ae9376a66fc5864f5b49e6851f))
+
+- **docker**: Consolidate the egress tests ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Keep side effects out of asserts in the egress runner tests
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Make the bad-region setup-error test independent of local credentials
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **docker**: Resolve the CodeQL alerts in the egress tests
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **tasks**: Add a thorough egress probe task for network: llm_only
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+- **tasks**: Probe the LiteLLM model host in the egress task
+  ([#239](https://github.com/UiPath/coder_eval/pull/239),
+  [`484c3d5`](https://github.com/UiPath/coder_eval/commit/484c3d5db6434392ba8baa60378f3f900d7d0924))
+
+
 ## v0.12.16 (2026-10-21)
 
 ### Bug Fixes

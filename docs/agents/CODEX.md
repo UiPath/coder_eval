@@ -62,6 +62,8 @@ CODEX_API_KEY=<azure-openai-key>
 ```
 This registers a custom Codex model provider (`base_url` + `env_key=CODEX_API_KEY` + `query_params={api-version}` + `wire_api=responses`). The Codex CLI only supports the Responses wire API (it rejects `wire_api=chat` as "no longer supported"), so the protocol is fixed. If your Azure deployment requires the key in an `api-key` header rather than `Authorization: Bearer`, that needs an additional provider `http_headers`/`env_http_headers` entry — open an issue if you hit that.
 
+coder_eval selects this provider on the Codex app-server (`--config`) and on each thread. openai-codex 0.167.x requires the app-server half: without it, every turn fails with JSON-RPC `-32600 "This chat uses custom, but your current provider is openai"`. The URL is on the app-server command line, so coder_eval rejects a `CODEX_BASE_URL` that embeds a credential (`https://user:pass@…`) with a configuration error. Put the key only in `CODEX_API_KEY`.
+
 ## Usage
 
 ### Command Line

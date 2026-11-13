@@ -41,7 +41,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `pi`, `delegate`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
-| `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
+| `--resume` | Continue a run: reuse completed results, grade rows still owed a grade, and run unfinished tasks, folding results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
 | `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of in a container of the task's own image (the default); the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
@@ -96,7 +96,7 @@ degraded:
 | --- | --- |
 | `--junit-xml` | A JUnit report reports verdicts, and there are none. |
 | `--allow-host-grading` | It decides how an executed-but-ungraded row is *graded*, and `execute` grades nothing. |
-| Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
+| Simulation tasks with an LLM-simulated user | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. A [scripted dialog](DIALOG_MODE.md#scripted-dialogs) (`simulation.turns`) reads none and is accepted. |
 
 `stop_early:` blocks are also inert here: early stop exists to cut a run once the
 criteria decide the outcome, and under `execute` the full trajectory is the deliverable.
@@ -114,13 +114,15 @@ What it owes each task depends on what it finds in that task's `task.json`:
 | --- | --- | --- |
 | No `task.json`, unreadable, or no `final_status` | re-run | re-run |
 | `NOT_GRADED` | **grade in place** | already complete |
-| An execution fact (`TIMEOUT`, a budget stop) with no verdict AND an agent phase that ran | **grade in place** | already complete |
-| Any other status, **including `FAILURE` / `ERROR`** | already complete | already complete |
-| `BUILD_FAILED`, or any row whose `iteration_count` is `0` | already complete | already complete |
+| `ERROR` with `error_phase: grading`, even with a score or partial criteria | **retry grading in place** | already complete |
+| Any other executed row (`iteration_count > 0`) with no score or criteria vector | **grade in place** | already complete |
+| All other finalized rows, including scored `FAILURE` and execution-phase `ERROR` | already complete | already complete |
 
 **"Finished" is relative to the resuming command.** A `NOT_GRADED` row owes
-`execute` nothing — it finished executing — but owes `run` a grade. The test is
-the row's **evidence**, not its label: an `execute` row that also tripped a run
+`execute` nothing — it finished executing — but owes `run` a grade. A grading-phase
+`ERROR` also owes a new grading attempt, even if the failed grader left a score
+or partial criteria. For other rows, eligibility follows the row's **evidence**:
+an `execute` row that also tripped a run
 limit lands unscored with category `error`/`failed`, and it is owed a grade just
 the same. But evidence of "no verdict" is not enough on its own — a container
 that died before writing `task.json` also has none, and it never ran an agent
@@ -135,8 +137,9 @@ coder-eval execute tasks/*.yaml --run-dir ./r    # expensive half
 coder-eval run     tasks/*.yaml --run-dir ./r --resume   # grades what execute left
 ```
 
-**Resume never retries failures.** `FAILURE` and `ERROR` count as complete under
-both commands — delete a task's `task.json` to force a re-run. A task about to
+**Resume does not replay finished agent execution.** A grading-phase `ERROR`
+retries grading only. Other rows with a verdict remain complete; delete a task's
+`task.json` to force an agent re-run. A task about to
 re-run has its stale `artifacts/<task_id>` cleared first, so leftover files from
 a killed container cannot satisfy a file-based criterion.
 
@@ -192,9 +195,10 @@ record beside it as `task.execute.json`. It then rebuilds the run's
 `run.json` from the rows on disk, so `run.json` reports the verdict with no second command
 and no second copy of the results. A row that is not inside a run directory gets no
 `run.json`, a symlinked `run.json` is refused, and a failed refresh only warns — the exit
-code is always the verdict's. If grading itself
-crashes, the ungraded record is put back: `ERROR` counts as complete for both
-commands, so an errored row could never be graded again.
+code is always the verdict's. If grading itself crashes, recovery keeps the
+immediate prior record and appends the incident to `error_history`, preserving
+the prior verdict. `run --resume` can retry an existing grading-phase `ERROR`
+without replaying the agent.
 
 **A run directory is untrusted input.** It is a shareable artifact — the whole
 point of the detached flow is that one machine executes and another grades — and

@@ -9,18 +9,28 @@ turn / token budget is exhausted.
 Public API:
   - ``UserSimulator``  — wraps an LLM invoker (Anthropic direct or AWS
     Bedrock) and produces the next simulated-user utterance.
+  - ``ScriptedUser`` — replays the task's authored ``simulation.turns``
+    instead; no model call.
+  - ``DialogUser`` — either of the two, as the dialog loop sees them.
   - ``SimulatorResult`` — simulator output + token accounting + stop flag.
   - ``DialogStopReason`` — enum for why a dialog ended.
   - ``evaluate_stop`` — pure predicate that decides whether a dialog
     should terminate after a given turn.
 """
 
+from coder_eval.simulation.scripted_user import ScriptedUser
 from coder_eval.simulation.termination import DialogStopReason, evaluate_stop
 from coder_eval.simulation.user_simulator import SimulatorResult, UserSimulator
 
 
+# A plain alias: CodeQL does not read a `type` statement as defining its `__all__` name.
+DialogUser = UserSimulator | ScriptedUser
+
+
 __all__ = [
     "DialogStopReason",
+    "DialogUser",
+    "ScriptedUser",
     "SimulatorResult",
     "UserSimulator",
     "evaluate_stop",

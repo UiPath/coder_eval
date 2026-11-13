@@ -160,6 +160,15 @@ The authoritative per-replicate record.
 
 **Errors** (populated on failure): `error_message`, `error_details`,
 `error_log_tail` (carries the Docker build-log tail for `BUILD_FAILED`).
+`error_phase` is `"execution"`, `"grading"` or absent. An absent phase on legacy
+`ERROR` rows is conservative: grading does not erase the execution outcome.
+The current primary failure uses `error_message`, `error_details` and
+`error_log_tail`. `error_history` retains secondary grading incidents and earlier
+repaired grading failures (`message`, structured `details`, `log_tail`,
+`recorded_at`). Only explicitly grading-origin `ERROR` can become a fresh verdict;
+execution `ERROR`, `TIMEOUT`, build and budget failures retain their original cause.
+A failed regrade keeps the immediate prior verdict and appends one incident without
+overwriting its criteria or judge artifacts.
 
 **Config/environment:** `environment_info`, `agent_config`, `sdk_options` (the
 options the agent sent to its SDK; the shape depends on the agent: a raw
@@ -241,6 +250,10 @@ backend), `num_turns`, `max_turns_exhausted`,
 row per model-provider error the agent's own client reported, including errors it
 retried itself; filled by the codex adapter, empty on other backends), `crashed`,
 `crash_reason`.
+
+`record_kind` records producer provenance: `agent` for collected agent attempts and
+`standalone_user` for an unconsumed simulator utterance preserved by the dialog driver.
+Legacy records keep `null` when their provenance is unknown; grading never fills it by inference.
 
 > **Token invariant.** Summing the four token buckets across `messages`
 > (assistant + the synthetic `reconciliation` entry) equals `token_usage` exactly.

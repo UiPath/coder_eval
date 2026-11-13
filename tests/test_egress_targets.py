@@ -56,6 +56,7 @@ def _targets(
     env: dict[str, str] | None = None,
     criteria: list[Any] | None = None,
     simulation: bool | None = None,
+    scripted: bool = False,
     route: ApiRouteContext | None = None,
     bedrock_token: str | None = "tok",
     **docker: Any,
@@ -71,7 +72,11 @@ def _targets(
     if agent is None:
         task.agent = None
     if simulation is not None:
-        task.simulation = SimulationConfig(enabled=simulation, persona="p", goal="g")
+        task.simulation = (
+            SimulationConfig(enabled=simulation, turns=["p"])
+            if scripted
+            else SimulationConfig(enabled=simulation, persona="p", goal="g")
+        )
     if route is not None:
         task.checker_context = CheckerContext(api_route=route)
     settings = Settings.model_construct(
@@ -121,6 +126,7 @@ CASES: dict[str, tuple[dict[str, Any] | None, dict[str, Any], list[str]]] = {
     ),
     "simulation-enabled": (CODEX, {"simulation": True}, sorted([*DIRECT, OPENAI])),
     "simulation-disabled": (CODEX, {"simulation": False}, [OPENAI]),
+    "simulation-scripted-calls-no-simulator-model": (CODEX, {"simulation": True, "scripted": True}, [OPENAI]),
     "litellm-simulator-pinned": (CODEX, {"backend": LITELLM, "simulation": True}, sorted([*DIRECT, OPENAI])),
 }
 

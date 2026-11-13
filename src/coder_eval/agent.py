@@ -10,6 +10,8 @@ from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
+from .errors.categories import ErrorCategory
+from .errors.categorization import provider_exception_category
 from .models import AgentState as AgentState
 from .models import BaseAgentConfig, SystemPromptSemantics, TurnRecord
 from .streaming.callbacks import StreamCallback
@@ -136,7 +138,12 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         raise TurnTimeoutError(timeout, iteration=self._iteration)
 
     def _finalize_and_raise_crash(
-        self, finalize: _FinalizeFn, message: str, *, cause: BaseException | None = None
+        self,
+        finalize: _FinalizeFn,
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        category: ErrorCategory | None = None,
     ) -> NoReturn:
         """Mark ERROR, finalize the turn as a crash, raise AgentCrashError.
 
@@ -150,8 +157,8 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         self._state = AgentState.ERROR
         finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
         if cause is not None:
-            raise AgentCrashError(message) from cause
-        raise AgentCrashError(message)
+            raise AgentCrashError(message, category=category or provider_exception_category(cause)) from cause
+        raise AgentCrashError(message, category=category)
 
     def _finalize_external_cancel(self, finalize: _FinalizeFn) -> None:
         """Finalize a turn cancelled from outside (the task watchdog) as a crash. Does NOT raise.

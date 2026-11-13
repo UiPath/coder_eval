@@ -6,8 +6,8 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from inspect import isawaitable
@@ -23,6 +23,7 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
+    GradingError,
     ReferenceTamperedError,
     TaskTimeoutError,
     TurnTimeoutError,
@@ -46,6 +47,7 @@ from .models import (
     DirectRoute,
     EvaluationResult,
     FinalStatus,
+    GradingErrorInfo,
     JudgeCriterionResult,
     LiteLLMRoute,
     PostRunCommand,
@@ -78,7 +80,7 @@ from .path_utils import (
 )
 from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
-from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
+from .simulation import DialogStopReason, DialogUser, ScriptedUser, SimulatorResult, UserSimulator, evaluate_stop
 from .simulation.utterance import extract_utterance as _extract_utterance
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
@@ -356,6 +358,8 @@ class Orchestrator:
         # sets it to widen the egress allowlist for grading.
         self.before_grading: Callable[[], Awaitable[None]] | None = None
         self._grading_started = False
+        self._grading_failure: GradingError | None = None
+        self._execution_complete = False
         self.sandbox = sandbox
         self.variant_id = variant_id
         self.source_yaml = source_yaml
@@ -461,8 +465,8 @@ class Orchestrator:
         Rationale: .claude/notes/orchestration.md § The terminal-status chain
         """
         assert self.result is not None, "Result not initialized"
-        inherited = self.prior_result.final_status if self.prior_result is not None else None
-        if inherited is not None and inherited.is_execution_fact:
+        if self.prior_result is not None and self.prior_result.has_execution_failure:
+            inherited = self.prior_result.final_status
             logger.info(
                 "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
                 inherited.value,
@@ -527,10 +531,11 @@ class Orchestrator:
         task_log_file.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
         # Use context manager for automatic log handler management
+        task_timeout = self.task.run_limits.task_timeout if self.task.run_limits else None
         with task_log_handler(task_log_file, task_id=self._log_task_id) as log_tail:
             try:
                 # Setup components
-                await self._setup()
+                await self._setup_for_evaluation()
 
                 # A failing command with fail_on_error=True raises, landing the
                 # run as ERROR; post_run and _cleanup still run via the finally.
@@ -538,99 +543,30 @@ class Orchestrator:
                 # Everything before the agent phase, as ONE task-level bucket.
                 self.result.setup_ms = (time.monotonic() - setup_started) * 1000.0
 
-                # An OS-thread watchdog, immune to the anyio cancel scopes that
-                # silently swallowed asyncio.wait_for cancellations during long
-                # rate-limited API calls.
-                task_timeout = self.task.run_limits.task_timeout if self.task.run_limits else None
-
-                def _kill_agent_subprocess_sync() -> None:
-                    if self.agent is not None:
-                        # kill_sync is a synchronous SIGKILL-by-PID, safe to
-                        # call from a non-asyncio thread.
-                        with suppress(Exception):
-                            self.agent.kill_sync()
-
-                with ThreadedWatchdog(
-                    timeout_seconds=task_timeout,
-                    on_timeout=_kill_agent_subprocess_sync,
-                    asyncio_task_to_cancel=asyncio.current_task(),
-                    label=f"task_timeout ({self.task.task_id})",
-                ) as wd:
-                    success = await self._run_evaluation_with_failure_evidence(
-                        watchdog=wd,
-                        task_timeout=task_timeout,
-                        start_time=start_time,
-                    )
-                # The loop can return normally while the watchdog fired during
-                # post-loop work, or the inner coro swallowed the cancel.
-                if wd.fired and task_timeout is not None:
-                    raise TaskTimeoutError(
-                        task_timeout,
-                        task_id=self.task.task_id,
-                        elapsed_seconds=time.time() - start_time,
-                    )
-
+                success = await self._run_watched_evaluation(task_timeout=task_timeout, start_time=start_time)
                 self.result.final_status = self._terminal_status(success)
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
-            except TaskTimeoutError as e:
-                # Task-level timeout gets a dedicated status (not generic ERROR)
-                self.result.final_status = FinalStatus.TIMEOUT
-                self.result.error_message = str(e)
-
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component="orchestrator.task_timeout",
-                    agent_name=self._agent_name,
-                )
-
-                logger.error(f"Task timed out: {e}")
-
-                # Nothing else on this path recovers the in-flight turn: the
-                # cancel arrives as a BaseException, so it never reaches the retry
-                # executor's per-attempt hook.
-                await self._drain_killed_turn()
-            except BudgetExceededError as e:
-                # Map token-budget breaches and cost-budget breaches to distinct
-                # statuses so per-task records preserve the failure mode.
-                if e.budget_name == "usd":
-                    self.result.final_status = FinalStatus.COST_BUDGET_EXCEEDED
-                    component = "orchestrator.run_limits.cost"
+            except GradingError as error:
+                self._handle_grading_error(error)
+                logger.error("Grading failed: %s", error, exc_info=True)
+            except (TaskTimeoutError, BudgetExceededError) as e:
+                self._record_limit_error(e)
+                if isinstance(e, TaskTimeoutError):
+                    logger.error(f"Task timed out: {e}")
+                    await self._drain_killed_turn()
                 else:
-                    self.result.final_status = FinalStatus.TOKEN_BUDGET_EXCEEDED
-                    component = "orchestrator.run_limits.tokens"
-                self.result.error_message = str(e)
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component=component,
-                    agent_name=self._agent_name,
-                )
-                logger.warning(f"Run limit exceeded: {e}")
+                    logger.warning(f"Run limit exceeded: {e}")
             except Exception as e:
-                # Handle catastrophic errors
-                self.result.final_status = FinalStatus.ERROR
-                self.result.error_message = str(e)
-
                 # Determine which component failed (setup vs. iteration N)
                 if self.result.iteration_count == 0:
                     failed_component = "orchestrator.setup"
                 else:
                     failed_component = f"orchestrator.iteration_{self.result.iteration_count}"
 
-                # Capture detailed error context
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),  # Actual iteration attempt (1-indexed)
-                    component=failed_component,
-                    agent_name=self._agent_name,
-                )
+                self._record_error(e, component=failed_component)
 
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
@@ -644,7 +580,13 @@ class Orchestrator:
                     # BEFORE post-run/cleanup: needs the live sandbox to resolve
                     # the agent-aligned `uip`, and post-task tool state on disk.
                     self._refresh_runtime_tool_versions()
-                    await self._run_post_run_commands()
+                    if self.prior_result is not None:
+                        with self._grading_site("orchestrator.grading.post_run"):
+                            await self._run_post_run_commands()
+                    else:
+                        await self._run_post_run_commands()
+                except GradingError as error:
+                    self._handle_grading_error(error)
                 except (Exception, asyncio.CancelledError) as e:
                     teardown_interrupt = e
                     logger.warning(
@@ -664,12 +606,63 @@ class Orchestrator:
                     FinalStatus.TOKEN_BUDGET_EXCEEDED,
                     FinalStatus.COST_BUDGET_EXCEEDED,
                 }:
-                    self.result.error_log_tail = log_tail.get_text() or None
+                    tail = log_tail.get_text() or None
+                    if self._grading_failure is not None and self._grading_failure.incident is not None:
+                        self._grading_failure.incident.log_tail = tail
+                    if self.prior_result is None or not self.prior_result.has_execution_failure:
+                        self.result.error_log_tail = tail
                 self._finalize_result(start_time)
                 if teardown_interrupt is not None:
                     raise teardown_interrupt
 
+        grading_failure = self._grading_failure
+        if self.prior_result is not None and grading_failure is not None:
+            raise grading_failure
         return self.result
+
+    async def _run_watched_evaluation(self, *, task_timeout: int | None, start_time: float) -> bool:
+        def kill_agent() -> None:
+            if self.agent is not None:
+                with suppress(Exception):
+                    self.agent.kill_sync()
+
+        boundary = (
+            self._grading_site("orchestrator.grading.attempt") if self.prior_result is not None else nullcontext()
+        )
+        with boundary:
+            with ThreadedWatchdog(
+                timeout_seconds=task_timeout,
+                on_timeout=kill_agent,
+                asyncio_task_to_cancel=asyncio.current_task(),
+                label=f"task_timeout ({self.task.task_id})",
+            ) as watchdog:
+                try:
+                    success = await self._run_evaluation_with_failure_evidence(
+                        watchdog=watchdog, task_timeout=task_timeout, start_time=start_time
+                    )
+                except GradingError as error:
+                    if watchdog.fired and task_timeout is not None:
+                        timeout = TaskTimeoutError(
+                            task_timeout, task_id=self.task.task_id, elapsed_seconds=time.time() - start_time
+                        )
+                        if self.prior_result is None:
+                            self._record_limit_error(timeout)
+                            self._handle_grading_error(error)
+                        raise timeout from error
+                    raise
+            if watchdog.fired and task_timeout is not None:
+                raise TaskTimeoutError(
+                    task_timeout, task_id=self.task.task_id, elapsed_seconds=time.time() - start_time
+                )
+            return success
+
+    async def _setup_for_evaluation(self) -> None:
+        if self.prior_result is None:
+            await self._setup()
+            return
+        self._execution_complete = True
+        with self._grading_site("orchestrator.grading.setup"):
+            await self._setup()
 
     def _seed_from_prior_result(self) -> None:
         """Carry a completed run's execution facts onto this re-grade's result.
@@ -709,6 +702,27 @@ class Orchestrator:
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
+        self.result.error_phase = prior.error_phase
+        self.result.error_history = [incident.model_copy(deep=True) for incident in prior.error_history]
+        if prior.final_status is FinalStatus.ERROR and prior.error_phase == "grading":
+            self.result.error_history.append(
+                GradingErrorInfo(
+                    message=prior.error_message or "Grading failed",
+                    details=prior.error_details,
+                    log_tail=prior.error_log_tail,
+                    recorded_at=prior.completed_at or prior.started_at,
+                )
+            )
+            self.result.error_history.sort(key=lambda incident: incident.recorded_at.timestamp())
+        if (
+            prior.final_status is FinalStatus.ERROR
+            and prior.error_phase == "grading"
+            and not prior.has_execution_failure
+        ):
+            self.result.error_message = None
+            self.result.error_details = None
+            self.result.error_log_tail = None
+            self.result.error_phase = None
         self.result.sdk_options = prior.sdk_options
         self.result.agent_config = prior.agent_config
         self.result.expected_commands = prior.expected_commands
@@ -762,6 +776,11 @@ class Orchestrator:
                 ) from None
             raise
         except (AgentCrashError, TurnTimeoutError, BudgetExceededError) as terminal_error:
+            if isinstance(terminal_error, BudgetExceededError):
+                self._record_limit_error(terminal_error)
+            else:
+                assert self.result is not None
+                self._record_error(terminal_error, component=f"orchestrator.iteration_{self.result.iteration_count}")
             if (
                 isinstance(terminal_error, BudgetExceededError)
                 and self.result is not None
@@ -769,7 +788,8 @@ class Orchestrator:
             ):
                 raise
             try:
-                await self._evaluate_post_failure_criteria()
+                with self._grading_site("orchestrator.grading.diagnostics"):
+                    await self._evaluate_post_failure_criteria()
             except asyncio.CancelledError:
                 if watchdog.fired:
                     self._record_post_failure_not_evaluated(
@@ -783,6 +803,8 @@ class Orchestrator:
                 else:
                     raise
             except Exception as recovery_error:
+                if isinstance(recovery_error, GradingError):
+                    self._handle_grading_error(recovery_error)
                 self._record_post_failure_not_evaluated(self._post_failure_exception_reason(recovery_error))
                 logger.warning(
                     "[%s] Post-failure criteria evaluation failed; preserving the original terminal error",
@@ -793,6 +815,7 @@ class Orchestrator:
 
     @staticmethod
     def _post_failure_exception_reason(error: Exception) -> str:
+        error = error.cause if isinstance(error, GradingError) else error
         message = " ".join(str(error).split())
         if len(message) > 200:
             message = message[:199] + "…"
@@ -861,11 +884,7 @@ class Orchestrator:
         checked: CriteriaResults = []
         if runnable:
             await self._start_grading()
-            checked = await self.success_checker.check_all_async(
-                runnable,
-                reference_dir=self._reference_dir,
-                turn_records=self.result.iterations,
-            )
+            checked = await self._check_criteria(runnable)
 
         if len(checked) != len(runnable):
             raise ValueError(
@@ -881,10 +900,95 @@ class Orchestrator:
                 recovered.append(next(checked_iter))
         self.result.post_failure_criteria_results = recovered
 
+    def _grading_error_info(self, error: Exception, component: str) -> GradingErrorInfo:
+        assert self.result is not None
+        return GradingErrorInfo(
+            message=str(error),
+            details=create_error_context(
+                error=error,
+                task_id=self.task.task_id,
+                attempt=max(self.result.iteration_count, 1),
+                component=component,
+                agent_name=self._agent_name,
+            ),
+            recorded_at=datetime.now(),
+        )
+
+    @contextmanager
+    def _grading_site(self, component: str) -> Iterator[None]:
+        try:
+            yield
+        except (ReferenceTamperedError, GradingError):
+            raise
+        except Exception as error:
+            raise GradingError(error, component=component) from error
+
+    async def _check_criteria(self, criteria: list[SuccessCriterion]) -> CriteriaResults:
+        assert self.success_checker is not None
+        assert self.result is not None
+        with self._grading_site("orchestrator.grading"):
+            return await self.success_checker.check_all_async(
+                criteria,
+                reference_dir=self._reference_dir,
+                turn_records=self.result.iterations,
+            )
+
+    def _handle_grading_error(self, error: GradingError) -> None:
+        assert self.result is not None
+        incident = self._grading_error_info(error.cause, error.component)
+        error.incident = incident
+        self._grading_failure = error
+        if self.prior_result is not None and self.prior_result.has_execution_failure:
+            self.result.final_status = self.prior_result.final_status
+            self.result.error_history.append(incident)
+            return
+        if self.result.has_execution_failure:
+            self.result.error_history.append(incident)
+            return
+        self.result.final_status = FinalStatus.ERROR
+        self.result.error_phase = "grading" if self._execution_complete else "execution"
+        self.result.error_message = incident.message
+        self.result.error_details = incident.details
+
+    def _record_limit_error(self, error: TaskTimeoutError | BudgetExceededError) -> None:
+        assert self.result is not None
+        self.result.error_phase = "execution"
+        if isinstance(error, TaskTimeoutError):
+            self.result.final_status = FinalStatus.TIMEOUT
+            component = "orchestrator.task_timeout"
+        elif error.budget_name == "usd":
+            self.result.final_status = FinalStatus.COST_BUDGET_EXCEEDED
+            component = "orchestrator.run_limits.cost"
+        else:
+            self.result.final_status = FinalStatus.TOKEN_BUDGET_EXCEEDED
+            component = "orchestrator.run_limits.tokens"
+        self.result.error_message = str(error)
+        self.result.error_details = create_error_context(
+            error=error,
+            task_id=self.task.task_id,
+            attempt=max(self.result.iteration_count, 1),
+            component=component,
+            agent_name=self._agent_name,
+        )
+
+    def _record_error(self, error: Exception, *, component: str) -> None:
+        assert self.result is not None
+        self.result.final_status = FinalStatus.ERROR
+        self.result.error_phase = "execution"
+        self.result.error_message = str(error)
+        self.result.error_details = create_error_context(
+            error=error,
+            task_id=self.task.task_id,
+            attempt=max(self.result.iteration_count, 1),
+            component=component,
+            agent_name=self._agent_name,
+        )
+
     async def _start_grading(self) -> None:
         if self.before_grading is not None and not self._grading_started:
             self._grading_started = True
-            await self.before_grading()
+            with self._grading_site("orchestrator.before_grading"):
+                await self.before_grading()
 
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
@@ -942,15 +1046,7 @@ class Orchestrator:
         except ValueError as e:
             logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
             self.result.weighted_score = None
-            self.result.final_status = FinalStatus.ERROR
-            self.result.error_message = str(e)
-            self.result.error_details = create_error_context(
-                error=e,
-                task_id=self.task.task_id,
-                attempt=max(self.result.iteration_count, 1),
-                component="orchestrator.finalize.weighted_score",
-                agent_name=self._agent_name,
-            )
+            self._handle_grading_error(GradingError(e, component="orchestrator.finalize.weighted_score"))
 
     def _finalize_regrade_timing(self) -> None:
         """On a re-grade, keep the AGENT run's timing and artifacts pointer.
@@ -1099,6 +1195,9 @@ class Orchestrator:
         name, props = build_task_event(self.result, driver=driver, variant_id=self.variant_id or "")
         track_event(name, props)
 
+        if self.prior_result is not None and self._grading_failure is not None:
+            return
+
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
@@ -1128,8 +1227,8 @@ class Orchestrator:
 
         write_task_html(self.result, self.html_report_path)
 
-    def _check_run_limits(self, *, iteration: int) -> None:
-        """Raise BudgetExceededError if any RunLimits budget is exceeded.
+    def _check_run_limits(self, *, iteration: int) -> BudgetExceededError | None:
+        """Return the first exceeded run limit without interrupting grading.
 
         Called after each completed turn. Aggregates across self.result.iterations.
         No-op when self.task.run_limits is None.
@@ -1137,11 +1236,11 @@ class Orchestrator:
         assert self.result is not None
         limits = self.task.run_limits
         if limits is None:
-            return
+            return None
 
         usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
         if not usages:
-            return
+            return None
 
         input_tokens = sum(u.uncached_input_tokens for u in usages)
         if limits.count_cache_creation:
@@ -1152,7 +1251,7 @@ class Orchestrator:
         total_tokens = input_tokens + output_tokens
 
         if limits.max_input_tokens is not None and input_tokens > limits.max_input_tokens:
-            raise BudgetExceededError(
+            return BudgetExceededError(
                 "input_tokens",
                 actual=input_tokens,
                 limit=limits.max_input_tokens,
@@ -1160,7 +1259,7 @@ class Orchestrator:
                 iteration=iteration,
             )
         if limits.max_output_tokens is not None and output_tokens > limits.max_output_tokens:
-            raise BudgetExceededError(
+            return BudgetExceededError(
                 "output_tokens",
                 actual=output_tokens,
                 limit=limits.max_output_tokens,
@@ -1168,7 +1267,7 @@ class Orchestrator:
                 iteration=iteration,
             )
         if limits.max_total_tokens is not None and total_tokens > limits.max_total_tokens:
-            raise BudgetExceededError(
+            return BudgetExceededError(
                 "total_tokens",
                 actual=total_tokens,
                 limit=limits.max_total_tokens,
@@ -1185,16 +1284,17 @@ class Orchestrator:
                         self.task.task_id,
                     )
                     self._cost_budget_skipped_logged = True
-                return
+                return None
             total_cost = sum(costs)
             if total_cost > limits.max_usd:
-                raise BudgetExceededError(
+                return BudgetExceededError(
                     "usd",
                     actual=total_cost,
                     limit=limits.max_usd,
                     task_id=self.task.task_id,
                     iteration=iteration,
                 )
+        return None
 
     def _check_expected_turns(self, *, iteration: int) -> None:
         """Emit a one-shot warning if visible turns exceed expected_turns.
@@ -1881,6 +1981,7 @@ class Orchestrator:
         run_limits = self.task.run_limits
         turn_timeout = run_limits.turn_timeout if run_limits else None
         max_turns = run_limits.max_turns if run_limits else None
+        max_turn_retries = run_limits.max_turn_retries if run_limits else None
 
         agent_callback: StreamCallback | None = None
         if self.stream_callback is not None:
@@ -1980,6 +2081,7 @@ class Orchestrator:
                     "component": "agent",
                     "agent_name": self._agent_name,
                 },
+                max_attempts=max_turn_retries + 1 if max_turn_retries is not None else None,
                 on_attempt_error=_on_attempt_failure,
             )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
@@ -2103,6 +2205,12 @@ class Orchestrator:
                 logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
         return self.result.all_criteria_passed(self.task.success_criteria)
 
+    def _agent_prompt(self, prompt: str, sandbox_dir: Path) -> str:
+        """The text the agent receives for ``prompt``: behind the working-directory prefix unless the task opts out."""
+        if not self.task.working_directory_prefix:
+            return prompt
+        return f"Your working directory is: {sandbox_dir.resolve()}\n\n{prompt}"
+
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
 
@@ -2142,25 +2250,29 @@ class Orchestrator:
                 self.result.iteration_count = 1
             # Evaluate-only loads the reference too: include_reference judges
             # expect it populated even when no agent runs.
-            criteria_results = await self.success_checker.check_all_async(
-                self.task.success_criteria,
-                reference_dir=self._reference_dir,
-                turn_records=self.result.iterations,
-            )
+            self._execution_complete = True
+            criteria_results = await self._check_criteria(self.task.success_criteria)
             self.result.success_criteria_results = criteria_results
-            return self._select_gate()
+            with self._grading_site("orchestrator.grading.gate"):
+                return self._select_gate()
 
-        # Working directory context prepended to every prompt (including feedback).
+        # Working directory context prepended to every prompt (see `_agent_prompt`).
         # The agent resumes its session between iterations via session_id.
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
 
         # A simulation block replaces the single-shot loop entirely; a simulated
         # task runs exactly one dialog per call.
-        if self.task.simulation is not None and self.task.simulation.enabled:
-            # initial_prompt is optional in simulation mode — when unset, the
-            # simulator produces the opening utterance itself.
-            return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
+        simulation = self.task.simulation
+        if simulation is not None and simulation.enabled:
+            if simulation.turns is None:
+                # initial_prompt is optional in simulation mode — when unset, the
+                # simulator produces the opening utterance itself.
+                return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
+            # A scripted dialog opens with its first turn; ScriptedUser replays the rest.
+            return await self._simulation_dialog_loop(
+                simulation.turns[0], sandbox_dir, user=ScriptedUser(simulation.turns)
+            )
 
         # Guaranteed for real agents by check_prompt_fields; a no-op task runs with
         # no prompt, which NoOpAgent ignores, returning an empty turn.
@@ -2170,13 +2282,13 @@ class Orchestrator:
         self.result.iteration_count = iteration
 
         # Communicate with agent (with retry logic)
-        prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
+        agent_prompt = self._agent_prompt(current_prompt, sandbox_dir)
         logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
         # The agent owns its lifecycle events now (AgentStartEvent fires inside
         # communicate()); the orchestrator is a pure consumer of the stream.
         turn_record = await self._communicate_with_retry(
-            prompt=prompt_with_cwd,
+            prompt=agent_prompt,
             iteration=iteration,
             operation_label="Agent communication",
         )
@@ -2204,6 +2316,11 @@ class Orchestrator:
         # Soft cumulative-turn check (logs once; never aborts).
         self._check_expected_turns(iteration=iteration)
 
+        self._execution_complete = True
+        limit_error = self._check_run_limits(iteration=iteration)
+        if limit_error is not None:
+            self._record_limit_error(limit_error)
+
         # Grading site 2 of 4. The trajectory is captured and persisted exactly as
         # on a graded run, but nothing is scored; returning False keeps FinalStatus
         # off SUCCESS and the status chain turns it into NOT_GRADED. The
@@ -2213,39 +2330,38 @@ class Orchestrator:
             logger.info("Grading disabled (execute mode): skipping success criteria.")
             # A run limit, not a verdict: its only reason to sit after the
             # criteria on the graded path is partial-credit visibility.
-            self._check_run_limits(iteration=iteration)
+            if limit_error is not None:
+                raise limit_error
             return False
 
-        # Check success criteria (reference_dir feeds reference_comparison + judges)
-        logger.debug("Checking success criteria")
-        await self._start_grading()
-        await self._verify_reference_integrity()
-        criteria_results = await self.success_checker.check_all_async(
-            self.task.success_criteria,
-            reference_dir=self._reference_dir,
-            turn_records=self.result.iterations,
-        )
-        self.result.success_criteria_results = criteria_results
+        with self._grading_site("orchestrator.grading"):
+            # Check success criteria (reference_dir feeds reference_comparison + judges)
+            logger.debug("Checking success criteria")
+            await self._start_grading()
+            await self._verify_reference_integrity()
+            criteria_results = await self._check_criteria(self.task.success_criteria)
+            self.result.success_criteria_results = criteria_results
 
-        # all_passed is single-sourced via the model gate; the counts below are
-        # only for the log line.
-        pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
-        passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
-        total_count = len(pairs)
-        all_passed = self._select_gate()
+            # all_passed is single-sourced via the model gate; the counts below are
+            # only for the log line.
+            pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
+            passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
+            total_count = len(pairs)
+            all_passed = self._select_gate()
 
-        # Reuse the model method for weighted score (single source of truth)
-        self.result.calculate_weighted_score(self.task.success_criteria)
-        # A score exists (calculate_weighted_score just ran); the fallback is for
-        # the type, not for an unmeasured row.
-        current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
+            # Reuse the model method for weighted score (single source of truth)
+            self.result.calculate_weighted_score(self.task.success_criteria)
+            # A score exists (calculate_weighted_score just ran); the fallback is for
+            # the type, not for an unmeasured row.
+            current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
 
-        logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
+            logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
-        self._emit_criteria_event(criteria_results)
+            self._emit_criteria_event(criteria_results)
 
         # AFTER the criteria, so partial-credit visibility is preserved.
-        self._check_run_limits(iteration=iteration)
+        if limit_error is not None:
+            raise limit_error
 
         return all_passed
 
@@ -2289,27 +2405,25 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
-        # Grading site 3 of 4. Unreachable today, and RAISES rather than returning
-        # an empty list: both callers go straight on to the gate, which treats an
-        # empty criteria list as a vacuous pass, so a silent no-op here would
-        # produce a criteria-free dialog scoring as though nothing was asked.
+        # Grading site 3 of 4. The loop skips its end-of-dialog and budget-gate checks
+        # when ungraded; the per-turn check is reachable ungraded only past the CLI
+        # refusal, and RAISES rather than returning an empty list: the gate treats an
+        # empty criteria list as a vacuous pass, so a silent no-op here would produce
+        # a criteria-free dialog scoring as though nothing was asked.
         # Rationale: .claude/notes/orchestration.md § The four grading sites
         if not self.grade:
             raise ValueError(
                 "Grading is disabled but the simulation dialog path requires criteria results to "
-                + "decide turn continuation. `execute` refuses simulation tasks at the CLI; reaching "
-                + "here means that refusal was bypassed."
+                + "decide turn continuation. `execute` refuses LLM-simulated dialogs at the CLI; "
+                + "reaching here means that refusal was bypassed."
             )
-        await self._verify_reference_integrity()
-        criteria_results = await self.success_checker.check_all_async(
-            self.task.success_criteria,
-            reference_dir=self._reference_dir,
-            turn_records=self.result.iterations,
-        )
-        self._accumulate_judge_usage(criteria_results, judge_usage_accum)
-        self.result.success_criteria_results = criteria_results
-        self.result.calculate_weighted_score(self.task.success_criteria)
-        return criteria_results
+        with self._grading_site("orchestrator.dialog.grading"):
+            await self._verify_reference_integrity()
+            criteria_results = await self._check_criteria(self.task.success_criteria)
+            self._accumulate_judge_usage(criteria_results, judge_usage_accum)
+            self.result.success_criteria_results = criteria_results
+            self.result.calculate_weighted_score(self.task.success_criteria)
+            return criteria_results
 
     def _user_message_from_sim(
         self,
@@ -2338,7 +2452,7 @@ class Orchestrator:
 
     async def _solicit_user_message(
         self,
-        simulator: UserSimulator,
+        simulator: DialogUser,
         history: list[tuple[str, str]],
         sim_model_id: str | None,
         failure_log_msg: str,
@@ -2369,7 +2483,7 @@ class Orchestrator:
         )
 
     async def _acquire_opener(
-        self, simulator: UserSimulator, sim_config: SimulationConfig, sim_model_id: str | None
+        self, simulator: DialogUser, sim_config: SimulationConfig, sim_model_id: str | None
     ) -> _OpenerOutcome:
         """Pure-simulation opener (``initial_prompt is None``): ask the simulator to
         generate turn 1 from empty history.
@@ -2424,12 +2538,15 @@ class Orchestrator:
             failures=0,
         )
 
-    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
+    async def _simulation_dialog_loop(  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
+        self, initial_prompt: str | None, sandbox_dir: Path, *, user: DialogUser | None = None
+    ) -> bool:
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
         Replaces the criteria-feedback iteration loop for tasks that define a
         ``simulation`` block. One invocation runs exactly ONE dialog trajectory;
-        parallel trials are expanded upstream.
+        parallel trials are expanded upstream. ``user`` replaces the LLM simulator
+        (a scripted dialog passes its ``ScriptedUser``).
 
         Lifecycle: obtain the opening utterance (pinned ``initial_prompt``, else
         ask the simulator), send it as turn 1, then after each agent reply
@@ -2437,7 +2554,7 @@ class Orchestrator:
         budget), and ask the simulator for the next message — breaking on a passing
         criteria check with ``stop_on_criteria_pass``, on the simulator's stop
         token, or on a simulator exception. A final criteria check runs afterwards
-        unless one just did.
+        unless one just did, and only when graded.
 
         Emits the same streaming events as the single-shot loop, so downstream
         renderers work unchanged. Simulator telemetry lands on
@@ -2452,13 +2569,17 @@ class Orchestrator:
         assert self.task.agent is not None
         sim_config = self.task.simulation
 
-        simulator = UserSimulator(
-            config=sim_config,
-            task_description=self.task.description,
-            initial_prompt=initial_prompt,
-            # Resolved independently of eval_route and checker_context: the
-            # simulator is a real CLI subprocess, not a checker concern.
-            route=self.simulator_route,
+        simulator = (
+            user
+            if user is not None
+            else UserSimulator(
+                config=sim_config,
+                task_description=self.task.description,
+                initial_prompt=initial_prompt,
+                # Resolved independently of eval_route and checker_context: the
+                # simulator is a real CLI subprocess, not a checker concern.
+                route=self.simulator_route,
+            )
         )
         await simulator.start()
 
@@ -2503,7 +2624,7 @@ class Orchestrator:
             else:
                 current_prompt = initial_prompt
                 pending_user_turn = UserMessage(text=initial_prompt)
-                self._log_conversation("USER", 1, current_prompt, metadata="pinned initial_prompt")
+                self._log_conversation("USER", 1, current_prompt, metadata="pinned opener")
             # Clean (user, agent) pairs, deliberately without the
             # working-directory prefix the framework prepends to agent prompts.
             dialog_pairs: list[tuple[str, str]] = []
@@ -2523,11 +2644,10 @@ class Orchestrator:
                 self.result.iteration_count = turns_completed
                 logger.info("Simulation turn %s/%s", turns_completed, sim_config.max_turns)
 
-                prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
                 # Agent emits its own AgentStartEvent inside communicate().
                 agent_turn_attempted = True
                 turn_record = await self._communicate_with_retry(
-                    prompt=prompt_with_cwd,
+                    prompt=self._agent_prompt(current_prompt, sandbox_dir),
                     iteration=turns_completed,
                     operation_label=f"Agent communication (sim turn {turns_completed})",
                 )
@@ -2535,6 +2655,9 @@ class Orchestrator:
                     turn_record.messages.insert(0, pending_user_turn)
                     pending_user_turn = None
                 self.result.iterations.append(turn_record)
+                # Retain the agent fact even when the script's stop wins below.
+                if turn_record.max_turns_exhausted:
+                    self.result.max_turns_exhausted = True
                 self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
@@ -2561,24 +2684,27 @@ class Orchestrator:
                     usage = turn_record.token_usage
                     total_tokens_used += (usage.uncached_input_tokens or 0) + (usage.output_tokens or 0)
 
+                limit_error = self._check_run_limits(iteration=turns_completed)
+                if limit_error is not None:
+                    self._record_limit_error(limit_error)
+
                 criteria_checked_this_turn = False
                 if check_every_turn:
                     criteria_results = await self._run_dialog_criteria_check(judge_usage_accum)
                     criteria_checked_this_turn = True
-                    all_passed = self.result.all_criteria_passed(self.task.success_criteria)
-                    self._emit_criteria_event(criteria_results)
+                    with self._grading_site("orchestrator.dialog.grading.gate"):
+                        all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+                        self._emit_criteria_event(criteria_results)
 
                 # Budget gate: aborts the dialog with a dedicated stop reason and
                 # ensures end-of-dialog criteria still run for partial credit.
-                try:
-                    self._check_run_limits(iteration=turns_completed)
-                except BudgetExceededError:
+                if limit_error is not None:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
-                    if not criteria_checked_this_turn:
+                    if self.grade and not criteria_checked_this_turn:
                         # Partial-credit side effects only; this fallback site
                         # neither sets all_passed nor emits an event.
                         await self._run_dialog_criteria_check(judge_usage_accum)
-                    raise
+                    raise limit_error
 
                 stop_decision = evaluate_stop(
                     config=sim_config,
@@ -2597,7 +2723,6 @@ class Orchestrator:
                 self._check_expected_turns(iteration=turns_completed)
 
                 if turn_record.max_turns_exhausted:
-                    self.result.max_turns_exhausted = True
                     stop_reason = DialogStopReason.AGENT_MAX_TURNS
                     logger.warning(
                         "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",
@@ -2634,13 +2759,15 @@ class Orchestrator:
 
             # Final criteria check for end_of_dialog (or both) modes, or when
             # every_turn mode did not run a check for the final turn.
-            end_of_dialog_needed = (
+            end_of_dialog_needed = self.grade and (
                 sim_config.check_criteria in ("end_of_dialog", "both") or not criteria_checked_this_turn
             )
+            self._execution_complete = stop_reason is not DialogStopReason.ERROR
             if end_of_dialog_needed:
                 criteria_results = await self._run_dialog_criteria_check(judge_usage_accum)
-                all_passed = self.result.all_criteria_passed(self.task.success_criteria)
-                self._emit_criteria_event(criteria_results)
+                with self._grading_site("orchestrator.dialog.grading.gate"):
+                    all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+                    self._emit_criteria_event(criteria_results)
 
             assert stop_reason is not None, "dialog loop exited without picking a stop_reason"
             self.result.simulation = self._build_simulation_telemetry(
@@ -2660,8 +2787,7 @@ class Orchestrator:
             )
             return all_passed
         finally:
-            # An agent turn attempted but crashed before attaching its user turn
-            # to a record: append it standalone or its telemetry is lost.
+            # Preserve an unconsumed user utterance as telemetry, not an agent answer.
             if agent_turn_attempted and pending_user_turn is not None and self.result is not None:
                 # `duration_seconds` defaults to 0.0 and no caller passes it, so
                 # this used to report 0 s for a simulator call that took seconds,
@@ -2669,6 +2795,7 @@ class Orchestrator:
                 # no simulator call behind it, so 0.0 there is real.
                 sim_ms = pending_user_turn.generation_duration_ms
                 standalone_turn = TurnRecord(
+                    record_kind="standalone_user",
                     iteration=turns_completed,
                     user_input=pending_user_turn.text or "",
                     agent_output="",

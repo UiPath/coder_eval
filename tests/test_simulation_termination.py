@@ -96,6 +96,48 @@ class TestEvaluateStop:
         assert d.reason == DialogStopReason.MAX_TURNS
 
 
+def _scripted_cfg(**overrides):
+    base = {"enabled": True, "turns": ["one", "two", "three"], "max_turns": 3}
+    base.update(overrides)
+    return SimulationConfig(**base)
+
+
+class TestEvaluateStopScripted:
+    """A script ends when its last turn is answered, never on a criteria result."""
+
+    def test_keeps_going_while_turns_remain(self):
+        d = evaluate_stop(config=_scripted_cfg(), turns_completed=2, total_tokens_used=0, criteria_all_passed=True)
+        assert d.stop is False
+
+    def test_script_exhausted_after_the_last_turn(self):
+        d = evaluate_stop(config=_scripted_cfg(), turns_completed=3, total_tokens_used=0, criteria_all_passed=False)
+        assert d.stop is True
+        assert d.reason == DialogStopReason.SCRIPT_EXHAUSTED
+
+    def test_script_exhausted_is_reported_instead_of_max_turns(self):
+        """The script fills ``max_turns`` exactly here; the more specific reason wins."""
+        d = evaluate_stop(config=_scripted_cfg(), turns_completed=3, total_tokens_used=0, criteria_all_passed=False)
+        assert d.reason == DialogStopReason.SCRIPT_EXHAUSTED
+
+    def test_script_exhausted_is_reported_instead_of_budget(self):
+        d = evaluate_stop(
+            config=_scripted_cfg(max_total_tokens=100),
+            turns_completed=3,
+            total_tokens_used=200,
+            criteria_all_passed=False,
+        )
+        assert d.reason == DialogStopReason.SCRIPT_EXHAUSTED
+
+    def test_budget_still_cuts_a_script_short(self):
+        d = evaluate_stop(
+            config=_scripted_cfg(max_total_tokens=100),
+            turns_completed=1,
+            total_tokens_used=200,
+            criteria_all_passed=False,
+        )
+        assert d.reason == DialogStopReason.BUDGET
+
+
 class TestStripStopToken:
     def test_removes_token(self):
         assert strip_stop_token("Thanks. <<<END>>>", "<<<END>>>") == "Thanks."

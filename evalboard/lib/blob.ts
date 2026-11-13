@@ -164,13 +164,31 @@ async function exists(p: string): Promise<boolean> {
     }
 }
 
+async function isOlderThan(p: string, ms: number): Promise<boolean> {
+    try {
+        return Date.now() - (await fs.stat(p)).mtimeMs > ms;
+    } catch {
+        return false;
+    }
+}
+
+// `refreshAfterMs` is for sidecars that are edited after upload: a cached copy
+// older than that is fetched again, and a failed refetch keeps the copy on disk.
 async function downloadBlob(
     container: string,
     blobName: string,
     destRoot: string,
+    refreshAfterMs?: number,
 ): Promise<void> {
     const localPath = path.join(destRoot, blobName);
-    if (await exists(localPath)) return;
+    const cached = await exists(localPath);
+    if (
+        cached &&
+        (refreshAfterMs === undefined ||
+            !(await isOlderThan(localPath, refreshAfterMs)))
+    ) {
+        return;
+    }
     await fs.mkdir(path.dirname(localPath), { recursive: true });
     // Download to a unique temp path then rename so a crash or aborted
     // request never leaves a partial file that `exists()` would treat as
@@ -183,6 +201,7 @@ async function downloadBlob(
         await fs.rename(tmpPath, localPath);
     } catch (err) {
         await fs.unlink(tmpPath).catch(() => {});
+        if (cached) return;
         throw err;
     }
 }
@@ -262,19 +281,45 @@ export async function ensureRunAnalysis(
     });
 }
 
-// Optional run metadata sidecar (title / description / adhoc), written by
-// `dashboard upload --title/--description/--adhoc`. Absent on pipeline runs
-// and any run uploaded before this feature — 404 is swallowed like analysis.
+// Optional run metadata sidecar (title / description / adhoc / series /
+// excluded), written by `dashboard upload --title/--description/--adhoc` and
+// edited in place afterwards. Absent on pipeline runs and any run uploaded
+// before this feature — 404 is swallowed like analysis. Pass `refreshAfterMs`
+// to pick up an edit made after the copy on disk was taken.
 export async function ensureRunMeta(
+    container: string,
+    runId: string,
+    destRoot: string,
+    refreshAfterMs?: number,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`meta:${container}:${runId}`, async () => {
+        try {
+            await downloadBlob(
+                container,
+                `${runId}/meta.json`,
+                destRoot,
+                refreshAfterMs,
+            );
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
+// experiment.json: per-arm aggregates of a multi-variant run, a small stand-in
+// for the multi-MB run.json when only arm-level numbers are needed.
+export async function ensureRunExperiment(
     container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`meta:${container}:${runId}`, async () => {
+    return dedupe(`experiment:${container}:${runId}`, async () => {
         try {
-            await downloadBlob(container, `${runId}/meta.json`, destRoot);
+            await downloadBlob(container, `${runId}/experiment.json`, destRoot);
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }

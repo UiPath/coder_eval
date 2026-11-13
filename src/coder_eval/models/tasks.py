@@ -52,6 +52,21 @@ CriteriaCheckTiming = Literal["end_of_dialog", "every_turn", "both"]
 """When success criteria are evaluated inside a simulated dialog."""
 
 
+_FIXED_WHEN_SCRIPTED = (
+    "persona",
+    "goal",
+    "constraints",
+    "model",
+    "stop_token",
+    "stop_on_criteria_pass",
+    "check_criteria",
+)
+"""``SimulationConfig`` fields that steer a simulated user or a criteria-driven stop.
+
+A scripted dialog uses none of them, so ``turns`` requires every one at its default.
+"""
+
+
 NORMALIZED_CRITERION_ALIASES: dict[str, dict[str, Any]] = {
     "command_not_executed": {"type": "command_executed", "min_count": 0, "max_count": 0},
 }
@@ -139,6 +154,9 @@ class SimulationConfig(BaseModel):
     optional behavioral constraints; it generates each subsequent user prompt
     after the first (which is still the task's ``initial_prompt``).
 
+    ``turns`` replaces the simulator with an authored script: the user is either
+    scripted (``turns``) or simulated (``persona`` + ``goal``), never both.
+
     Semantics relative to the existing task fields:
       - ``max_turns`` (below) bounds the intra-dialog agent<->user exchanges.
 
@@ -150,6 +168,20 @@ class SimulationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False, description="Master switch — when false, simulation is skipped entirely.")
+
+    turns: list[str] | None = MergeField(
+        strategy="replace",  # a later layer's script wholesale-replaces an earlier one's
+        default=None,
+        min_length=1,
+        max_length=100,
+        description=(
+            "Scripted user turns, sent verbatim and in order within ONE agent session. turns[0] is the "
+            "first prompt, so the task sets no initial_prompt. No simulator runs: persona, goal, "
+            "constraints, model, stop_token, stop_on_criteria_pass and check_criteria must keep their "
+            "defaults. max_turns is derived from len(turns). The dialog ends after the last turn "
+            "with stop_reason='script_exhausted'."
+        ),
+    )
 
     # The simulator shares the coding agent's ApiRoute, so temperature/max_tokens
     # resolve at the route level. The MODEL is pinned below rather than inherited.
@@ -164,17 +196,20 @@ class SimulationConfig(BaseModel):
         ),
     )
 
-    # Persona / goal.
-    persona: str = Field(
+    # Persona / goal: required for a simulated user, rejected for a scripted one.
+    persona: str | None = Field(
+        default=None,
         description=(
             "Who the simulator is roleplaying — background, tone, level of domain knowledge. "
-            "Passed verbatim into the simulator system prompt."
+            "Passed verbatim into the simulator system prompt. Required unless ``turns`` is set."
         ),
     )
-    goal: str = Field(
+    goal: str | None = Field(
+        default=None,
         description=(
             "What the simulated user wants to achieve. This drives the conversation. "
-            "You can optionally withhold information (see ``constraints``) to force clarification behavior."
+            "You can optionally withhold information (see ``constraints``) to force clarification behavior. "
+            "Required unless ``turns`` is set."
         ),
     )
     constraints: list[str] = MergeField(
@@ -191,7 +226,7 @@ class SimulationConfig(BaseModel):
         default=8,
         ge=1,
         le=100,
-        description="Hard cap on simulated user<->agent exchanges within a single dialog.",
+        description="Hard cap on simulated user<->agent exchanges; derived from len(turns) for scripted users.",
     )
     stop_token: str = Field(
         default=DEFAULT_SIMULATION_STOP_TOKEN,
@@ -231,12 +266,50 @@ class SimulationConfig(BaseModel):
         ),
     )
 
+    @property
+    def is_scripted(self) -> bool:
+        """True when the user side is the authored ``turns`` script, not an LLM simulator."""
+        return self.turns is not None
+
     @field_validator("persona", "goal")
     @classmethod
-    def _non_blank(cls, v: str) -> str:
-        if not v or not v.strip():
+    def _non_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
             raise ValueError("must be a non-empty string")
         return v
+
+    @field_validator("turns")
+    @classmethod
+    def _non_blank_turns(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None and any(not turn.strip() for turn in v):
+            raise ValueError("every turn must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_user_source(self) -> Self:
+        """The user is scripted (``turns``) or simulated (``persona`` + ``goal``), never both.
+
+        A scripted dialog never reads a simulator knob or a criteria result to decide
+        what to say or when to stop, so those fields must keep their defaults rather
+        than silently do nothing. Compared by value, not by ``model_fields_set``: a
+        recorded ``model_dump()`` marks every field as set.
+        """
+        if self.turns is None:
+            if self.persona is None or self.goal is None:
+                raise ValueError(
+                    "simulation needs `turns` (a scripted user) or both `persona` and `goal` (a simulated user)"
+                )
+            return self
+        fields = type(self).model_fields
+        changed = [
+            name
+            for name in _FIXED_WHEN_SCRIPTED
+            if getattr(self, name) != fields[name].get_default(call_default_factory=True)
+        ]
+        if changed:
+            raise ValueError(f"simulation.turns scripts the user, so these must keep their defaults: {changed}")
+        self.max_turns = len(self.turns)
+        return self
 
     @model_validator(mode="after")
     def _validate_timing(self) -> Self:
@@ -321,10 +394,11 @@ class Dataset(BaseModel):
     stable row identifier and becomes a suffix on the task_id
     ("<task_id>/<row.id>").
 
-    Row values are substituted into the task's ``initial_prompt`` and into
-    string fields of each ``success_criteria`` entry using ``${row.<field>}``
-    syntax. Substitution happens in ``task_loader.expand_dataset`` before
-    variant resolution, so variants cannot override the dataset.
+    Row values are substituted into the task's ``initial_prompt``, each
+    ``simulation.turns`` entry, and string fields of each ``success_criteria``
+    entry using ``${row.<field>}`` syntax. Substitution happens in
+    ``task_loader.expand_dataset`` before variant resolution, so variants
+    cannot override the dataset.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -455,6 +529,14 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "Mutually exclusive with initial_prompt."
         ),
     )
+    working_directory_prefix: bool = Field(
+        default=True,
+        description=(
+            "Prefix every prompt sent to the agent with 'Your working directory is: <sandbox path>'. "
+            "Set false to send each prompt byte-for-byte as authored (initial_prompt, or every "
+            "simulation.turns entry)."
+        ),
+    )
     tags: list[str] = MergeField(
         strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         default_factory=list,
@@ -560,7 +642,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default=None,
         description=(
             "Optional dataset to fan out this task into one sub-task per row. "
-            "Row values substitute into initial_prompt and success_criteria via ${row.<field>}. "
+            "Row values substitute into initial_prompt, simulation.turns, and success_criteria via ${row.<field>}. "
             "Expansion happens before variant resolution, so variants cannot override the dataset."
         ),
     )
@@ -579,8 +661,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default=None,
         description=(
             "Optional multi-turn user-simulation config. When present and enabled, the orchestrator runs "
-            "the task as a dialog between the coding agent and a simulated user LLM instead of "
-            "the default single-shot iteration loop."
+            "the task as a dialog between the coding agent and a simulated user LLM, or an authored "
+            "script (simulation.turns), instead of the default single-shot iteration loop."
         ),
     )
 
@@ -649,6 +731,22 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
                 "Either 'initial_prompt' or 'initial_prompt_file' must be provided "
                 + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener, "
                 + "or 'agent.type' is 'none', in which case no agent runs)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_scripted_turns_replace_the_prompt(self) -> Self:
+        """Refuse a prompt field beside ``simulation.turns``: turns[0] is the first prompt."""
+        simulation = self.simulation
+        if (
+            simulation is not None
+            and simulation.enabled
+            and simulation.is_scripted
+            and (self.initial_prompt is not None or self.initial_prompt_file is not None)
+        ):
+            raise ValueError(
+                "simulation.turns supplies every user turn, the first included: remove "
+                + "'initial_prompt' / 'initial_prompt_file' (or drop simulation.turns)."
             )
         return self
 
