@@ -114,7 +114,7 @@ def test_provider_routes_turn_to_custom_endpoint(monkeypatch, tmp_path, thread_p
         def run() -> None:
             try:
                 asyncio.run(scenario())
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(exc)
 
         worker = threading.Thread(target=run, daemon=True)
