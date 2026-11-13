@@ -5399,3 +5399,72 @@ class TestCE068EvalMaterialReadableUnderPluginRoot:
         from coder_eval.isolation import eval_material
 
         assert eval_material.manifest_skill_dirs is manifest_skill_dirs
+
+
+@pytest.mark.lint
+class TestCE071PatchedBinaryVerifiersDoNotSkip:
+    """CE071: patched binary verifiers must not skip, xfail, or catch BaseException.
+
+    Scope: the locally patched 3d-scan-calc and court-form-filling verifiers.
+    Blind spots: imported aliases and dynamically constructed calls are not resolved.
+    """
+
+    @staticmethod
+    def _offenders(source: str) -> list[int]:
+        import ast
+
+        return [
+            node.lineno
+            for node in ast.walk(ast.parse(source))
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"
+                and node.func.attr in {"skip", "importorskip", "xfail"}
+            )
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"skip", "skipif", "xfail"}
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "mark"
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "pytest"
+            )
+            or (
+                isinstance(node, ast.ExceptHandler)
+                and (node.type is None or (isinstance(node.type, ast.Name) and node.type.id == "BaseException"))
+            )
+        ]
+
+    @pytest.mark.parametrize("slug", ["3d-scan-calc", "court-form-filling"])
+    def test_patched_verifier(self, slug: str) -> None:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "tasks"
+            / "samples"
+            / "skillsbench"
+            / slug
+            / "verifier/test_outputs.py"
+        )
+        offenders = self._offenders(path.read_text(encoding="utf-8"))
+        assert not offenders, f"CE071: silent outcome or broad catch in {path} at lines {offenders}"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "pytest.skip('missing')",
+            "pytest.importorskip('pypdf')",
+            "pytest.xfail('missing')",
+            "@pytest.mark.skip\ndef test(): pass",
+            "@pytest.mark.skipif(True, reason='missing')\ndef test(): pass",
+            "@pytest.mark.xfail\ndef test(): pass",
+            "try: read()\nexcept: pass",
+            "try: read()\nexcept BaseException: pass",
+        ],
+    )
+    def test_detects_silent_outcomes(self, source: str) -> None:
+        assert self._offenders(source)
+
+    def test_allows_failure_and_narrow_exception(self) -> None:
+        assert not self._offenders("try: read()\nexcept ValueError: pytest.fail('invalid')")
