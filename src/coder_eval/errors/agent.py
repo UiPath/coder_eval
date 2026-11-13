@@ -1,5 +1,8 @@
 """Agent-specific exceptions and crash-reason formatting helpers."""
 
+from .categories import ErrorCategory
+
+
 CRASH_REASON_MAX_CHARS = 200
 
 
@@ -14,7 +17,11 @@ def truncate_crash_message(message: str, *, limit: int = CRASH_REASON_MAX_CHARS)
 
 
 class AgentCrashError(RuntimeError):
-    """Mid-turn agent failure; routed to AGENT_CRASH by isinstance."""
+    """Mid-turn failure with an optional adapter-reported category; defaults to AGENT_CRASH."""
+
+    def __init__(self, message: str = "", *, category: ErrorCategory | None = None) -> None:
+        super().__init__(message)
+        self.category = category
 
 
 class AgentConfigError(RuntimeError):

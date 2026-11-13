@@ -64,6 +64,11 @@ subprocess. `BEDROCK_MODEL` is the route-level default; an explicit `--model` /
 `-D agent.model=…` / task `agent.model` always wins over it, and bare aliases are
 auto-qualified to a regional inference profile (`eu.` / `us.` / `apac.` / `global.`).
 
+On Bedrock, `model_used` (per iteration and on the task) records that resolved
+inference-profile id, e.g. `eu.anthropic.claude-sonnet-5`. The SDK reports a friendly
+alias (`claude-sonnet-5`) instead; that raw value stays on each `messages[].model`.
+See [Report Schema → TurnRecord](../REPORT_SCHEMA.md#turnrecord) for the per-route contract.
+
 > **For official benchmarking use the direct API** — the SDK reports accurate
 > token/cost there. See [User Guide → API Routing](../USER_GUIDE.md#api-routing--benchmarking).
 

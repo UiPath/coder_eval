@@ -16,7 +16,9 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
+
+import tomli_w
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
@@ -24,10 +26,12 @@ from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
 from coder_eval.errors import (
+    AgentConfigError,
     AgentCrashError,
     TurnTimeoutError,
     truncate_crash_message,
 )
+from coder_eval.errors.categorization import provider_error_category
 from coder_eval.models import (
     AgentKind,
     ApiRoute,
@@ -80,8 +84,8 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
 # Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
 _CODEX_APPROVAL_MODE = "deny_all"
 
-# Provider id registered in thread config when CODEX_BASE_URL routes to a
-# custom endpoint.
+# Provider id selected on the app-server and the thread when CODEX_BASE_URL
+# routes to a custom endpoint.
 _CUSTOM_PROVIDER_ID = "custom"
 
 # apply_patch statuses meaning the patch did not apply. Used ONLY to classify the
@@ -260,19 +264,14 @@ def _status_value(status: Any) -> str:
 
 
 def _failed_turn_reason(turn: Any) -> str | None:
-    """The crash message for a Turn codex ended as ``failed``, or None for any other status.
-
-    Codex ends a turn ``failed`` when it gives up on the provider, e.g. a
-    ``rateLimitExceeded`` it will not retry. The message carries the provider's
-    own text, so ``categorize_error`` routes it (``rate limit`` ->
-    ``AGENT_RATE_LIMIT``) like any other agent crash.
-    """
+    """The crash message for a Turn codex ended as ``failed``, or None for any other status."""
     if turn is None or _status_value(getattr(turn, "status", None)) != "failed":
         return None
     error = getattr(turn, "error", None)
     message = str(getattr(error, "message", "") or "").strip() or "no error message"
-    kind, _ = _codex_error_kind(error)
-    suffix = f" (codexErrorInfo={kind})" if kind else ""
+    kind, http_status = _codex_error_kind(error)
+    status = f", httpStatusCode={http_status}" if http_status is not None else ""
+    suffix = f" (codexErrorInfo={kind}{status})" if kind else ""
     return f"Codex turn failed: {message}{suffix}"
 
 
@@ -390,6 +389,32 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supports the Responses API (it rejects `wire_api = "chat"` as "no longer
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
+
+type _TomlValue = str | dict[str, _TomlValue]
+
+
+def _toml_inline(value: _TomlValue) -> str:
+    """Render a string or a (nested) string table as one TOML inline value, for ``codex --config``."""
+    if isinstance(value, str):
+        return tomli_w.dumps({"v": value}).removeprefix("v = ").rstrip("\n")
+    return "{" + ", ".join(f"{_toml_inline(k)} = {_toml_inline(v)}" for k, v in value.items()) + "}"
+
+
+def _require_credential_free_base_url(url: str) -> None:
+    """Raise ``AgentConfigError`` when CODEX_BASE_URL does not parse or embeds a credential.
+
+    The message names the variable, never its value: the URL goes on the app-server command line.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise AgentConfigError("CODEX_BASE_URL is not a valid URL.") from None
+    if parts.username is not None or parts.password is not None:
+        raise AgentConfigError(
+            "CODEX_BASE_URL embeds a credential, which would be visible on the codex app-server "
+            + "command line; put the key only in CODEX_API_KEY."
+        )
+
 
 # Login-shell profiles generated into the per-task HOME. ``.bash_profile`` is
 # what ``bash -l`` reads and ``.profile`` covers sh/dash; the zsh trio covers
@@ -557,6 +582,8 @@ class _CodexTurnState:
         self.api_calls = 0
         self.in_api_call = False
         self.call_ran_tools = False
+        self.in_context_compaction = False
+        self.compaction_usage_seen = False
 
         # Finalize inputs, COMMITTED by communicate after a clean pump return.
         # Defaults are the crash values (no terminal usage; format from messages).
@@ -755,6 +782,9 @@ class _CodexTurnState:
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
+        if root_type == "contextCompaction":
+            self.in_context_compaction = True
+            self.compaction_usage_seen = False
         if not self.in_api_call and root_type not in _NON_MODEL_ITEM_TYPES:
             self._open_api_call()
         # Any item that isn't transcript content is a tool call (generic capture).
@@ -790,6 +820,8 @@ class _CodexTurnState:
             return
         completed_ms = getattr(notification.payload, "completed_at_ms", None)
         root_type = getattr(root, "type", None)
+        if root_type == "contextCompaction":
+            self.in_context_compaction = False
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
             seq = self.seq_by_id.get(tool_id, self.next_sequence)
@@ -875,18 +907,39 @@ class _CodexTurnState:
                 self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=delta))
 
     def on_token_usage_updated(self, notification: Any) -> None:
-        """One per generation → cut a message. Carries `total` (cumulative over the
-        whole THREAD, i.e. every turn so far) and `last` (this generation's delta)."""
-        if not self.in_api_call:
-            self.api_calls += 1
-        self.in_api_call = False
-        # Tool results always go back to the model, so the next call begins here,
-        # before Codex can run the next call's tools (an item starts as its tool runs).
-        if self.call_ran_tools:
-            self._open_api_call()
+        """Capture generation usage and compaction's context-size estimates.
+
+        Rationale: .claude/notes/agents.md § Codex compaction usage metadata
+        """
+        usage = getattr(notification.payload, "token_usage", None) if notification.payload else None
+        last = getattr(usage, "last", None)
+        estimate = (
+            self.in_context_compaction
+            and self.compaction_usage_seen
+            and last is not None
+            and all(
+                (getattr(last, key, 0) or 0) == 0
+                for key in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "reasoning_output_tokens",
+                )
+            )
+        )
+        if self.in_context_compaction:
+            self.compaction_usage_seen = True
+        if not estimate:
+            if not self.in_api_call:
+                self.api_calls += 1
+            self.in_api_call = False
+            # Tool results reserve the next model call before its tools can run.
+            if self.call_ran_tools:
+                self._open_api_call()
         if notification.payload:
-            self.latest_token_usage = getattr(notification.payload, "token_usage", None)
-            self._flush_message(getattr(self.latest_token_usage, "last", None))
+            self.latest_token_usage = usage
+            self._flush_message(last)
 
     def on_turn_completed(self, notification: Any) -> bool:
         """Capture the final Turn. Returns True (break the pump) iff the payload is
@@ -1040,13 +1093,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._env_path_prepend = list(env_path_prepend or [])
         self._setup_login_shell_home()
         self._state = AgentState.WORKING
+        config_overrides = self._app_server_config_overrides()
 
         try:
             from openai_codex import Codex, CodexConfig
 
-            # Build CodexConfig with environment variables for custom API configuration
-            env_override = self._build_codex_env()
-            config = CodexConfig(env=env_override) if env_override else None
+            config = CodexConfig(env=self._build_codex_env(), config_overrides=config_overrides)
 
             # Close any prior client FIRST: start() runs through
             # execute_with_retry, so a retried start would otherwise orphan the
@@ -1226,7 +1278,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # Codex gave up on the turn (a provider error it would not retry),
                 # so the agent never finished: crash, never score it.
                 # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
-                self._finalize_and_raise_crash(state.finalize, truncate_crash_message(failed_reason))
+                kind, status = _codex_error_kind(getattr(state.result_turn, "error", None))
+                self._finalize_and_raise_crash(
+                    state.finalize,
+                    failed_reason,
+                    category=provider_error_category(code=kind, status_code=status),
+                )
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
@@ -1459,6 +1516,29 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         return os.getenv("CODEX_API_VERSION") or None
 
+    @staticmethod
+    def _custom_provider() -> dict[str, _TomlValue] | None:
+        """The CODEX_BASE_URL model provider definition, or None on the default endpoint.
+
+        The binary has no base-URL env var, so the provider is defined in config and
+        selected by id; ``env_key`` names the key's variable, so the key itself never
+        appears here. On Azure, CODEX_API_VERSION adds the required ``api-version`` query
+        param and CODEX_MODEL is the deployment name.
+        """
+        base_url = CodexAgent._resolve_base_url()
+        if not base_url:
+            return None
+        provider: dict[str, _TomlValue] = {
+            "name": "Custom",
+            "base_url": base_url,
+            "env_key": "CODEX_API_KEY",
+            "wire_api": _CODEX_WIRE_API,
+        }
+        api_version = CodexAgent._resolve_api_version()
+        if api_version:
+            provider["query_params"] = {"api-version": api_version}
+        return provider
+
     def _effective_model(self) -> str | None:
         """Resolve the model: task/CLI ``agent.model`` wins, else CODEX_MODEL.
 
@@ -1470,8 +1550,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Build the environment passed to the Codex app-server.
 
         Carries ``CODEX_API_KEY`` and, when the sandbox resolved mock dirs, a PATH
-        with those prepended. The base URL is NOT an env var the binary honors —
-        it goes through the model provider config instead.
+        with those prepended.
 
         The SDK merges this PARTIAL dict over ``os.environ`` (normalizing the PATH
         key case-insensitively), so a full PATH value here safely replaces the
@@ -1499,6 +1578,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
         return env if env else None
+
+    def _app_server_config_overrides(self) -> tuple[str, ...]:
+        """``--config`` overrides that select the custom provider on the app-server itself.
+
+        The definition is the one the thread options carry; empty on the default endpoint.
+
+        Raises:
+            AgentConfigError: CODEX_BASE_URL does not parse or embeds a credential.
+
+        Rationale: .claude/notes/agents.md § Codex custom provider on the app-server
+        """
+        provider = self._custom_provider()
+        if provider is None:
+            return ()
+        _require_credential_free_base_url(str(provider["base_url"]))
+        return (
+            f"model_provider={_toml_inline(_CUSTOM_PROVIDER_ID)}",
+            f"model_providers.{_CUSTOM_PROVIDER_ID}={_toml_inline(provider)}",
+        )
 
     @staticmethod
     def _login_shell_profiles_supported() -> bool:
@@ -1676,35 +1774,18 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 + "do not rely on it as a security boundary."
             )
 
-        # The codex binary has no base-URL env var: a model provider must be
-        # defined in config and selected, with env_key naming the key's variable.
-        # For Azure, CODEX_API_VERSION adds the required query param and
-        # CODEX_MODEL is the deployment name.
-        base_url = self._resolve_base_url()
-        if base_url:
+        provider = self._custom_provider()
+        if provider is not None:
             options["model_provider"] = _CUSTOM_PROVIDER_ID
             if not effective_model:
                 self._log.warning(
                     "CODEX_BASE_URL is set but no model resolved (agent.model / CODEX_MODEL) "
                     + "— the provider may reject the request."
                 )
-            provider: dict[str, Any] = {
-                "name": "Custom",
-                "base_url": base_url,
-                "env_key": "CODEX_API_KEY",
-                # Fixed, not configurable: the pinned binary rejects
-                # `wire_api = "chat"` as "no longer supported".
-                "wire_api": _CODEX_WIRE_API,
-            }
-            api_version = self._resolve_api_version()
-            if api_version:
-                # Azure requires ?api-version=... on every request.
-                provider["query_params"] = {"api-version": api_version}
             tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
-            self._log.debug(
-                f"Codex routed via custom provider (host={urlparse(base_url).hostname or '(unknown)'}, "
-                + f"api_version={'set' if api_version else 'unset'})"
-            )
+            host = urlparse(str(provider["base_url"])).hostname or "(unknown)"
+            api_version_state = "set" if "query_params" in provider else "unset"
+            self._log.debug(f"Codex routed via custom provider (host={host}, api_version={api_version_state})")
 
         if self.config.context_window is not None:
             # Codex then auto-compacts at 90% of this window.

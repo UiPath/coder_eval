@@ -12,6 +12,16 @@ describe("resolvePricing", () => {
         );
     });
 
+    test("tolerates a Bedrock version suffix after region and vendor prefixes", () => {
+        expect(
+            resolvePricing("eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+                ?.outputPerMTok,
+        ).toBe(15);
+        expect(resolvePricing("eu.anthropic.claude-sonnet-4-6-v1:0")?.outputPerMTok).toBe(
+            15,
+        );
+    });
+
     test("returns null for unknown / missing models", () => {
         expect(resolvePricing("definitely-not-a-model")).toBeNull();
         expect(resolvePricing(null)).toBeNull();

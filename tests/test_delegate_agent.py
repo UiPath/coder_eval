@@ -477,30 +477,22 @@ class TestCommunicate:
         assert agent._process is None
 
     @pytest.mark.parametrize(
-        ("host_message", "category"),
+        ("message", "status", "expected"),
         [
-            (
-                "Delegate backend error: HTTP 403: <!DOCTYPE html><title>Continue with UiPath Platform</title>",
-                ErrorCategory.AGENT_INVALID_OUTPUT,
-            ),
-            ("Delegate backend error: SSE connect timeout after 30s", ErrorCategory.AGENT_API_ERROR),
+            ("Invoice marked invalid: payment 402", None, ErrorCategory.AGENT_CRASH),
+            ("POST https://example.com/respond → 402 Payment Required", 402, ErrorCategory.AGENT_BILLING_ERROR),
+            ("API Error: Request rejected (429)", 429, ErrorCategory.AGENT_RATE_LIMIT),
+            ("Any business text", 401, ErrorCategory.AGENT_AUTH_ERROR),
+            ("Delegate backend error: SSE connect timeout after 30s", None, ErrorCategory.AGENT_CRASH),
         ],
-        ids=["waf-block", "sse-connect-timeout"],
     )
-    async def test_known_host_errors_are_recategorized(self, patch_exec, tmp_path, host_message, category):
-        # The stderr tail says "timeout"; a rewritten reason must not carry it.
-        proc = patch_exec(
-            [_line({"type": "init_ok"}), _line({"type": "error", "message": host_message})],
-            [b"[agenticApi] SSE connect timeout, retrying\n"],
-        )
-        agent = DelegateAgent(_config(), task_id="t1")
-        await agent.start(str(tmp_path))
-        await asyncio.sleep(0)
-        assert agent._stderr_lines
-        with pytest.raises(AgentCrashError) as excinfo:
-            await agent.communicate("hi")
-        assert categorize_error(excinfo.value, {"component": "agent"}) is category
-        assert "<" not in str(excinfo.value)
+    async def test_host_failure_uses_structured_status(self, patch_exec, tmp_path, message, status, expected):
+        frame = {"type": "error", "message": message, "statusCode": status}
+        agent, proc = await _started_agent(patch_exec, [_line(frame)], tmp_path)
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("explain the process")
+        assert categorize_error(caught.value, {"component": "agent"}) is expected
+        assert str(caught.value) == f"Delegate send failed: {message}"
         assert proc._killed
         assert agent._process is None
 

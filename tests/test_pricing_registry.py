@@ -29,6 +29,20 @@ def test_registered_bare_key_resolves_through_prefixed_lookup():
     assert calculate_cost("eu.acme-1", 1_000_000, 0) == 1.0
 
 
+@pytest.mark.parametrize(
+    ("model", "bare"),
+    [
+        ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("us.anthropic.claude-sonnet-4-6-v1:0", "claude-sonnet-4-6"),
+        ("anthropic.claude-sonnet-4-5-20250929-v2:1", "claude-sonnet-4-5-20250929"),
+    ],
+)
+def test_bedrock_version_suffix_prices_as_bare_key(model: str, bare: str):
+    """Claude Code on Bedrock records the configured id, e.g. ``.env.example``'s ``…-v1:0``, as ``model_used``."""
+    assert pricing._normalize_model(model) == bare
+    assert calculate_cost(model, 1_000_000, 1_000_000) == calculate_cost(bare, 1_000_000, 1_000_000) > 0
+
+
 def test_openrouter_provider_prefix_normalizes_to_bare_key():
     """An agent that addresses OpenRouter natively (OpenCode) reports the model
     WITH its provider prefix, while the rate-card keys are the bare vendor/model

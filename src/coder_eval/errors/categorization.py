@@ -17,18 +17,81 @@ from .timeout import EvaluationTimeoutError
 logger = logging.getLogger(__name__)
 
 
+def provider_error_category(*, code: object = None, status_code: object = None) -> ErrorCategory | None:
+    """Map provider-owned codes and HTTP statuses, never diagnostic prose."""
+    if isinstance(code, str):
+        normalized = code.lower().replace("_", "")
+        if normalized in {
+            "insufficientquota",
+            "billinghardlimitreached",
+            "billingnotactive",
+            "paymentrequired",
+            "usagelimitexceeded",
+            "billingerror",
+        }:
+            return ErrorCategory.AGENT_BILLING_ERROR
+        if normalized in {"ratelimitexceeded", "ratelimiterror", "ratelimit"}:
+            return ErrorCategory.AGENT_RATE_LIMIT
+        if normalized in {"authenticationfailed", "authenticationerror", "unauthorized"}:
+            return ErrorCategory.AGENT_AUTH_ERROR
+        if normalized in {"invalidrequest", "contextwindowexceeded", "contentfilter"}:
+            return ErrorCategory.AGENT_INVALID_OUTPUT
+        if normalized in {"servererror", "serveroverloaded", "responsestreamdisconnected", "httpconnectionfailed"}:
+            # HTTP status is more specific than a transport envelope.
+            return provider_error_category(status_code=status_code) or ErrorCategory.AGENT_API_ERROR
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        if status_code == 402:
+            return ErrorCategory.AGENT_BILLING_ERROR
+        if status_code in {401, 403}:
+            return ErrorCategory.AGENT_AUTH_ERROR
+        if status_code == 429:
+            return ErrorCategory.AGENT_RATE_LIMIT
+        if 500 <= status_code <= 599:
+            return ErrorCategory.AGENT_API_ERROR
+    return None
+
+
+def provider_exception_category(error: BaseException) -> ErrorCategory | None:
+    """Read structured provider metadata through an exception chain."""
+    seen: set[int] = set()
+    categories: list[ErrorCategory] = []
+    statuses: list[object] = []
+    while id(error) not in seen:
+        seen.add(id(error))
+        codes = [getattr(error, "code", None)]
+        body = getattr(error, "body", None)
+        if isinstance(body, dict):
+            detail = body.get("error", body)
+            if isinstance(detail, dict):
+                codes.extend([detail.get("code"), detail.get("type")])
+        for code in codes:
+            if (category := provider_error_category(code=code)) is not None:
+                categories.append(category)
+        statuses.append(getattr(error, "status_code", getattr(getattr(error, "response", None), "status_code", None)))
+        cause = error.__cause__ or error.__context__
+        if cause is None:
+            break
+        error = cause
+    if ErrorCategory.AGENT_BILLING_ERROR in categories:
+        return ErrorCategory.AGENT_BILLING_ERROR
+    for category in categories:
+        if category != ErrorCategory.AGENT_API_ERROR:
+            return category
+    for status in statuses:
+        if (category := provider_error_category(status_code=status)) is not None:
+            return category
+    return ErrorCategory.AGENT_API_ERROR if categories else None
+
+
 def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCategory | None:
     """Typed-exception checks (most reliable), in precedence order.
 
-    Returns None when no typed check matches, so the caller falls through to
-    string-pattern matching. ``AgentCrashError`` is deliberately NOT checked here:
-    it is the last resort (see ``categorize_error``), after string patterns get a
-    chance to recognise auth / rate-limit / billing / content-filter signatures
-    stamped into the message. The component-gated branches also return ``None``
-    when their component doesn't match, so non-agent errors fall through to the
-    component group (e.g. a sandbox TimeoutError reaches the sandbox categories
-    with their designed retry behavior instead of dead-ending at ``UNKNOWN``).
+    AgentCrashError uses only its adapter-reported category. Other exceptions
+    can fall through to the legacy message and component classifiers.
     """
+    if isinstance(error, AgentCrashError):
+        return error.category or ErrorCategory.AGENT_CRASH
+
     # Check custom timeout exceptions first (before generic TimeoutError)
     if isinstance(error, EvaluationTimeoutError):
         return ErrorCategory.AGENT_TIMEOUT
@@ -54,6 +117,9 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
 
     if isinstance(error, MemoryError):
         return ErrorCategory.OUT_OF_MEMORY
+
+    if (category := provider_exception_category(error)) is not None:
+        return category
 
     # Check for known SDK exceptions (if available)
     try:
@@ -162,12 +228,6 @@ def _categorize_by_component(error: Exception, error_str: str, component: str) -
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT
 
-        # LAST agent-side resort: by here the patterns have had their chance at the
-        # auth / rate-limit / billing signatures, so what remains is a genuinely
-        # unexpected failure the user wants retried.
-        if isinstance(error, AgentCrashError):
-            return ErrorCategory.AGENT_CRASH
-
         # Default to API error for unknown agent failures (more likely to be retryable)
         return ErrorCategory.AGENT_API_ERROR
 
@@ -232,11 +292,6 @@ def categorize_error(
 
     if (category := _categorize_by_component(error, error_str, component)) is not None:
         return category
-
-    # Final typed-AgentCrashError fallback for callers without a component hint:
-    # nothing more specific matched, treat as a genuinely unexpected crash.
-    if isinstance(error, AgentCrashError):
-        return ErrorCategory.AGENT_CRASH
 
     # Default to unknown
     logger.warning(f"Could not categorize error: {error} (component={component})")
