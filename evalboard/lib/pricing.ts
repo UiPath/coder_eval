@@ -49,6 +49,8 @@ const _ROUTING_PREFIXES = [
     "openrouter/",
 ];
 const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
+// Bedrock's model version suffix ("…-20250929-v1:0"); never part of a rate key.
+const _BEDROCK_VERSION_SUFFIX = /-v\d+:\d+$/;
 // Exported so the run header's model tally groups on the same key pricing looks
 // up on (lib/runs.ts::tallyModels).
 export function normalizeModel(model: string): string {
@@ -66,7 +68,7 @@ export function normalizeModel(model: string): string {
         }
     }
     if (m.startsWith("anthropic.")) m = m.slice("anthropic.".length);
-    return m;
+    return m.replace(_BEDROCK_VERSION_SUFFIX, "");
 }
 
 // Resolve pricing for a model id, tolerating routing/region prefixes and undated

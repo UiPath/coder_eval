@@ -12,7 +12,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.models import AgentKind, ApiRoute, BedrockRoute, DirectRoute, LiteLLMRoute, parse_agent_config
 
 
 def test_claude_agent_initialization():
@@ -2031,6 +2031,57 @@ class TestClaudeTurnState:
         tool_ends = [e for e in events if isinstance(e, ToolEndEvent)]
         assert len(tool_ends) == 1
         assert tool_ends[0].status == ToolEndStatus.OK
+
+    def _run_alias_turn(self, route: ApiRoute, config_model: str | None, *, crashed: bool = False):
+        """Drive one turn whose SDK reports the alias ``claude-sonnet-5``; a crash ends it as a TIMEOUT."""
+        from coder_eval.streaming.events import AgentEndStatus
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, TextBlock
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE), route=route)
+        state, events = self._state(agent)
+        state.effective_model = agent._resolve_effective_model(config_model, {}, None)
+
+        state.on_assistant_message(AssistantMessage([TextBlock("done")], message_id="m1", model="claude-sonnet-5"))
+        status = AgentEndStatus.TIMEOUT if crashed else AgentEndStatus.COMPLETED
+        state.finalize(status, crashed=crashed, crash_reason="boom" if crashed else None)
+        return agent, state, events
+
+    @pytest.mark.parametrize(
+        ("route", "config_model", "expected"),
+        [
+            pytest.param(
+                BedrockRoute(region="eu-north-1"),
+                "claude-sonnet-5",
+                "eu.anthropic.claude-sonnet-5",
+                id="bedrock-records-qualified-alias",
+            ),
+            pytest.param(
+                BedrockRoute(region="eu-north-1"),
+                None,
+                "claude-sonnet-5",
+                id="bedrock-without-resolved-model-falls-back-to-sdk",
+            ),
+            pytest.param(DirectRoute(), "sonnet", "claude-sonnet-5", id="direct-records-sdk-model"),
+            pytest.param(
+                LiteLLMRoute(model="zai.glm-5"), "zai.glm-5", "claude-sonnet-5", id="litellm-records-sdk-model"
+            ),
+        ],
+    )
+    def test_model_used_on_agent_end(self, route: ApiRoute, config_model: str | None, expected: str):
+        from coder_eval.streaming.events import AgentEndEvent
+
+        _, state, events = self._run_alias_turn(route, config_model)
+
+        (end,) = [e for e in events if isinstance(e, AgentEndEvent)]
+        assert end.model_used == expected
+        assert state.collector.build_turn_record().model_used == expected
+        assert state.sdk_messages[0].model == "claude-sonnet-5"
+
+    def test_model_used_on_crashed_partial_turn(self):
+        agent, _, _ = self._run_alias_turn(BedrockRoute(region="eu-north-1"), "claude-sonnet-5", crashed=True)
+
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.model_used == "eu.anthropic.claude-sonnet-5"
 
 
 class TestAgentBaseHelpers:
