@@ -2,15 +2,18 @@
 
 from datetime import datetime
 
+import pytest
+
 from coder_eval.criteria.command_executed import (
     _MAX_PATTERN_SEARCH_LEN,
     _WINDOW_OVERLAP,
+    CommandExecutedChecker,
     _match_haystacks,
     _normalize_shell,
     _search_windows,
 )
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.models import CommandExecutedCriterion
+from coder_eval.models import CommandExecutedCriterion, CriterionResult
 from coder_eval.models.results import TurnRecord
 from coder_eval.models.telemetry import CommandTelemetry
 
@@ -1051,15 +1054,13 @@ class TestShellQuotingNormalization:
         assert result.score == 1.0
 
     def test_bash_record_without_command_is_not_shell_normalized(self):
-        """A Bash record with no ``command`` key must not have its JSON params tokenized.
+        """A Bash record with no ``command`` key must not be dropped by an exclusion.
 
-        ``_match_haystacks`` is now told whether cmd_text is a shell command
-        (``is_shell``, decided once at the extraction site) instead of
-        re-deriving it from ``tool_name == "Bash"`` alone. A Bash record whose
-        ``command`` is missing (reachable on the Codex path) falls back to the
-        JSON blob and must NOT be normalized — otherwise shlex strips the JSON
-        quotes, adding a haystack that can newly satisfy an ``exclude_pattern``
-        and wrongly drop the command below ``min_count``.
+        A Bash record whose ``command`` is missing, which some harnesses record,
+        has no text to search (``_search_text``), so no exclusion can drop it.
+        An earlier version searched its JSON params, and shlex-stripped JSON
+        quotes could then newly satisfy an ``exclude_pattern`` and wrongly drop
+        the command below ``min_count``.
         """
         sandbox = MockSandbox()
         # Bash tool, but params carry a `description`, not a `command`.
@@ -1069,9 +1070,8 @@ class TestShellQuotingNormalization:
         criterion = CommandExecutedCriterion(
             description="counts the bash record",
             tool_name="Bash",
-            # Matches the shlex-stripped JSON (`{description: run ...}`) but NOT the
-            # raw JSON (`{"description": "run ...}`); with the is_shell fix the raw
-            # is the only haystack, so the command is not excluded.
+            # Matches the shlex-stripped JSON (`{description: run ...}`), which is
+            # never a haystack: the record is not searched, so it is not excluded.
             exclude_pattern=r"description:\s+run",
             min_count=1,
         )
@@ -1182,8 +1182,198 @@ class TestSearchWindows:
         turn_records = [_make_turn([write])]
         criterion = CommandExecutedCriterion(
             description="must NOT use retired `uip or users list`",
+            # Named: with tool_name null, a pattern never searches a Write at all.
+            tool_name="Write",
             command_pattern=r"uip\s+or\s+users\s+list",
             min_count=0,
             max_count=0,
         )
         assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
+
+
+# Tool calls that name `uip solution deploy` without running it.
+_MENTIONS_WITHOUT_RUNNING = [
+    pytest.param("Write", {"file_path": "NOTES.md", "content": "Next: uip solution deploy"}, id="write"),
+    pytest.param("Grep", {"pattern": "uip solution deploy", "path": "."}, id="grep"),
+    pytest.param("TodoWrite", {"todos": [{"content": "Run uip solution deploy", "status": "pending"}]}, id="todo"),
+    # A call with a command: only the command is searched, not its other params.
+    pytest.param(
+        "ExecutePowershellCommand",
+        {"command": "echo ok", "description": "Run uip solution deploy later"},
+        id="other-param",
+    ),
+    pytest.param("Bash", {"description": "Run uip solution deploy"}, id="bash-without-command"),
+]
+
+_DEPLOY = r"uip\s+solution\s+deploy"
+
+
+def _deployed(
+    *,
+    tool_name: str | None = None,
+    command_pattern: str | None = _DEPLOY,
+    exclude_pattern: str | None = None,
+    min_count: int = 1,
+    max_count: int | None = None,
+    require_success: bool = True,
+    description: str = "Agent deployed the solution",
+) -> CommandExecutedCriterion:
+    return CommandExecutedCriterion(
+        description=description,
+        tool_name=tool_name,
+        command_pattern=command_pattern,
+        exclude_pattern=exclude_pattern,
+        min_count=min_count,
+        max_count=max_count,
+        require_success=require_success,
+    )
+
+
+def _check(criterion: CommandExecutedCriterion, *calls: tuple[str, dict]) -> CriterionResult:
+    commands = [
+        _make_command(tool_name=tool, parameters=params, tool_id=f"t{i}") for i, (tool, params) in enumerate(calls)
+    ]
+    return SuccessChecker(MockSandbox()).check(criterion, turn_records=[_make_turn(commands)])
+
+
+def _score(criterion: CommandExecutedCriterion, tool: str, params: dict) -> float:
+    return _check(criterion, (tool, params)).score
+
+
+class TestNullToolNameSearchesOnlyTheCommand:
+    """With ``tool_name`` null, a pattern searches only a call's ``command``."""
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_count(self, tool, params):
+        assert _score(_deployed(), tool, params) == 0.0
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_live_pass(self, tool, params):
+        # The early-stop trigger shares the matcher: no pass, so no on_pass stop.
+        turn_records = [_make_turn([_make_command(tool_name=tool, parameters=params)])]
+        assert CommandExecutedChecker().live_verdict(_deployed(), turn_records) == "undecided"
+
+    @pytest.mark.parametrize(("tool", "params"), _MENTIONS_WITHOUT_RUNNING)
+    def test_mention_in_another_tool_does_not_trip_a_negative_guard(self, tool, params):
+        guard = _deployed(description="must NOT deploy", min_count=0, max_count=0, require_success=False)
+        assert _score(guard, tool, params) == 1.0
+
+    @pytest.mark.parametrize(
+        ("tool", "command"),
+        [
+            pytest.param("Bash", "uip solution deploy --name billing", id="bash"),
+            pytest.param("Bash", ["bash", "-lc", "uip solution deploy --name billing"], id="argv-list"),
+            # A shell tool under another name: a Delegate host tool without an alias,
+            # or a hydrated ATIF call. Its `command` param still marks it as a shell call.
+            pytest.param("ExecutePowershellCommand", "uip solution deploy --name billing", id="unaliased"),
+            pytest.param("shell", "uip solution deploy --name billing", id="atif-shell"),
+            pytest.param("shell", ["bash", "-lc", "uip solution deploy --name billing"], id="other-name-argv-list"),
+        ],
+    )
+    def test_shell_call_still_counts(self, tool, command):
+        assert _score(_deployed(), tool, {"command": command}) == 1.0
+
+    def test_named_tool_params_are_still_searched(self):
+        params = {"file_path": "NOTES.md", "content": "Next: uip solution deploy"}
+        assert _score(_deployed(tool_name="Write"), "Write", params) == 1.0
+
+    def test_without_a_pattern_every_tool_still_counts(self):
+        turn_records = [_make_turn([_make_command(tool_name=t, tool_id=t) for t in ("Read", "Write", "Bash")])]
+        criterion = CommandExecutedCriterion(description="any 3 tool calls", min_count=3)
+        assert SuccessChecker(MockSandbox()).check(criterion, turn_records=turn_records).score == 1.0
+
+
+class TestTheCallShapeChoosesTheText:
+    """The shape of a call, not ``tool_name``, decides which text a pattern searches."""
+
+    @pytest.mark.parametrize("command_pattern", [None, r"uip"], ids=["exclude-only", "with-pattern"])
+    @pytest.mark.parametrize(
+        ("exclude", "expected"),
+        [
+            pytest.param("dry-run", 1.0, id="exclude-text-in-another-param"),
+            pytest.param(r"solution\s+deploy", 0.0, id="exclude-text-in-the-command"),
+        ],
+    )
+    def test_exclusion_searches_the_command_with_or_without_a_pattern(self, command_pattern, exclude, expected):
+        params = {"command": "uip solution deploy", "description": "dry-run first"}
+        criterion = _deployed(command_pattern=command_pattern, exclude_pattern=exclude, require_success=False)
+        assert _score(criterion, "shell", params) == expected
+
+    @pytest.mark.parametrize("tool", ["exec_tool", "shell", "ExecutePowershellCommand"])
+    @pytest.mark.parametrize("named", [False, True], ids=["null", "named"])
+    def test_naming_a_shell_tool_keeps_an_anchored_match(self, tool, named):
+        criterion = _deployed(tool_name=tool if named else None, command_pattern=r"^npm test")
+        assert _score(criterion, tool, {"description": "run tests", "command": "npm test"}) == 1.0
+
+    @pytest.mark.parametrize("tool_name", [None, "Bash"])
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"description": "Run uip solution deploy"}, id="missing"),
+            pytest.param({"command": "", "description": "Run uip solution deploy"}, id="empty"),
+        ],
+    )
+    def test_bash_call_without_a_command_is_not_searched(self, tool_name, params):
+        assert _score(_deployed(tool_name=tool_name), "Bash", params) == 0.0
+
+    @pytest.mark.parametrize("tool_name", [None, "shell"])
+    def test_shell_call_with_an_empty_command_is_not_searched(self, tool_name):
+        params = {"command": "", "description": "Run uip solution deploy"}
+        assert _score(_deployed(tool_name=tool_name), "shell", params) == 0.0
+
+    @pytest.mark.parametrize("tool", ["Bash", "shell", "ExecutePowershellCommand"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Matches only in the shell-normalized form.
+            pytest.param("bash -lc \"uip 'solution' deploy\"", id="quoted"),
+            # Matches only in a window after the first 2,000 characters.
+            pytest.param("echo build\n" * 300 + "uip solution deploy", id="after-2000-chars"),
+        ],
+    )
+    def test_every_shell_tool_gets_normalization_and_windows(self, tool, command):
+        assert _score(_deployed(), tool, {"command": command}) == 1.0
+
+    def test_naming_the_tool_never_drops_a_pattern_match(self):
+        calls = [
+            ("Bash", {"command": "uip solution deploy"}),
+            ("shell", {"command": "uip solution deploy", "description": "x"}),
+            ("shell", {"command": ["bash", "-lc", "uip solution deploy"]}),
+            ("Write", {"file_path": "NOTES.md", "content": "uip solution deploy"}),
+            ("Bash", {"description": "uip solution deploy"}),
+        ]
+        for tool, params in calls:
+            assert _score(_deployed(tool_name=tool), tool, params) >= _score(_deployed(), tool, params), tool
+
+    def test_label_of_a_shell_call_under_another_name_is_its_command(self):
+        params = {"description": "x" * 100, "command": "uip solution deploy --name billing"}
+        assert "uip solution deploy --name billing" in _check(_deployed(), ("shell", params)).details
+
+
+class TestUnsearchedCallsInDetails:
+    """A failing criterion says how many calls it did not search."""
+
+    def test_null_tool_name_counts_them_and_says_how_to_search_them(self):
+        result = _check(_deployed(), ("Write", {"file_path": "NOTES.md", "content": "Next: uip solution deploy"}))
+        assert result.score == 0.0
+        assert "1 call(s) without a command were not searched. Set tool_name" in result.details
+
+    def test_named_bash_counts_them_without_the_hint(self):
+        result = _check(_deployed(tool_name="Bash"), ("Bash", {"description": "uip solution deploy"}))
+        assert "1 call(s) without a command were not searched." in result.details
+        assert "Set tool_name" not in result.details
+
+    def test_no_hint_when_naming_the_tool_cannot_help(self):
+        # A Bash call without a command has no text under any tool_name.
+        result = _check(_deployed(), ("Bash", {"description": "uip solution deploy"}))
+        assert "1 call(s) without a command were not searched." in result.details
+        assert "Set tool_name" not in result.details
+
+    def test_a_passing_criterion_has_no_note(self):
+        result = _check(
+            _deployed(),
+            ("Write", {"content": "uip solution deploy"}),
+            ("Bash", {"command": "uip solution deploy"}),
+        )
+        assert result.score == 1.0
+        assert "not searched" not in result.details
