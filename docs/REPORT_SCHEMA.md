@@ -211,9 +211,9 @@ A discriminated union on `result_kind` (`basic` / `judge` / `classification`). B
 `criterion_type`, `description`, `score` (0.0–1.0), `details`, `error`,
 `evaluation_status` (`evaluated` by default; `not_evaluated` means the check did
 not run and is distinct from an evaluated 0.0),
-`pass_threshold` (default 0.9), `gating` (default `true`; `false` = informational /
-weight-0, excluded from the score and the pass/fail gate). The base allows extra
-fields so subclass keys round-trip.
+`pass_threshold` (default 0.9), `gating` (default `true`; `false` = informational, from
+`weight: 0` or `report_only: true`, excluded from the score and the pass/fail gate). The
+base allows extra fields so subclass keys round-trip.
 
 - **`classification`** adds `observed_label`, `expected_label` (sentinels like
   `(none)` / `(other)` allowed). Emitted by `classification_match`, `skill_triggered`.

@@ -110,15 +110,17 @@ chosen.
 - **low** — polish. Naming, tags, a description that undersells what the task does.
 
 **Gameability findings must quote the weight at risk.** This is computable from the YAML
-alone, so compute it: total the `weight` of every criterion the cheap path would satisfy and
-compare it to the task's total weight. *"A single `--file` call satisfies 14.0 of 33.0
-weight"* is verifiable and actionable; *"High — loose pattern"* is neither.
+alone, so compute it: total the `weight` of every scoring criterion the cheap path would
+satisfy and compare it to the task's total scoring weight. A `report_only: true` criterion
+is not scoring: leave its weight out of both totals. *"A single `--file` call satisfies 14.0
+of 33.0 weight"* is verifiable and actionable; *"High — loose pattern"* is neither.
 
 Then map it, in this order:
 
-1. Does the cheap path satisfy **every** scoring criterion (`weight` above 0)? A task passes
-   only when each of those meets its own `pass_threshold` — there is no task-level weighted
-   gate — so if the cheap path clears all of them, the task **cannot fail**: `critical`.
+1. Does the cheap path satisfy **every** scoring criterion (`weight` above 0, no
+   `report_only: true`)? A task passes only when each of those meets its own
+   `pass_threshold` — there is no task-level weighted gate — so if the cheap path clears
+   all of them, the task **cannot fail**: `critical`.
    *Exception:* if any criterion carries a `stop_early:` block, a run the watcher actually cuts
    short is gated on the **armed subset only**, weighted against `stop_early_gate_threshold`.
    That gate is narrower than the full set, so the cheap path buys *more* there, not less —

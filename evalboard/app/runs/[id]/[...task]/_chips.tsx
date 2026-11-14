@@ -26,8 +26,9 @@ export function Expandable({
     );
 }
 
-// `gating: false` (weight: 0) criteria are informational — they cannot fail the
-// task, so rendering PASS/FAIL for them would contradict the task's own status.
+// `gating: false` (weight: 0 or report_only) criteria are informational — they
+// cannot fail the task, so rendering PASS/FAIL for them would contradict the
+// task's own status.
 export function ResultPill({
     passed,
     gating = true,

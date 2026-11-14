@@ -585,9 +585,9 @@ def _render_criteria(
         if not evaluated:
             advisory = '<div class="dim" style="margin-top:4px">no verdict — the check did not run</div>'
         elif not cr.gating and not diagnostic:
-            # weight: 0 — measured but excluded from the gate. Saying so here keeps
+            # Informational — measured but excluded from the gate. Saying so here keeps
             # the row from reading as a failure that the header/status contradicts.
-            advisory = '<div class="dim" style="margin-top:4px">informational — not gated (weight: 0)</div>'
+            advisory = '<div class="dim" style="margin-top:4px">informational — not gated</div>'
         elif not diagnostic and early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
             advisory = '<div class="dim" style="margin-top:4px">advisory — not gated (run stopped early)</div>'
         score = _score_pill(cr.score) if evaluated else '<span class="badge neutral">NOT EVALUATED</span>'

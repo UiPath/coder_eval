@@ -749,6 +749,7 @@ All criteria share these fields:
 |-------|---------|-------------|
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
+| `report_only` | `false` | `true` = **informational** without changing the declared `weight`: excluded from both the score and the pass/fail gate, like `weight: 0` |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
 | `stop_early` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`). Presence arms the criterion for early stop (no run-level switch needed): an effective fail may end the run (weighted ceiling rule, recall deferral). Keys: `on_pass: stop\|continue` (default `continue`), `decide_within: N` (timeout → effective fail, reported as `decision_budget_exceeded`). Inert triggers by design on instances that can't decide their polarity (dataset fan-out support). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
@@ -758,11 +759,33 @@ All criteria share these fields:
 - **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`, `system_one_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
-criterion with `weight: 0` is informational — it is still checked, stored, and
-rendered in reports, but it neither contributes to the score nor fails the task.
-(A `weight: 0` criterion may not set a `stop_early` block or `suite_thresholds`: arming a
-non-gating criterion for the early-stop or suite gate would let an
-"informational" check flip a run to failure.)
+criterion with `weight: 0` or `report_only: true` is informational — it is still
+checked, stored, and rendered in reports, but it neither contributes to the score nor
+fails the task. (An informational criterion may not set a `stop_early` block or
+`suite_thresholds`: arming a non-gating criterion for the early-stop or suite gate would
+let an "informational" check flip a run to failure.)
+
+Use `report_only: true` when the criterion must keep its declared `weight` — for example,
+to match the weights of another evaluation contract. A `pass_threshold: 0.0` is not the
+same thing: that criterion always passes the gate, but its score and weight still count
+in `weighted_score`.
+
+```yaml
+success_criteria:
+  - type: run_command
+    description: Unit tests pass
+    command: pytest -q
+    weight: 8
+    pass_threshold: 1.0
+  - type: run_command
+    description: Linter is clean (recorded, not scored)
+    command: ruff check .
+    weight: 1
+    report_only: true
+```
+
+When the tests pass, a failed `ruff check` leaves the task at `SUCCESS` with
+`weighted_score: 1.0` (not 8/9), and its result is stored with `gating: false`.
 
 Every surface labels it as such rather than as a failure: the terminal shows `○`
 instead of `✓`/`✗`, the HTML report tags the row "informational — not gated" and
@@ -772,7 +795,7 @@ suite row failed. The persisted `CriterionResult.gating` field carries this to
 every consumer, so no reader needs the original criterion to know whether a low
 score mattered.
 
-**Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` — calculated regardless for quality assessment.
+**Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` over the gating criteria — calculated regardless of pass/fail for quality assessment.
 
 ### Glob patterns in `path`
 
