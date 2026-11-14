@@ -23,6 +23,10 @@ describe("harnessShortLabel", () => {
         expect(harnessShortLabel("pi")).toBe("Pi");
     });
 
+    test("the Studio Web harness reads as Studio Web", () => {
+        expect(harnessShortLabel("studio-web")).toBe("Studio Web");
+    });
+
     test("an unknown harness falls back to its id rather than a wrong name", () => {
         expect(harnessShortLabel("some-new-agent")).toBe("some-new-agent");
     });
@@ -37,6 +41,12 @@ describe("HarnessBadge", () => {
     test("renders the Pi vendor mark with pi.dev in the alt text", () => {
         render(<HarnessBadge harness="pi" />);
         expect(screen.getByAltText("Pi · pi.dev")).toBeInTheDocument();
+    });
+
+    test("gives Studio Web its own mark, not Delegate's UiPath logo", () => {
+        render(<HarnessBadge harness="studio-web" />);
+        const badge = screen.getByAltText("Studio Web · UiPath");
+        expect(badge.getAttribute("src")).toContain("studio-web.png");
     });
 
     test("renders the id as text when there is no logo for it", () => {

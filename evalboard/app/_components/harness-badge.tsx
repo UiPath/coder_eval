@@ -31,6 +31,11 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         label: "Delegate · UiPath",
         short: "Delegate",
     },
+    "studio-web": {
+        src: "/harness/studio-web.png",
+        label: "Studio Web · UiPath",
+        short: "Studio Web",
+    },
 };
 
 // Short human label for a harness id ("Claude Code"), for selectors and prose.

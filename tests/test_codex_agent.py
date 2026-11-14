@@ -5,7 +5,9 @@ The Codex SDK is an optional extra; this entire test module is skipped when
 it isn't installed, so `make test` / CI stay green without the extra.
 """
 
+import tomllib
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,7 +21,34 @@ from coder_eval.agents.codex_agent import (
     _CODEX_APPROVAL_MODE,
     CodexAgent,
 )
-from coder_eval.models import AgentConfig, AgentKind, parse_agent_config
+from coder_eval.errors import AgentConfigError
+from coder_eval.models import AgentConfig, AgentKind, AssistantMessage, ReconciliationMessage, parse_agent_config
+
+
+class _CodexSpy:
+    """Stands in for ``openai_codex.Codex``: records the config it was built with."""
+
+    def __init__(self) -> None:
+        self.config: object = "never constructed"
+
+    def __call__(self, config: object = None) -> "_CodexSpy":
+        self.config = config
+        return self
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def codex_spy(monkeypatch) -> _CodexSpy:
+    """Clear the Codex routing env and replace ``openai_codex.Codex`` with a recording spy."""
+    import openai_codex
+
+    for var in ("CODEX_BASE_URL", "CODEX_API_VERSION", "CODEX_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    spy = _CodexSpy()
+    monkeypatch.setattr(openai_codex, "Codex", spy)
+    return spy
 
 
 class TestCodexAgentInitialization:
@@ -252,6 +281,66 @@ class TestCodexEnvironmentConfiguration:
 
         assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
 
+    @pytest.mark.asyncio
+    async def test_start_passes_provider_overrides_to_codex_config(self, monkeypatch, tmp_path, codex_spy):
+        """A base URL alone (no key, no prepend) still builds a CodexConfig carrying the overrides."""
+        import openai_codex
+
+        monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        await agent.start(str(tmp_path))
+
+        config = codex_spy.config
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.config_overrides[0] == 'model_provider="custom"'
+        assert config.config_overrides == agent._app_server_config_overrides()
+        assert config.env is None
+
+    @pytest.mark.asyncio
+    async def test_start_azure_shape_carries_key_env_and_overrides(self, monkeypatch, tmp_path, codex_spy):
+        """Key and base URL together: the CodexConfig carries both the key env and the provider overrides."""
+        import openai_codex
+
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai/v1")
+        monkeypatch.setenv("CODEX_API_VERSION", "2025-04-01-preview")
+        monkeypatch.setenv("CODEX_API_KEY", "test-key-not-in-argv")
+        monkeypatch.setattr(CodexAgent, "_run_async", AsyncMock())
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        await agent.start(str(tmp_path))
+
+        config = codex_spy.config
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.env is not None
+        assert config.env["CODEX_API_KEY"] == "test-key-not-in-argv"
+        assert config.config_overrides == agent._app_server_config_overrides()
+        assert "api-version" in config.config_overrides[1]
+
+    @pytest.mark.asyncio
+    async def test_start_default_endpoint_passes_empty_config(self, tmp_path, codex_spy):
+        """No base URL, no key, no prepend: the client config carries no env and no overrides."""
+        import openai_codex
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path))
+
+        config = codex_spy.config
+        assert isinstance(config, openai_codex.CodexConfig)
+        assert config.env is None
+        assert config.config_overrides == ()
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_credential_in_base_url_before_spawning(self, monkeypatch, tmp_path, codex_spy):
+        """A credential in CODEX_BASE_URL fails start() with a non-retryable config error; no app-server starts."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://user:s3cret-pw@gw.local/v1")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        with pytest.raises(AgentConfigError):
+            await agent.start(str(tmp_path))
+
+        assert codex_spy.config == "never constructed"
+
 
 class TestCustomProviderRouting:
     """Test that CODEX_BASE_URL injects a custom model provider."""
@@ -262,6 +351,7 @@ class TestCustomProviderRouting:
         opts = agent._build_thread_options()
         assert "model_provider" not in opts
         assert "model_providers" not in opts.get("config", {})
+        assert agent._app_server_config_overrides() == ()
 
     def test_base_url_injects_custom_provider(self, monkeypatch):
         monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
@@ -328,6 +418,69 @@ class TestCustomProviderRouting:
         provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
         assert "query_params" not in provider
         assert provider["wire_api"] == "responses"
+
+    @pytest.mark.parametrize("api_version", [None, "", "2025-04-01-preview"])
+    def test_app_server_overrides_match_thread_provider(self, monkeypatch, api_version):
+        """The app-server overrides select the same provider table the thread options carry."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_API_KEY", "test-key-not-in-argv")
+        if api_version is None:
+            monkeypatch.delenv("CODEX_API_VERSION", raising=False)
+        else:
+            monkeypatch.setenv("CODEX_API_VERSION", api_version)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        overrides = agent._app_server_config_overrides()
+
+        assert len(overrides) == 2
+        assert overrides[0] == 'model_provider="custom"'
+        assert overrides[1].startswith("model_providers.custom=")
+        table = tomllib.loads(overrides[1])["model_providers"]["custom"]
+        assert table == agent._build_thread_options()["config"]["model_providers"]["custom"]
+        assert not any("test-key-not-in-argv" in o for o in overrides)
+        if api_version:
+            assert table["query_params"] == {"api-version": "2025-04-01-preview"}
+            assert overrides[1] == (
+                'model_providers.custom={"name" = "Custom", '
+                + '"base_url" = "https://my-res.openai.azure.com/openai", '
+                + '"env_key" = "CODEX_API_KEY", "wire_api" = "responses", '
+                + '"query_params" = {"api-version" = "2025-04-01-preview"}}'
+            )
+        else:
+            assert "query_params" not in table
+
+    def test_app_server_overrides_escape_toml_specials(self, monkeypatch):
+        """Quotes, backslashes, DEL and newlines in the base URL round-trip on one line."""
+        base_url = 'https://gw.local/v1?x="q"\\b\x7f\n'
+        monkeypatch.setenv("CODEX_BASE_URL", base_url)
+        monkeypatch.delenv("CODEX_API_VERSION", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        overrides = agent._app_server_config_overrides()
+
+        assert tomllib.loads(overrides[1])["model_providers"]["custom"]["base_url"] == base_url
+        assert "\n" not in overrides[1]
+
+    @pytest.mark.parametrize(
+        ("base_url", "reason"),
+        [
+            ("https://user:s3cret-pw@gw.local/v1", "embeds a credential"),
+            ("https://token-only@gw.local/v1", "embeds a credential"),
+            ("http://u:s3cret-pw@[::1/v1", "not a valid URL"),
+        ],
+    )
+    def test_unsafe_base_url_raises_without_echoing_it(self, monkeypatch, base_url, reason):
+        """Userinfo or an unparseable CODEX_BASE_URL raises a config error naming neither the URL nor the credential."""
+        monkeypatch.setenv("CODEX_BASE_URL", base_url)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+
+        with pytest.raises(AgentConfigError, match=reason) as exc_info:
+            agent._app_server_config_overrides()
+
+        message = str(exc_info.value)
+        assert "s3cret-pw" not in message
+        assert "gw.local" not in message
+        assert exc_info.value.__cause__ is None
 
 
 class TestCodexEnvironmentInfo:
@@ -504,6 +657,7 @@ from typing import Any  # noqa: E402
 
 from openai_codex.generated.v2_all import (  # noqa: E402
     SubAgentActivityThreadItem,
+    TokenUsageBreakdown,
     Turn,
     TurnCompletedNotification,
 )
@@ -2229,6 +2383,130 @@ class TestMaxTurnsApiCallCap:
         notifications.append(_turn_completed())
         return notifications
 
+    @staticmethod
+    def _compaction_notifications(
+        *,
+        estimate: bool = True,
+        empty_response: bool = False,
+        item_id: str = "compact",
+        cache_write: int | None = 0,
+    ) -> list:
+        item = SimpleNamespace(type="contextCompaction", id=item_id)
+        response = _token_usage(inp=10, out=5, cached=0)
+        response.payload.token_usage.last = TokenUsageBreakdown(
+            input_tokens=0 if empty_response else 10,
+            output_tokens=0 if empty_response else 5,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=0 if empty_response else 15,
+        )
+        notifications = [_item_notification("item/started", item), response]
+        if estimate:
+            recomputed = _token_usage(inp=20, out=5, cached=0)
+            recomputed.payload.token_usage.last = TokenUsageBreakdown(
+                input_tokens=0,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cache_write_input_tokens=cache_write,
+                reasoning_output_tokens=0,
+                total_tokens=20,
+            )
+            notifications.append(recomputed)
+        notifications.append(_item_notification("item/completed", item))
+        return notifications
+
+    @pytest.mark.parametrize(
+        "estimate,empty_response,cache_write",
+        [(True, False, 0), (False, False, 0), (True, True, 0), (True, False, None)],
+    )
+    async def test_compaction_estimate_does_not_spend_model_call_budget(self, estimate, empty_response, cache_write):
+        notifications = self._cmd_notifications(1)
+        notifications[5:5] = self._compaction_notifications(
+            estimate=estimate, empty_response=empty_response, cache_write=cache_write
+        )
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=3)
+
+        assert record.num_turns == 3
+        assert record.max_turns_exhausted is False
+        assert len(record.commands) == 1
+
+    async def test_repeated_compaction_resets_before_normal_tool_calls(self):
+        notifications = self._cmd_notifications(2)
+        notifications[10:10] = self._compaction_notifications(item_id="compact-2", empty_response=True)
+        notifications[5:5] = self._compaction_notifications(item_id="compact-1")
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=None)
+
+        assert record.num_turns == 5
+        assert record.max_turns_exhausted is False
+        assert len(record.commands) == 2
+
+    async def test_zero_usage_outside_compaction_still_counts(self):
+        update = _token_usage(inp=10, out=5, cached=0)
+        update.payload.token_usage.last = TokenUsageBreakdown(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=20,
+        )
+        notifications = [_token_usage(inp=10, out=5, cached=0), update, _turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=None)
+
+        assert record.num_turns == 2
+        assert record.max_turns_exhausted is False
+
+    async def test_final_compaction_estimate_updates_usage_and_message_buckets(self):
+        reply = SimpleNamespace(type="agentMessage", id="preface", text="Preparing a shorter context.")
+        notifications = [
+            _item_notification("item/started", reply),
+            _item_notification("item/completed", reply),
+            *self._compaction_notifications(),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=None)
+
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 20
+        assert record.token_usage.output_tokens == 5
+        buckets = [
+            message for message in record.messages if isinstance(message, (AssistantMessage, ReconciliationMessage))
+        ]
+        assert sum(message.input_tokens for message in buckets) == record.token_usage.uncached_input_tokens
+        assert sum(message.output_tokens for message in buckets) == record.token_usage.output_tokens
+        assert sum(message.cache_read_tokens for message in buckets) == record.token_usage.cache_read_input_tokens
+        assert (
+            sum(message.cache_creation_tokens for message in buckets) == record.token_usage.cache_creation_input_tokens
+        )
+
+    async def test_zero_usage_after_compaction_completion_counts_next_model_call(self):
+        update = _token_usage(inp=0, out=0, cached=0)
+        update.payload.token_usage.last = SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=0,
+        )
+        notifications = self._compaction_notifications()
+        notifications.extend([update, _turn_completed()])
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("go", max_turns=2)
+
+        assert record.num_turns == 2
+        assert record.max_turns_exhausted is False
+
     async def test_cap_stops_before_the_next_call_runs_a_tool(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
@@ -3094,6 +3372,61 @@ class TestFailedTurnIsACrash:
 
         with pytest.raises(AgentCrashError, match="no error message"):
             await agent.communicate("go")
+
+    async def test_business_text_in_failed_turn_keeps_crash_retry(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "Employees have a spending limit of $402 per trip."})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("explain the expense process")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
+
+    async def test_unstructured_payment_message_remains_retryable(self):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "402 Payment Required"})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("go")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_CRASH
+        assert should_retry(category, 0)
+
+    @pytest.mark.parametrize(
+        "info",
+        ["usageLimitExceeded", {"responseStreamDisconnected": {"httpStatusCode": 402}}],
+    )
+    async def test_terminal_provider_denial_survives_reason_truncation(self, info):
+        from coder_eval.errors.categories import ErrorCategory
+        from coder_eval.errors.categorization import categorize_error
+        from coder_eval.errors.retry import should_retry
+
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX),
+            [_turn_failed({"message": "Provider details: " + "x" * 500, "codexErrorInfo": info})],
+        )
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("go")
+
+        category = categorize_error(caught.value, {"component": "agent"})
+        assert category is ErrorCategory.AGENT_BILLING_ERROR
+        assert not should_retry(category, 0)
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.crash_reason is not None
+        assert len(agent.pending_turn.crash_reason) <= 201
 
     async def test_completed_turn_with_a_retried_provider_error_is_not_a_crash(self):
         notes = [

@@ -1240,3 +1240,19 @@ class TestContainerGradeEmitsTelemetryHostSide:
 
         assert [name for name, _ in events] == ["CoderEval.Task.End"]
         assert events[0][1]["Driver"] == "docker"
+
+
+def test_incident_write_does_not_read_or_change_an_invalid_backup(tmp_path: Path) -> None:
+    from coder_eval.errors import GradingError
+    from coder_eval.orchestration.regrade import write_grading_incident
+
+    prior = _result(final_status=FinalStatus.SUCCESS)
+    source = tmp_path / TASK_JSON_FILENAME
+    source.write_text(prior.model_dump_json())
+    (tmp_path / PRE_GRADE_JSON_FILENAME).write_text("{broken record")
+    selected = write_grading_incident(
+        tmp_path, prior, GradingError(RuntimeError("New grading incident"), component="test.grading")
+    )
+    assert selected.final_status is FinalStatus.SUCCESS
+    assert selected.error_history[-1].message == "New grading incident"
+    assert (tmp_path / PRE_GRADE_JSON_FILENAME).read_text() == "{broken record"

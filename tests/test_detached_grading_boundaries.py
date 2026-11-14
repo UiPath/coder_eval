@@ -17,12 +17,14 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
+from coder_eval.errors import GradingError
 from coder_eval.errors.checker_misuse import CheckerMisuseError
 from coder_eval.models import (
     AgentKind,
@@ -37,10 +39,10 @@ from coder_eval.models import (
 from coder_eval.orchestration.regrade import (
     RegradeError,
     grading_sandbox_config,
-    restore_pre_grade_record,
     stamp_host_grading,
+    write_grading_incident,
 )
-from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME
+from coder_eval.path_utils import TASK_JSON_FILENAME
 from tests._container_contract import contract_payload
 
 
@@ -428,62 +430,29 @@ class TestInContainerRegradeBranch:
 
 
 class TestGradingCrashLeavesTheRowRegradeable:
-    """``Orchestrator.run()`` converts an internal failure into a populated
-    ``FinalStatus.ERROR`` result rather than raising, so a REAL grading crash
-    takes the ``else:`` arm — not the ``except`` arm the pre-existing test
-    exercises by patching ``regrade_in_place`` to raise.
+    """Typed grading failures preserve the immediate prior row and add history."""
 
-    Both arms must leave ``task.json`` ungraded. ERROR is "complete" for both
-    commands, so an ERROR row written over a NOT_GRADED one can never be graded
-    again without hand-restoring ``task.execute.json``.
-    """
-
-    @staticmethod
-    def _run_dir_with_backup(tmp_path: Path) -> Path:
-        run_dir = tmp_path / "00"
-        run_dir.mkdir(parents=True)
-        ungraded = _result().model_dump_json(indent=2)
-        (run_dir / PRE_GRADE_JSON_FILENAME).write_text(ungraded, encoding="utf-8")
-        # What _finalize_result already wrote before the caller saw the ERROR.
-        (run_dir / TASK_JSON_FILENAME).write_text(
-            _result(FinalStatus.ERROR).model_dump_json(indent=2), encoding="utf-8"
-        )
-        return run_dir
-
-    def test_restore_puts_the_ungraded_record_back(self, tmp_path: Path) -> None:
-        run_dir = self._run_dir_with_backup(tmp_path)
-        assert restore_pre_grade_record(run_dir) is True
-        on_disk = EvaluationResult.model_validate_json((run_dir / TASK_JSON_FILENAME).read_text(encoding="utf-8"))
-        assert on_disk.final_status is FinalStatus.NOT_GRADED
-
-    def test_restore_is_a_no_op_when_nothing_was_overwritten(self, tmp_path: Path) -> None:
-        """The grade wrote into a fresh run dir, so the original is untouched."""
-        run_dir = tmp_path / "00"
-        run_dir.mkdir(parents=True)
-        text = _result().model_dump_json(indent=2)
-        (run_dir / PRE_GRADE_JSON_FILENAME).write_text(text, encoding="utf-8")
-        (run_dir / TASK_JSON_FILENAME).write_text(text, encoding="utf-8")
-        assert restore_pre_grade_record(run_dir) is False
-
-    def test_restore_refuses_to_write_through_a_symlink(self, tmp_path: Path) -> None:
-        run_dir = self._run_dir_with_backup(tmp_path)
+    def test_incident_writer_refuses_to_write_through_a_symlink(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "row"
+        run_dir.mkdir()
         victim = tmp_path / "victim.json"
         victim.write_text("keep me", encoding="utf-8")
-        (run_dir / TASK_JSON_FILENAME).unlink()
         (run_dir / TASK_JSON_FILENAME).symlink_to(victim)
-
-        assert restore_pre_grade_record(run_dir) is False
+        failure = GradingError(RuntimeError("grading failed"), component="fixture.grading")
+        with pytest.raises(RegradeError, match="symlink"):
+            write_grading_incident(run_dir, _result(), failure)
         assert victim.read_text(encoding="utf-8") == "keep me"
 
-    async def test_the_resume_error_arm_restores_and_folds_back_ungraded(self, tmp_path: Path) -> None:
-        """The arm a real grading crash takes: `regrade_in_place` RETURNS an
-        ERROR result instead of raising."""
+    @pytest.mark.parametrize("phase", ["grading", "execution", None])
+    async def test_resume_records_typed_grade_failure_and_preserves_execution_errors(
+        self,
+        tmp_path: Path,
+        phase: Literal["grading", "execution"] | None,
+    ) -> None:
+        """Typed failure adds history; real and unknown execution outcomes stay facts."""
         from coder_eval.cli.run_command import _grade_resumed_tasks
         from coder_eval.orchestration.config import BatchRunConfig
 
-        # task.json starts UNGRADED, as `execute` left it. The ERROR lands on
-        # disk during the grade, exactly as _finalize_result writes it before
-        # returning — which is the whole reason the in-memory fix is not enough.
         run_dir = tmp_path / "00"
         run_dir.mkdir(parents=True)
         (run_dir / TASK_JSON_FILENAME).write_text(_result().model_dump_json(indent=2), encoding="utf-8")
@@ -497,6 +466,10 @@ class TestGradingCrashLeavesTheRowRegradeable:
 
         async def _crash(**_kwargs) -> EvaluationResult:
             errored = _result(FinalStatus.ERROR)
+            errored.error_phase = phase
+            errored.error_message = "mock failure"
+            if phase == "grading":
+                raise GradingError(RuntimeError("mock failure"), component="fixture.grading")
             (run_dir / TASK_JSON_FILENAME).write_text(errored.model_dump_json(indent=2), encoding="utf-8")
             return errored
 
@@ -508,13 +481,20 @@ class TestGradingCrashLeavesTheRowRegradeable:
 
         assert len(graded) == 1
         folded = graded[0][1].result
-        assert folded.final_status is FinalStatus.NOT_GRADED
-        assert "Grading errored during --resume" in (folded.error_message or "")
+        expected = FinalStatus.NOT_GRADED if phase == "grading" else FinalStatus.ERROR
+        assert folded.final_status is expected
+        if phase == "grading":
+            assert folded.error_message is None
+            assert folded.error_history[-1].message == "mock failure"
+        else:
+            assert folded.error_message == "mock failure"
         # And the on-disk row too — fixing only the in-memory result leaves
         # run.json disagreeing with task.json, and task.json is what a later
         # --resume reads.
         on_disk = EvaluationResult.model_validate_json((run_dir / TASK_JSON_FILENAME).read_text(encoding="utf-8"))
-        assert on_disk.final_status is FinalStatus.NOT_GRADED
+        assert on_disk.final_status is expected
+        assert on_disk.error_message == folded.error_message
+        assert on_disk.error_history == folded.error_history
 
     async def test_an_unreadable_row_still_appears_as_ungraded(self, tmp_path: Path) -> None:
         """Dropping it removed it from run.json AND from `tasks_not_graded`,

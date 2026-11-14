@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +42,49 @@ from coder_eval.models import (
     TaskDefinition,
 )
 from coder_eval.orchestration.task_loader import load_task
-from coder_eval.path_utils import PRIOR_RESULT_FILENAME
+from coder_eval.path_utils import (
+    EGRESS_GRADING_ACK_FILENAME,
+    EGRESS_GRADING_ACK_OK,
+    EGRESS_GRADING_REQUEST_FILENAME,
+    PRIOR_RESULT_FILENAME,
+    write_text_atomic,
+)
 
 
 logger = logging.getLogger(__name__)
+
+EGRESS_GRADING_TIMEOUT_SECONDS = 120.0
+_EGRESS_GRADING_POLL_SECONDS = 0.1
+
+
+async def request_grading_egress(
+    output_dir: Path, timeout: float = EGRESS_GRADING_TIMEOUT_SECONDS, *, widens: bool = True
+) -> None:
+    """Ask the host to switch the egress sidecar to its grading phase, and wait for its answer.
+
+    A switch that does not ``widen`` egress only marks the phase in the proxy log, so its
+    failure is a warning rather than a reason to stop grading.
+
+    Raises:
+        RuntimeError: The host refused a widening switch, or did not answer within ``timeout`` seconds.
+    """
+    ack = output_dir / EGRESS_GRADING_ACK_FILENAME
+    await asyncio.to_thread(ack.unlink, missing_ok=True)
+    await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_REQUEST_FILENAME, "grading")
+    deadline = time.monotonic() + timeout
+    while not (answered := await asyncio.to_thread(ack.is_file)) and time.monotonic() <= deadline:
+        await asyncio.sleep(_EGRESS_GRADING_POLL_SECONDS)
+    if not answered:
+        failure: str | None = f"The host did not switch the egress sidecar in {timeout:g}s."
+    else:
+        reply = (await asyncio.to_thread(ack.read_text, encoding="utf-8")).strip()
+        failure = None if reply == EGRESS_GRADING_ACK_OK else f"The host could not switch the egress sidecar: {reply}"
+    if failure is None:
+        logger.info("Egress switched to its grading phase.")
+    elif widens:
+        raise RuntimeError(failure)
+    else:
+        logger.warning("%s Refused grading hosts will not be reported.", failure)
 
 
 def _scrub_staged_inputs(task_yaml: Path, context_json: Path) -> None:
@@ -237,6 +278,11 @@ def run_task_internal_command(
     from coder_eval.streaming.wire import StdoutNDJsonCallback
 
     orchestrator.stream_callback = StdoutNDJsonCallback()
+    docker = ctx.authored_sandbox.docker
+    if ctx.grade and docker.network == "llm_only":
+        orchestrator.before_grading = functools.partial(
+            request_grading_egress, output_dir, widens=docker.grading_widens_egress
+        )
 
     asyncio.run(orchestrator.run())
     # Orchestrator.run() writes task.json to run_dir (== output_dir). Done.
@@ -271,8 +317,15 @@ def _grade_recorded_run(
 
     Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
     """
+    from coder_eval.errors import GradingError
+    from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
     from coder_eval.models import CONTAINER_GRADE_WORKSPACE
-    from coder_eval.orchestration.regrade import RegradeError, regrade_in_place
+    from coder_eval.orchestration.regrade import (
+        CONTAINER_GRADING_FAILURE_KEY,
+        RegradeError,
+        container_grading_failure_record,
+        regrade_in_place,
+    )
 
     prior_path = input_dir / PRIOR_RESULT_FILENAME
     if not prior_path.is_file():
@@ -285,6 +338,10 @@ def _grade_recorded_run(
         # task.json, so a crash here surfaces as the opaque "no task.json".
         typer.echo(f"FATAL: {prior_path} is not a readable EvaluationResult: {e}", err=True)
         raise typer.Exit(2) from e
+
+    for incident in prior.error_history:
+        if incident.details is not None:
+            incident.details.pop(CONTAINER_GRADING_FAILURE_KEY, None)
 
     workspace = Path(CONTAINER_GRADE_WORKSPACE)
     if not workspace.is_dir():
@@ -306,6 +363,14 @@ def _grade_recorded_run(
                 recorded_task_file=recorded_task_file,
                 container_contract=container_contract,
             )
+        )
+    except GradingError as error:
+        transport = container_grading_failure_record(prior, error, container_contract)
+        from coder_eval.path_utils import TASK_JSON_FILENAME
+
+        write_text_atomic(
+            output_dir / TASK_JSON_FILENAME,
+            transport.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE),
         )
     except RegradeError as e:
         # Clean message, not a traceback. Exit 2 keeps it distinguishable from an

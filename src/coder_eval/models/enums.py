@@ -25,6 +25,18 @@ class FinalStatus(StrEnum):
         """Classify this status into a reporting category (the SSOT for failed/succeeded/error)."""
         return _STATUS_CATEGORIES[self]
 
+    @classmethod
+    def category_of(cls, status: str) -> Literal["succeeded", "failed", "error", "ungraded"]:
+        """``category`` of a serialized status string, as read back from ``run.json``.
+
+        An unknown value (an older or newer schema) counts as ``error``: it is
+        classified explicitly rather than slipping past a denylist (CE018).
+        """
+        try:
+            return cls(status).category
+        except ValueError:
+            return "error"
+
     @property
     def icon(self) -> str:
         """Single-character icon for reports and CLI output."""
@@ -32,14 +44,12 @@ class FinalStatus(StrEnum):
 
     @property
     def is_execution_fact(self) -> bool:
-        """True when this status records HOW THE RUN ENDED, not what grading decided.
+        """Conservative execution-fact classification using the status alone.
 
-        A detached grade (``evaluate <run_dir>`` / ``run --resume``) re-runs the
-        criteria over a trajectory it did not produce, so it may only move a row
-        between the three GRADING outcomes — ``NOT_GRADED`` -> ``SUCCESS`` /
-        ``FAILURE``. It must never launder a run that timed out, crashed, or blew
-        a budget into a pass: those statuses describe the agent phase, which the
-        grading pass neither repeated nor observed.
+        ERROR can also describe failed grading. Result-aware callers must use
+        ``EvaluationResult.has_execution_failure``, which recognizes explicitly
+        recorded grading origins while preserving ambiguous legacy ERROR rows.
+        TIMEOUT, build and budget failures remain execution facts.
         """
         return _EXECUTION_FACT_STATUSES[self]
 

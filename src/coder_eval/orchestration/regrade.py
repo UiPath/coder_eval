@@ -22,13 +22,17 @@ import logging
 import os
 import shutil
 import tempfile
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Any, TypedDict
 
+from coder_eval.errors import GradingError, ReferenceTamperedError
+from coder_eval.errors.retry import create_error_context
 from coder_eval.models import (
     IN_CONTAINER_ENV,
     EvaluationResult,
+    GradingErrorInfo,
     PreservationMode,
     ResolvedTask,
     SandboxConfig,
@@ -37,7 +41,9 @@ from coder_eval.models import (
 )
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_LOG_FILENAME,
     GRADE_DOCKER_LOG_FILENAME,
+    GRADE_EGRESS_LOG_FILENAME,
     GRADE_LOG_FILENAME,
     PRE_GRADE_JSON_FILENAME,
     TASK_JSON_FILENAME,
@@ -49,6 +55,7 @@ from coder_eval.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_DIRNAME = "artifacts"
+CONTAINER_GRADING_FAILURE_KEY = "_container_grading_attempt_failed"
 
 
 class RegradeError(Exception):
@@ -284,6 +291,11 @@ def _container_dispatch_commands(task: TaskDefinition, task_file: Path | None) -
     parts += [f"-v {mount}" for mount in docker.extra_mounts or []]
     parts += [f"-v {path}" for path in _dispatch_host_exposure(task, task_file)]
     parts += [f"--env {name}" for name in docker.env_passthrough_extra or []]
+    if docker.network == "llm_only" and docker.grading_network != "bridge":
+        parts.append("--network llm_only")
+        allowed = list(dict.fromkeys([*docker.egress_allowlist, *docker.grading_egress_allowlist]))
+        if allowed:
+            parts.append(f"(egress allowed to: {', '.join(allowed)} plus the derived model-API hosts)")
     parts.append("(with your credentials in its environment and a writable copy of ~/.claude)")
     return [" ".join(parts)]
 
@@ -567,32 +579,47 @@ def back_up_pre_grade_record(run_dir: Path) -> None:
         logger.warning("Could not preserve the pre-grade record at %s: %s", backup, e)
 
 
-def restore_pre_grade_record(run_dir: Path) -> bool:
-    """Put the ungraded ``task.json`` back after a grading crash.
+def _grading_incident(prior: EvaluationResult, error: GradingError) -> GradingErrorInfo:
+    incident = error.incident or GradingErrorInfo(
+        message=str(error),
+        details=create_error_context(
+            error=error.cause,
+            task_id=prior.task_id,
+            attempt=max(prior.iteration_count, 1),
+            component=error.component,
+            agent_name=prior.agent_type,
+        ),
+        recorded_at=datetime.now(),
+    )
+    incident = incident.model_copy(deep=True)
+    if incident.details is not None:
+        incident.details.pop(CONTAINER_GRADING_FAILURE_KEY, None)
+    return incident
 
-    ``Orchestrator._finalize_result`` writes ``task.json`` into its run dir
-    *before* returning, so by the time a caller sees ``FinalStatus.ERROR`` the
-    ERROR row is already on disk whenever the grade wrote into the run being
-    graded (always, on ``run --resume``). Both commands treat ERROR as complete,
-    so the row would be permanently un-regradeable — and a caller that only fixes
-    its in-memory result leaves ``run.json`` disagreeing with ``task.json``.
 
-    Returns whether the restore happened; there is nothing to restore when the
-    grade wrote elsewhere and the original was never replaced.
-    """
-    source, backup = run_dir / TASK_JSON_FILENAME, run_dir / PRE_GRADE_JSON_FILENAME
-    if not backup.is_file() or backup.is_symlink() or source.is_symlink():
-        return False
-    try:
-        text = backup.read_text(encoding="utf-8")
-        if source.is_file() and source.read_text(encoding="utf-8") == text:
-            return False  # never overwritten; nothing to undo
-        write_text_atomic(source, text)
-    except OSError as e:
-        logger.warning("Could not restore the ungraded record at %s: %s", source, e)
-        return False
-    logger.info("Restored the ungraded record at %s after a grading failure.", source)
-    return True
+def write_grading_incident(run_dir: Path, prior: EvaluationResult, error: GradingError) -> EvaluationResult:
+    """Append one failed grading attempt to the prior row and atomically write it."""
+    from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
+
+    target = run_dir / TASK_JSON_FILENAME
+    if target.is_symlink():
+        raise RegradeError(f"Refusing to update symlink {target}")
+    selected = prior.model_copy(deep=True)
+    selected.error_history.append(_grading_incident(prior, error))
+    write_text_atomic(target, selected.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE))
+    return selected
+
+
+def container_grading_failure_record(
+    prior: EvaluationResult, error: GradingError, container_contract: dict[str, Any]
+) -> EvaluationResult:
+    """Serialize a failed grading attempt only for the private container transport."""
+    transport = prior.model_copy(deep=True)
+    incident = _grading_incident(prior, error)
+    incident.details = {**(incident.details or {}), CONTAINER_GRADING_FAILURE_KEY: True}
+    transport.error_history.append(incident)
+    transport.environment_info["container_contract"] = container_contract
+    return transport
 
 
 def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = False) -> SandboxConfig:
@@ -688,6 +715,7 @@ def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
     unhonored = f"{TASK_JSON_FILENAME}.unhonored"
     rescued = (
         (DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME),
+        (EGRESS_LOG_FILENAME, GRADE_EGRESS_LOG_FILENAME),
         (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME),
         (unhonored, unhonored),
     )
@@ -904,6 +932,13 @@ async def _grade_in_container(
             # ALWAYS, not only on success: the scratch dir dies with this `with`,
             # and everything that explains a failure lives in it.
             _fold_back_container_logs(container_run_dir, run_dir)
+        incident = result.error_history[-1] if result.error_history else None
+        if incident is not None and (incident.details or {}).get(CONTAINER_GRADING_FAILURE_KEY) is True:
+            error = GradingError(RuntimeError(incident.message), component="regrade.container")
+            error.incident = incident.model_copy(deep=True)
+            assert error.incident.details is not None
+            error.incident.details.pop(CONTAINER_GRADING_FAILURE_KEY)
+            raise error
         # Fold the grade back into the row the caller asked about.
         # `back_up_pre_grade_record` already preserved task.execute.json.
         _fold_back_container_grade(container_run_dir, run_dir, task.task_id)
@@ -1004,7 +1039,12 @@ async def regrade_in_place(
         task_id=task.task_id,
         task_dir=task_file.parent.resolve() if task_file is not None else None,
     )
-    await asyncio.to_thread(sandbox.adopt, workspace)
+    try:
+        await asyncio.to_thread(sandbox.adopt, workspace)
+    except ReferenceTamperedError:
+        raise
+    except Exception as error:
+        raise GradingError(error, component="regrade.sandbox") from error
 
     orchestrator = Orchestrator(
         task=task,

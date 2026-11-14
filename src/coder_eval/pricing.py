@@ -13,6 +13,7 @@ generated from it by ``make pricing-mirror`` and guarded by CE065. Never hand-ed
 generated file.
 """
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -213,12 +214,14 @@ def register_pricing(rates: dict[str, ModelPricing]) -> None:
 # Mirrors models.routing._BEDROCK_KNOWN_PREFIXES. A Bedrock route qualifies a bare
 # alias; the table is keyed on the bare alias, so strip these before the lookup.
 _BEDROCK_REGION_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
+_BEDROCK_VERSION_SUFFIX = re.compile(r"-v\d+:\d+$")
 
 
 def _normalize_model(model: str) -> str:
-    """Strip Bedrock region + vendor qualifiers back to the bare pricing key.
+    """Strip Bedrock region + vendor qualifiers and version suffix back to the bare pricing key.
 
-    ``eu.anthropic.claude-opus-4-8`` → ``claude-opus-4-8``. Idempotent on
+    ``eu.anthropic.claude-opus-4-8`` → ``claude-opus-4-8``;
+    ``eu.anthropic.claude-sonnet-4-5-20250929-v1:0`` → ``claude-sonnet-4-5-20250929``. Idempotent on
     already-bare aliases (``claude-opus-4-8`` / ``gpt-5-codex`` pass through),
     so it is safe to apply unconditionally for every route.
     """
@@ -237,7 +240,7 @@ def _normalize_model(model: str) -> str:
             break
     if model.startswith("anthropic."):
         model = model[len("anthropic.") :]
-    return model
+    return _BEDROCK_VERSION_SUFFIX.sub("", model)
 
 
 def is_priced(model: str) -> bool:

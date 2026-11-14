@@ -25,6 +25,23 @@ from typing import TYPE_CHECKING, TextIO
 import yaml
 
 from coder_eval.config import settings
+from coder_eval.evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
+from coder_eval.isolation.egress import (
+    DOCKER_HOST_ALIAS,
+    EGRESS_PROXY_MODULE,
+    PROXY_ENV_NAMES,
+    EgressHandle,
+    EgressPlan,
+    egress_scope,
+    enter_grading,
+    forwarded_env_names,
+    grading_denials,
+    read_proxy_log,
+    resolve_egress_targets,
+    rewrite_loopback_for_container,
+    task_container_egress_argv,
+)
+from coder_eval.isolation.errors import DockerRunError, EgressSetupError
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_GRADE_WORKSPACE,
@@ -48,6 +65,10 @@ from coder_eval.models import (
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
+    EGRESS_GRADING_ACK_FILENAME,
+    EGRESS_GRADING_ACK_OK,
+    EGRESS_GRADING_REQUEST_FILENAME,
+    EGRESS_LOG_FILENAME,
     PRIOR_RESULT_FILENAME,
     REFERENCE_COPY_IGNORE,
     TASK_JSON_FILENAME,
@@ -75,28 +96,6 @@ logger = logging.getLogger(__name__)
 # MUST equal the `COPY` destination in docker/Dockerfile (drift-guarded by a test).
 # Rationale: .claude/notes/isolation.md § The entrypoint and the image contract
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
-
-# Docker Desktop's stable host alias from a bridge-network container. Auto-resolves
-# on macOS/Windows; on Linux it must be published via `--add-host`.
-_DOCKER_HOST_ALIAS = "host.docker.internal"
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
-def _rewrite_loopback_for_container(url: str) -> str | None:
-    """Rewrite a loopback URL to the docker host alias, preserving scheme/port/path.
-
-    Returns the rewritten URL, or None if the host is not loopback (forward as-is).
-    A LiteLLM proxy on the HOST is unreachable at localhost from inside a bridge
-    container, so ``http://localhost:4000`` -> ``http://host.docker.internal:4000``.
-    """
-    from urllib.parse import urlsplit, urlunsplit
-
-    parts = urlsplit(url)
-    if parts.hostname not in _LOOPBACK_HOSTS:
-        return None
-    netloc = _DOCKER_HOST_ALIAS if parts.port is None else f"{_DOCKER_HOST_ALIAS}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
 
 # DENYLIST of top-level entries the per-task RW copy of ~/.claude skips. Matched by
 # basename at every level, so anything unlisted (settings.json, .credentials.json,
@@ -133,6 +132,8 @@ CLAUDE_COPY_MAX_ATTEMPTS = 3
 HEARTBEAT_FILENAME = ".coder_eval_host_heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
+_GRADING_REQUEST_POLL_SECONDS = 0.25
+EGRESS_DENIED_IN_GRADING_KEY = "egress_denied_in_grading"
 
 # asyncio's StreamReader caps a line at 64 KiB by default, which a single stream
 # event can exceed. The same KIND of guard as Orchestrator._POST_RUN_STREAM_LIMIT,
@@ -170,6 +171,64 @@ async def _heartbeat_loop(heartbeat_path: Path) -> None:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
     except asyncio.CancelledError:
         pass
+
+
+def _network_name(network: str, egress: EgressHandle | None) -> str:
+    """The ``--network`` value; ``llm_only`` without its sidecar refuses rather than falls back to bridge."""
+    if network == "llm_only":
+        if egress is None:
+            raise DockerRunError("network: llm_only needs its egress sidecar; refusing to fall back to bridge.")
+        return egress.network
+    return network
+
+
+def _remove_grading_handshake(output_dir: Path) -> None:
+    for name in (EGRESS_GRADING_REQUEST_FILENAME, EGRESS_GRADING_ACK_FILENAME):
+        (output_dir / name).unlink(missing_ok=True)
+
+
+async def _serve_grading_request(output_dir: Path, egress: EgressHandle) -> None:
+    """Switch the sidecar to its grading phase once the container asks, then answer in the ack file."""
+    request = output_dir / EGRESS_GRADING_REQUEST_FILENAME
+    while not await asyncio.to_thread(request.exists):
+        await asyncio.sleep(_GRADING_REQUEST_POLL_SECONDS)
+    try:
+        await enter_grading(egress)
+        reply = EGRESS_GRADING_ACK_OK
+        logger.info("Egress sidecar %s switched to its grading phase.", egress.sidecar)
+    except EgressSetupError as exc:
+        logger.warning("%s", exc)
+        reply = f"error: {exc}"
+    # Atomic: the run dir is writable from the container, so a planted symlink is replaced, never followed.
+    try:
+        await asyncio.to_thread(write_text_atomic, output_dir / EGRESS_GRADING_ACK_FILENAME, reply)
+    except OSError as exc:
+        logger.warning("Could not answer the egress grading request in %s: %s", output_dir, exc)
+
+
+async def _stop_grading_watch(watch: asyncio.Task[None], output_dir: Path) -> None:
+    """Cancel the grading watcher and remove the handshake files; a failure here is only a warning."""
+    watch.cancel()
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch
+    except Exception as exc:
+        logger.warning("The egress grading watcher failed: %s", exc)
+    try:
+        await asyncio.to_thread(_remove_grading_handshake, output_dir)
+    except OSError as exc:
+        logger.warning("Could not remove the egress grading handshake files in %s: %s", output_dir, exc)
+
+
+def _prepare_egress_dir(egress_dir: Path) -> None:
+    """Stage this host's own proxy module for the sidecar's read-only bind mount.
+
+    The host's copy, not the image's, so the code under test is the boundary that
+    runs. Readable by the sidecar's uid 65534.
+    """
+    egress_dir.mkdir()
+    shutil.copy2(Path(__file__).resolve().parents[1] / EGRESS_PROXY_MODULE, egress_dir / EGRESS_PROXY_MODULE)
+    grant_container_access(egress_dir, writable=False)
 
 
 def _preflight() -> None:
@@ -350,17 +409,6 @@ def _validate_extra_mount(spec: str) -> str:
             f"Invalid extra_mounts entry {spec!r}: destination {dst_norm!r} shadows a framework-owned mount."
         )
     return f"{expanded_src}:{dst}:{mode}"
-
-
-class DockerRunError(RuntimeError):
-    """Raised when ``docker run`` exits non-zero AND no task.json was produced.
-
-    Criterion failures do NOT raise this -- the container always writes
-    task.json (with whatever results it has) before exiting, and the host
-    parses that regardless of exit code. This is reserved for setup-time
-    failures: missing image, daemon down, OOM-kill before the agent started,
-    etc.
-    """
 
 
 class DockerBuildError(DockerRunError):
@@ -647,8 +695,11 @@ class DockerRunner:
         # Bound BEFORE the try: the `finally` restores it, and `_stage_inputs`
         # can raise before the widening happens.
         widened_workspace: list[tuple[Path, int]] = []
+        heartbeat_task: asyncio.Task[None] | None = None
+        log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
 
         try:
+            egress_plan = self._resolve_egress_plan()
             await self._stage_inputs(input_dir)
 
             # Stable and UNIQUE so cancellation can target it: PID alone collides
@@ -662,6 +713,12 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_host_mounts, staging)
             await asyncio.to_thread(self._prepare_reference_mount, staging)
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
+            egress_dir = staging / "egress"
+            if egress_plan is not None:
+                try:
+                    await asyncio.to_thread(_prepare_egress_dir, egress_dir)
+                except OSError as exc:
+                    raise EgressSetupError(f"network: llm_only could not stage the egress proxy: {exc}") from exc
             # AFTER staging, BEFORE the container starts: the DAC caps are dropped, so
             # every framework-owned mount must be reachable through its `other` bits.
             # Writable so the entry point can delete the staged task.yaml/context.json.
@@ -673,37 +730,74 @@ class DockerRunner:
                 # bits cannot be assumed -- and the one that SURVIVES the dispatch,
                 # which is why it is recorded and restored in the `finally` below.
                 widened_workspace = await asyncio.to_thread(grant_container_access, self.grade_workspace, writable=True)
-            argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
-            logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
-            # Prime the heartbeat before the container starts so the watchdog never sees an initial stale state.
+            # Primed before the egress sidecar too: it bind-mounts this one file, and a
+            # missing single-file `-v` source makes Docker create a directory there.
             heartbeat_path = output_dir / HEARTBEAT_FILENAME
             await asyncio.to_thread(heartbeat_path.touch)
             heartbeat_task = asyncio.create_task(_heartbeat_loop(heartbeat_path))
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                limit=STDOUT_LINE_LIMIT_BYTES,
+            scope: contextlib.AbstractAsyncContextManager[EgressHandle | None] = (
+                egress_scope(
+                    container_name=container_name,
+                    image=get_default_docker_image_tag(),
+                    egress_dir=egress_dir,
+                    heartbeat=heartbeat_path,
+                    stale_seconds=HEARTBEAT_STALE_SECONDS,
+                    plan=egress_plan,
+                    log_path=self.rt.run_dir / EGRESS_LOG_FILENAME,
+                )
+                if egress_plan is not None
+                else contextlib.nullcontext(None)
             )
-            log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
-            log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
-            # HAZARD: `docker run --rm` does NOT propagate a kill daemon-side, so
-            # without this `finally` Ctrl-C leaves the container burning budget.
-            # Rationale: .claude/notes/isolation.md § A container that produced no task.json
-            try:
-                returncode = await self._stream_container_output(proc, log_fh)
-            finally:
+            async with scope as egress:
+                argv = self._build_argv(
+                    input_dir, output_dir, container_name=container_name, image=image, egress=egress
+                )
+                logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
+                if egress is not None:
+                    try:
+                        await asyncio.to_thread(_remove_grading_handshake, output_dir)
+                    except OSError as exc:
+                        raise EgressSetupError(
+                            f"network: llm_only could not clear a stale grading request: {exc}"
+                        ) from exc
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    limit=STDOUT_LINE_LIMIT_BYTES,
+                )
+                log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
+                grading_watch = (
+                    asyncio.create_task(_serve_grading_request(output_dir, egress))
+                    if egress is not None and egress.plan.grading_phase
+                    else None
+                )
+                # HAZARD: `docker run --rm` does NOT propagate a kill daemon-side, so
+                # without this `finally` Ctrl-C leaves the container burning budget.
+                # Rationale: .claude/notes/isolation.md § A container that produced no task.json
+                try:
+                    returncode = await self._stream_container_output(proc, log_fh)
+                finally:
+                    await asyncio.to_thread(log_fh.close)
+                    # Cancelled mid-flight: kill the container AND the docker CLI subprocess, best-effort.
+                    if proc.returncode is None:
+                        await self._kill_container(proc, container_name)
+                    if grading_watch is not None:
+                        await _stop_grading_watch(grading_watch, output_dir)
+
+                result = await self._parse_result_or_raise(output_dir, returncode, log_path)
+                if egress is not None and self.grade:
+                    await self._record_grading_denials(result, egress, output_dir / TASK_JSON_FILENAME)
+                return result
+        except EgressSetupError as exc:
+            await self._write_synthetic_task_json(self.rt.run_dir / TASK_JSON_FILENAME, exc)
+            raise
+        finally:
+            if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 # Narrowed so a genuine KeyboardInterrupt / SystemExit from a parallel sibling still propagates.
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
-                await asyncio.to_thread(log_fh.close)
-                # Cancelled mid-flight: kill the container AND the docker CLI subprocess, best-effort.
-                if proc.returncode is None:
-                    await self._kill_container(proc, container_name)
-
-            return await self._parse_result_or_raise(output_dir, returncode, log_path)
-        finally:
             # rmtree_restrictive, not ignore_errors: `staging` holds the references
             # copy, which a container killed mid-turn leaves at mode 000.
             # Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
@@ -711,6 +805,71 @@ class DockerRunner:
             # The graded workspace is the caller's tree, not ours; give it back
             # the modes it had. See `restore_modes`.
             await asyncio.to_thread(restore_modes, widened_workspace)
+
+    def _container_network(self) -> str:
+        """The network this container joins: a detached grade with ``grading_network: bridge`` gets ``bridge``."""
+        cfg = self._docker_config
+        if self.grade_workspace is not None and cfg.network == "llm_only" and cfg.grading_network == "bridge":
+            return "bridge"
+        return cfg.network
+
+    def _resolve_egress_plan(self) -> EgressPlan | None:
+        """This container's ``network: llm_only`` allowlists, or None for any other network.
+
+        ``execute`` keeps the agent's allowlist, a detached grade gets the grading one from
+        the start, and a graded run switches when its grading starts.
+
+        Raises:
+            EgressSetupError: A forwarded URL, judge ``base_url`` or ``AWS_REGION`` cannot be allowlisted.
+        """
+        if self._container_network() != "llm_only":
+            return None
+        try:
+            targets = tuple(resolve_egress_targets(self.rt.task, env=os.environ, settings=settings))
+        except ValueError as exc:
+            raise EgressSetupError(str(exc)) from exc
+        cfg = self._docker_config
+        if not self.grade:
+            return EgressPlan(targets)
+        grading_any = cfg.grading_network == "bridge"
+        grading_targets = () if grading_any else tuple(t for t in cfg.grading_egress_allowlist if t not in targets)
+        if self.grade_workspace is not None:
+            return EgressPlan(tuple(sorted({*targets, *grading_targets})))
+        return EgressPlan(targets, grading_targets, grading_any, grading_phase=True)
+
+    async def _record_grading_denials(self, result: EvaluationResult, egress: EgressHandle, task_json: Path) -> None:
+        """Record the hosts grading was refused in ``environment_info``; the row's status is kept.
+
+        Rationale: .claude/notes/isolation.md § Why a refused grading host does not change the status
+        """
+        proxy_log = await read_proxy_log(egress)
+        if proxy_log is None:
+            logger.warning(
+                "Task '%s': could not read the log of egress sidecar %s, so refused grading hosts are not recorded.",
+                self.rt.task.task_id,
+                egress.sidecar,
+            )
+            return
+        denied = grading_denials(proxy_log, whole_log=self.grade_workspace is not None)
+        previous = result.environment_info.pop(EGRESS_DENIED_IN_GRADING_KEY, None)
+        if not denied and previous is None:
+            return
+        if denied:
+            hosts = ", ".join(denied)
+            logger.warning(
+                "Task '%s': network: llm_only refused grading access to %s. If a criterion needs one, add it to "
+                + "sandbox.docker.grading_egress_allowlist in the task file and grade the run again "
+                + "(`coder-eval evaluate <task.yaml> <task_run_dir>`).",
+                self.rt.task.task_id,
+                hosts,
+            )
+            result.environment_info[EGRESS_DENIED_IN_GRADING_KEY] = hosts
+        try:
+            await asyncio.to_thread(
+                write_text_atomic, task_json, result.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE)
+            )
+        except OSError as exc:
+            logger.warning("Could not record the refused grading hosts in %s: %s", task_json, exc)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition and the ``ContainerContext`` into the
@@ -818,7 +977,8 @@ class DockerRunner:
     async def _kill_container(self, proc: asyncio.subprocess.Process, container_name: str) -> None:
         """Best-effort teardown when cancelled mid-stream with the container still alive.
 
-        Called from ``run``'s inner ``finally`` (after heartbeat-cancel + log-fh close),
+        Called from ``run``'s inner ``finally`` (after the log-fh close; the heartbeat is
+        cancelled later, after the egress teardown, so a live sidecar never goes stale),
         guarded by ``if proc.returncode is None``. ``docker run --rm`` does NOT propagate
         a host-side kill to the daemon, so kill the container by name and then the docker
         CLI subprocess. No exception leaks from cleanup; suppression is narrowed to
@@ -1341,7 +1501,13 @@ class DockerRunner:
             logger.warning(_MASK_WARNING, masked_dir, root)
 
     def _build_argv(
-        self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
+        self,
+        input_dir: Path,
+        output_dir: Path,
+        *,
+        container_name: str,
+        image: str | None = None,
+        egress: EgressHandle | None = None,
     ) -> list[str]:
         cfg = self._docker_config
         # _build_argv stays PURE -- no side effects -- so it remains testable without
@@ -1368,10 +1534,8 @@ class DockerRunner:
             "DAC_READ_SEARCH",
         ]
 
-        if cfg.network == "none":
-            argv += ["--network", "none"]
-        else:
-            argv += ["--network", "bridge"]
+        network = self._container_network()
+        argv += ["--network", _network_name(network, egress)]
 
         if self._limits.max_memory_mb:
             argv += ["--memory", f"{self._limits.max_memory_mb}m"]
@@ -1383,11 +1547,14 @@ class DockerRunner:
         # Explicit allowlist. `--env VAR` (name-only) tells docker to copy the value
         # from our env at run time, so secrets stay out of the argv we log.
         # Rationale: .claude/notes/isolation.md § Environment forwarding
-        merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
+        merged_allowlist = forwarded_env_names(self.rt.task)
         for env_var in merged_allowlist:
             # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
             # rewrite (host alias / absolute mount path), not name-only.
             if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG"):
+                continue
+            # Under llm_only a forwarded host proxy setting must never shadow the sidecar's.
+            if egress is not None and env_var in PROXY_ENV_NAMES:
                 continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
@@ -1396,10 +1563,13 @@ class DockerRunner:
         # to the docker host alias and publish that alias. Only a URL, so an
         # explicit `--env VAR=value` is safe in the logged argv -- unlike the token.
         litellm_base_url = os.environ.get("LITELLM_BASE_URL")
-        if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and cfg.network != "none":
-            rewritten = _rewrite_loopback_for_container(litellm_base_url)
+        if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and network != "none":
+            rewritten = rewrite_loopback_for_container(litellm_base_url)
             if rewritten is not None:
-                argv += ["--env", f"LITELLM_BASE_URL={rewritten}", "--add-host", f"{_DOCKER_HOST_ALIAS}:host-gateway"]
+                argv += ["--env", f"LITELLM_BASE_URL={rewritten}"]
+                # Under llm_only only the sidecar dials the host, so it carries the alias.
+                if egress is None:
+                    argv += ["--add-host", f"{DOCKER_HOST_ALIAS}:host-gateway"]
             else:
                 argv += ["--env", "LITELLM_BASE_URL"]
 
@@ -1407,7 +1577,7 @@ class DockerRunner:
         # in-container cost join, so bind-mount its dir at the SAME host path
         # read-only and forward the resolved ABSOLUTE path.
         litellm_cost_log = os.environ.get("LITELLM_COST_LOG")
-        if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and cfg.network != "none":
+        if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and network != "none":
             abs_log = Path(litellm_cost_log).expanduser().resolve()
             if abs_log.parent.is_dir():
                 argv += ["-v", f"{abs_log.parent}:{abs_log.parent}:ro", "--env", f"LITELLM_COST_LOG={abs_log}"]
@@ -1421,6 +1591,8 @@ class DockerRunner:
         # name-only, so it overrides any inherited or baked-in value.
         # Rationale: .claude/notes/isolation.md § Environment forwarding
         argv += ["--env", "TELEMETRY_ENABLED=false"]
+        if egress is not None:
+            argv += task_container_egress_argv()
 
         # Read-WRITE: the entry point deletes the staged task.yaml and context.json
         # after load, and `rm` fails with EROFS on a `:ro` bind mount.

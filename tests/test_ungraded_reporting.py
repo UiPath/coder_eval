@@ -112,6 +112,47 @@ def test_the_three_published_pass_rates_agree_on_one_set_of_counts() -> None:
     assert aggregate.pass_rate is None
 
 
+def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -> None:
+    """run.md showed 1.000 and experiment.md 0.500 for the same rows when each
+    surface kept its own copy of the averaging rule. Both now read
+    `measured_scores`; this pins that they agree on every status that matters."""
+    from coder_eval.reports import ReportGenerator
+
+    rows: list[tuple[FinalStatus, float | None]] = [
+        (FinalStatus.SUCCESS, 1.0),
+        (FinalStatus.FAILURE, 0.0),
+        (FinalStatus.ERROR, None),
+        (FinalStatus.TIMEOUT, None),
+        (FinalStatus.NOT_GRADED, None),
+    ]
+    variant_rows = [
+        VariantResult(variant_id="v", task_id=f"t{i}", weighted_score=score, final_status=status, duration_seconds=1.0)
+        for i, (status, score) in enumerate(rows)
+    ]
+    summary = _summary(
+        tasks_run=5,
+        tasks_succeeded=1,
+        tasks_failed=2,
+        tasks_error=1,
+        tasks_not_graded=1,
+        tasks_measured=2,
+        task_results=[
+            {"task_id": f"t{i}", "status": status, "weighted_score": score, "duration": 1.0}
+            for i, (status, score) in enumerate(rows)
+        ],
+    )
+
+    variant_mean = _mean_graded_score(variant_rows)
+    assert variant_mean == 0.25
+    assert f"- **Avg Reliability Score**: {variant_mean:.3f}" in ReportGenerator.generate_markdown(summary)
+
+
+def test_category_of_reads_a_serialized_status_and_counts_an_unknown_one_as_error() -> None:
+    assert FinalStatus.category_of("NOT_GRADED") == "ungraded"
+    assert FinalStatus.category_of("TIMEOUT") == "failed"
+    assert FinalStatus.category_of("NO_SUCH_STATUS") == "error"
+
+
 def test_variant_aggregate_serializes_its_denominator() -> None:
     """A consumer that cannot read `tasks_graded` re-derives the rate and drifts."""
     import json

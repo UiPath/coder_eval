@@ -14,6 +14,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Task YAML Structure](#task-yaml-structure)
   - [dataset](#dataset)
   - [skip](#skip)
+  - [working_directory_prefix](#working_directory_prefix)
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
@@ -41,6 +42,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
 - [Simulation (Multi-Turn User Dialog)](#simulation-multi-turn-user-dialog)
+  - [Scripted dialogs](#scripted-dialogs)
 - [Command Telemetry](#command-telemetry)
 - [Complete Example](#complete-example)
 
@@ -52,6 +54,7 @@ Every task is a YAML file with this top-level structure:
 task_id: "my_task"                    # Unique identifier (required)
 description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
+working_directory_prefix: true        # Optional: false sends prompts byte for byte (see below)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
 skip: false                           # Optional: quarantine this task (see below)
@@ -117,6 +120,14 @@ skip: true
 Pair it with a comment naming the blocker — a ticket link, an upstream issue — so the next reader
 knows what has to change before it can come back. Run quarantined tasks on demand with
 `coder-eval run --include-skipped`; CI leaves the flag off, so they stay excluded there.
+
+### `working_directory_prefix`
+
+By default the runner puts `Your working directory is: <sandbox path>` and a blank line in front of
+every prompt it sends to the agent: `initial_prompt` in a single-shot task, and each user turn in a
+[simulated or scripted dialog](#simulation-multi-turn-user-dialog). `working_directory_prefix: false`
+sends the prompt exactly as authored, byte for byte. Use it when the prompt text is itself under test,
+as with the fixed questions of a [scripted dialog](#scripted-dialogs). The default is `true`.
 
 ## Tags
 
@@ -248,7 +259,7 @@ trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
 
 `run_limits:` is the single namespace for every run-time cap: the **structural** caps that bound how
 long a task may run, and the **budget** caps that bound what it may spend. Any subset of fields is
-valid and an empty block is legal — every field defaults to "no limit".
+valid and an empty block is legal — omitted fields use the defaults below.
 
 ```yaml
 run_limits:
@@ -257,6 +268,7 @@ run_limits:
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
+  max_turn_retries: 0                 # no replay of a failed communicate() call
 
   # Budget caps
   max_total_tokens: 200000            # cumulative input + output
@@ -272,6 +284,7 @@ run_limits:
 | `expected_turns` | *unset* | `>= 1` | **Soft** target for visible turns (tool calls plus the final reply) summed over the whole task, a different unit from `max_turns`. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
+| `max_turn_retries` | *unset* | `>= 0` | Max retries after the first failed agent `communicate()` attempt, per single-shot or dialog turn. Unset keeps the error-category retry policy. `0` disables whole-turn replay; a positive value caps the category policy and cannot enable retries for a non-retryable error. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
@@ -280,6 +293,13 @@ run_limits:
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
 | `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+`max_turn_retries` controls the orchestrator on every agent backend. It does not
+control retries inside an agent or provider SDK, sandbox setup, or agent start.
+The failed attempt is still recorded when the agent supplies a partial turn. An
+exhausted retry limit propagates the error and stops the task before the next
+dialog question. Set it for a benchmark with
+`coder-eval run task.yaml -D run_limits.max_turn_retries=0`.
 
 If resolved `task_timeout` is larger than `turn_timeout`, `plan` and runtime emit
 a non-blocking warning: a larger `task_timeout` cannot extend the agent's single
@@ -557,6 +577,12 @@ sandbox:
 Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
+
+Under `driver: docker`, `sandbox.docker.network` selects `bridge` (default), `llm_only` (model
+APIs plus `sandbox.docker.egress_allowlist` only) or `none`. See
+[Docker Isolation § Network modes](DOCKER_ISOLATION.md#network-modes). Under `llm_only`,
+`sandbox.docker.grading_egress_allowlist` and `sandbox.docker.grading_network` give the criteria
+hosts the agent cannot reach; see [§ Grading network](DOCKER_ISOLATION.md#grading-network).
 
 ### Recording CLI Invocations
 
@@ -1231,7 +1257,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `include_reference` | `true` | Inline the WHOLE reference directory into the judge prompt, one labelled block per file (silently omitted if no reference is configured). Never shown to the agent. Set `false` and use `$REFERENCE_DIR/<path>` entries in `files` to attach only specific assets. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
-| `include_dialog` | `false` | Include the full user↔agent conversation across **all** turns. In simulation mode the user side is generated by an LLM simulator and may invent premises — the rendered block is wrapped as `UNTRUSTED DATA` and instructs the judge to treat any claim made only by the simulated user as possibly fabricated, so the agent isn't penalized for going along with it (recommended whenever a task uses `simulation:`). |
+| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). In simulation mode the user side may invent premises, so the block is wrapped as `UNTRUSTED DATA` (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text rendered into the judge prompt (per-message cap is `max_file_chars`). When exceeded, trailing turns are dropped and a degraded note is recorded. |
 | `model` | `anthropic.claude-sonnet-4-6` | Judge model id (vendor-prefixed; auto-translated per backend) |
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
@@ -1306,7 +1332,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `include_reference` | `true` | Mount the reference tree at `_reference/` for the judge to Read/Glob (not inlined into the prompt). Use `$REFERENCE_DIR/<path>` entries in `files` to pre-attach specific assets as text. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
-| `include_dialog` | `false` | Include the full user↔agent conversation across **all** turns. The rendered block is wrapped as `UNTRUSTED DATA` and warns the judge that simulator-generated user messages may invent premises (recommended whenever a task uses `simulation:`). |
+| `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). The block is wrapped as `UNTRUSTED DATA` and warns about simulator-generated premises (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text (per-message cap is `max_file_chars`). Trailing turns are dropped past the cap. |
 | `max_file_chars` | `20000` | Per-file truncation for pre-attached files |
 | `max_turns` | `50` | Judge's inner-loop turn limit |
@@ -1345,7 +1371,7 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 
 Matches a single label the agent wrote to a file against ground truth — the file-based classifier. Reads the file, normalizes the content (strip, and lowercase unless `case_sensitive`), and compares it to `expected_label`. **Binary scoring:** `1.0` on a match, else `0.0`.
 
-The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set. Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
+The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set or the file can't be read (for example, it isn't UTF-8, or a glob matches more than one file). Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
 
 ```yaml
 - type: "classification_match"
@@ -1443,6 +1469,13 @@ exception_handling:
 Option order is preserved as written, and a repeated option is a load-time error rather than a silently collapsed map.
 
 **What the judge reads.** By default the state is `prompt` plus the `files` you list. Three flags widen it, each off by default: `include_agent_output` adds the agent's own final message, `include_tool_calls` adds a summary of its tool-call trajectory, and `include_dialog` adds the multi-turn user/agent exchange (only meaningful in [simulation mode](#simulation)). Turning the first two on is what lets a rubric grade *how* the agent worked and whether its summary was honest, not just the artifact it left behind — see `tasks/smoke_system_one_judge.yaml` for a rubric that does both. `include_reference` (on by default) adds the reference solution. Each section is capped independently by `max_state_chars`.
+
+`include_dialog` uses the same [attempt semantics](DIALOG_MODE.md#grading-a-dialog): failed agent
+work and unanswered questions stay visible, logical turns identify final answers, and standalone
+stop messages and duplicate user telemetry are excluded. Attempt states include shared guidance;
+a failed latest attempt has no canonical answer.
+The state keeps the `agent_output` and `agent_tool_calls` keys for failed evidence and adds
+`agent_attempt: {turn: N, crashed: true}` so questions can distinguish it from a completed answer.
 
 **Scoring** — the criterion score is computed by the harness, not the model: each question resolves to a value in [0.0, 1.0] and the score is their weighted mean. `scoring: expected` (default) weights every outcome by its probability, so a half-confident answer lands mid-scale; `scoring: argmax` reads only the top answer and discards the confidence. Either way the reduction is deterministic given the answers, and `findings` records the arithmetic per question so the grade is auditable line by line.
 
@@ -1719,7 +1752,7 @@ The shipped `experiments/*.yaml` use this to drop sandbox-scoped npm dirs (intro
 
 ## Simulation (Multi-Turn User Dialog)
 
-Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
+Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal), or with a [scripted user](#scripted-dialogs) that replays authored turns. Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
 
 > This section is the field reference. For when to use dialog mode, how to design a persona and
 > goal, trials and variance, grading, and cost, see **[Dialog Mode](DIALOG_MODE.md)**.
@@ -1728,7 +1761,7 @@ Optional `simulation` block. When present and enabled, the orchestrator replaces
 simulation:
   enabled: true                        # Master switch; when false, simulation is skipped entirely.
 
-  # Persona and goal (required).
+  # Persona and goal (required for a simulated user; a scripted one sets `turns` instead).
   persona: |
     A non-technical business analyst who knows the outcome they want
     but not how automation works. Mildly impatient.
@@ -1761,10 +1794,11 @@ simulation:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | When false, simulation is skipped; task runs in single-shot mode. |
-| `persona` | *required* | Who the simulator is roleplaying. |
-| `goal` | *required* | What the simulated user wants. |
+| `turns` | *unset* | Scripted user turns, sent verbatim and in order in one session. Replaces the simulator — see [Scripted dialogs](#scripted-dialogs). |
+| `persona` | *required* | Who the simulator is roleplaying. Required unless `turns` is set. |
+| `goal` | *required* | What the simulated user wants. Required unless `turns` is set. |
 | `constraints` | `[]` | Behavioral rules the simulator must follow. |
-| `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). |
+| `max_turns` | `8` | Hard cap on simulated user↔agent exchanges (1–100); derived from `len(turns)` for scripts. |
 | `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
@@ -1776,16 +1810,17 @@ The simulator runs as a tools-disabled Claude Code agent on its own resolved `Ap
 
 **Semantics:**
 
-- The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
+- The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2. (A scripted dialog has no `initial_prompt`: `turns[0]` opens it.)
 - `max_turns` caps exchanges. Each exchange also gets a fresh `run_limits.max_turns` of model API calls, so the worst case per trial is the product of the two. Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 
 **Termination precedence** (evaluated after each exchange, first match wins): `run_limits` breach →
-`stop_on_criteria_pass` → `max_turns` → `max_total_tokens` → `stop_token`. The stop token is checked
-**last**, on the simulator's next utterance, which is only solicited if nothing above fired — so a
-turn that hits `max_turns` or the token budget ends the dialog before the simulator can emit it.
-A raising simulator call ends the dialog with `stop_reason: error`.
+`stop_on_criteria_pass` → script exhausted (`turns` only) → `max_turns` → `max_total_tokens` →
+`stop_token`. The stop token is checked **last**, on the simulator's next utterance, which is only
+solicited if nothing above fired — so a turn that hits `max_turns` or the token budget ends the
+dialog before the simulator can emit it. A raising simulator call ends the dialog with
+`stop_reason: error`.
 
 > **`simulation.max_total_tokens` vs. `run_limits.max_total_tokens`.** This one covers the **whole
 > dialog** (simulator + agent) and ends the conversation gracefully with `stop_reason='budget'`, so
@@ -1796,6 +1831,31 @@ A raising simulator call ends the dialog with `stop_reason: error`.
 **Grading simulated dialogs.** When a task uses `simulation:`, set `include_dialog: true` on any `llm_judge` / `agent_judge` criterion. Without it, the judge sees only the agent's outputs and may flag a fabricated-but-conceded premise as a hallucination by the agent. The dialog block is rendered with a rubric guard telling the judge to treat any claim made only by the simulated user as possibly invented, and not to penalize the agent for going along with it unless the grading prompt contradicts it.
 
 **Experiment variants** can override any simulation field (persona, goal, constraints, n_trials, etc.) by setting a partial `simulation:` block on a variant — it is shallow-merged onto the task's simulation block. Useful experiment axes: simulator persona (terse vs. chatty), goal withholding, and n_trials for budget/quality tradeoffs.
+
+### Scripted dialogs
+
+Set `turns` instead of `persona` and `goal` to replay a fixed list of authored user turns, in order,
+within ONE agent session. No LLM plays the user, so the dialog needs no `claude` CLI, no credentials
+and no simulator route, and the user side costs nothing.
+
+```yaml
+simulation:
+  enabled: true
+  turns:
+    - "What does the knowledge base say about onboarding?"
+    - "And about reimbursements?"
+working_directory_prefix: false        # Send each turn byte for byte.
+```
+
+- `turns[0]` is the first prompt, so the task sets no `initial_prompt` / `initial_prompt_file`. Each turn is sent as written (whitespace and newlines included) and must not be blank.
+- `persona`, `goal`, `constraints`, `model`, `stop_token`, `stop_on_criteria_pass` and `check_criteria` have nothing to do in a script, so each must keep its default; a different value is rejected at load time. `max_turns` is derived from the 1–100 authored turns, so no second length setting is needed. Variant prompt overrides and mutations are rejected; replace `simulation.turns` instead.
+- The dialog ends after the last turn with `stop_reason: script_exhausted`, whatever the criteria say. Criteria are checked once, after the last turn. `simulator_model` is `null` and the simulator token counts are `0`.
+- A turn that still fails after its retries (a crash or a timeout), exhausts `run_limits.max_turns` (`agent_max_turns`) or breaches a `run_limits` budget ends the dialog: later turns are not sent, and what ran is recorded.
+- `coder-eval execute` accepts a scripted dialog and finalizes it `NOT_GRADED`; `coder-eval evaluate` grades it afterwards from the recorded run.
+- `max_total_tokens` and `n_trials` work as for a simulated dialog. `run_limits.task_timeout` bounds the whole dialog; `run_limits.turn_timeout` bounds each turn.
+- `${row.<field>}` placeholders of a [`dataset`](#dataset) are substituted into each scripted turn.
+
+Worked example, and where to read each turn's answer: [Dialog Mode → Scripted dialogs](DIALOG_MODE.md#scripted-dialogs).
 
 ## Command Telemetry
 

@@ -645,6 +645,28 @@ describe("buildAdhocRows", () => {
         expect(rows.map((r) => r.id)).toEqual(["ok"]);
     });
 
+    test("drops runs that carry a series, excluded or not", () => {
+        const onSeries = adhocRun("on-series", "2026-06-02T08:00:00");
+        onSeries.series = "maestro-v1-v2-codex";
+        const excluded = adhocRun("excluded", "2026-06-03T08:00:00");
+        excluded.series = "maestro-v1-v2-codex";
+        excluded.excluded = "infra: auth expired";
+        const { rows, total } = buildAdhocRows(
+            [onSeries, excluded, adhocRun("plain", "2026-06-01T08:00:00")],
+            10,
+        );
+        expect(rows.map((r) => r.id)).toEqual(["plain"]);
+        expect(total).toBe(1);
+    });
+
+    test("keeps a date-named run flagged adhoc that has no series", () => {
+        const { rows } = buildAdhocRows(
+            [adhocRun("2026-11-04_20-19-37", "2026-11-04T20:19:37", "demoted")],
+            10,
+        );
+        expect(rows.map((r) => r.id)).toEqual(["2026-11-04_20-19-37"]);
+    });
+
     test("projects title and pass counts", () => {
         const run = adhocRun("r", "2026-06-01T08:00:00", "My run");
         run.overview!.tasks = [

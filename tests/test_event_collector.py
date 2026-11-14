@@ -207,6 +207,7 @@ class TestFullFieldParity:
     #                          LiteLLM proxy cost log (litellm_cost.apply_actual_cost),
     #                          not emitted by the agent/EventCollector.
     _DERIVED: ClassVar[set[str]] = {
+        "record_kind",
         "commands",
         "token_usage",
         "timestamp",

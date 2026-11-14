@@ -92,6 +92,7 @@
   "model_used": "virtuoso-1-5",
   "num_turns": 3,
   "provider_errors": [],
+  "record_kind": "agent",
   "result_summary": {
     "is_error": false,
     "result": null,

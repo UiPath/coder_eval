@@ -1,0 +1,27 @@
+task_id: docker_egress_grading
+description: |
+  Check that grading_egress_allowlist opens its hosts to grading only. No agent and no model API:
+  pre_run runs before grading under the agent's allowlist and records whether pypi.org answered,
+  then the criteria run under the grading allowlist. Under network bridge the first and last
+  criteria fail, which is the control.
+tags: [docker, network, smoke]
+agent:
+  type: none
+sandbox:
+  driver: docker
+  docker:
+    network: llm_only
+    grading_egress_allowlist: [pypi.org]
+pre_run:
+  - command: "if curl -sS -m 10 -o /dev/null https://pypi.org/simple/; then echo REACHED; else echo BLOCKED; fi > agent_phase.txt"
+success_criteria:
+  - type: file_contains
+    path: agent_phase.txt
+    includes: ["BLOCKED"]
+    description: "Before grading, pypi.org is blocked."
+  - type: run_command
+    command: "curl -sS -m 10 -o /dev/null https://pypi.org/simple/"
+    description: "During grading, pypi.org is reachable."
+  - type: run_command
+    command: "! curl -sS -m 10 -o /dev/null https://example.com"
+    description: "During grading, a host on no allowlist is still blocked."

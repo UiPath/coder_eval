@@ -8,7 +8,18 @@ They are vendored from [**benchflow-ai/skillsbench**](https://github.com/benchfl
 (Apache-2.0), pinned at commit
 [`95b3e60`](https://github.com/benchflow-ai/skillsbench/tree/95b3e60de7a075090e2f9137f32e0d24da1a289b).
 Each sample keeps the upstream prompt, inputs, and verifier; only the container
-base and the coder_eval task wiring were added.
+base and the coder_eval task wiring were added. The one local change is to the
+`3d-scan-calc` verifier, which is patched to grade against fixed expected
+values instead of re-deriving them from the agent-writable `scan_data.stl`
+(issue #233). The other verifiers are unchanged and can still read
+agent-writable inputs: `dialogue-parser` takes part of its ground truth from
+`/app/script.txt`.
+
+That patch closes only the `scan_data.stl` vector. Grading still runs in the
+agent's container, so the `pytest` on `PATH`, auto-loaded `pytest11` plugins,
+site-packages, and the `$TASK_DIR` verifier copy remain tamperable by the
+agent. See the follow-up issue
+[#238](https://github.com/UiPath/coder_eval/issues/238).
 
 ## What they do
 
@@ -44,8 +55,9 @@ coder-eval run tasks/samples/skillsbench/*/*.yaml
 ```
 
 Each task builds its container, runs the agent (Claude Sonnet 4.6 by default) in
-an isolated sandbox, then scores the result with the upstream verifier. Budget
-roughly 1–3 minutes per task.
+an isolated sandbox, then scores the result with the upstream verifier (for
+`3d-scan-calc`, the locally patched one described above). Budget roughly 1–3
+minutes per task.
 
 ## Interpreting the results
 
@@ -89,5 +101,6 @@ is non-deterministic, so exact numbers vary from run to run:
 
 These tasks are derived from benchflow-ai/skillsbench, licensed under Apache-2.0.
 The prompts, input data, and verifiers are the work of their original authors
-(credited in each upstream task's `task.md`). See the pinned commit above for the
-source of truth.
+(credited in each upstream task's `task.md`). The `3d-scan-calc` verifier is
+patched locally to grade against fixed expected values. See the pinned commit
+above for the upstream source of truth.

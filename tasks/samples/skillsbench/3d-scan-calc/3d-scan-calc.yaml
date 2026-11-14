@@ -58,9 +58,14 @@ run_limits:
   turn_timeout: 300
 
 success_criteria:
-  # Run the skillsbench verifier verbatim: copy it from the task dir into a
-  # writable /verifier, run its test.sh (writes /logs/verifier/reward.txt), and
-  # emit that reward (0.0-1.0) as the criterion score.
+  # Run the skillsbench verifier (patched locally to grade against fixed
+  # expected values): copy it from the task dir into a writable /verifier, run
+  # its test.sh (writes /logs/verifier/reward.txt), and emit that reward
+  # (0.0-1.0) as the criterion score.
+  # The patch closes only the agent-writable scan_data.stl vector (#233).
+  # Grading still runs in the agent's container, so the pytest on PATH,
+  # auto-loaded pytest11 plugins, site-packages and the $TASK_DIR verifier
+  # copy remain tamperable; see the follow-up issue #238.
   - type: run_command
     command: |
       set -e

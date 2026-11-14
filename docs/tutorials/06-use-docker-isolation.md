@@ -160,7 +160,7 @@ Rather than passing the flag every time, set it in the task YAML:
 sandbox:
   driver: docker
   docker:
-    network: bridge        # or "none" for a fully sealed run (no network)
+    network: bridge        # or "llm_only" (model APIs only) or "none" (no network)
     image: my-custom:tag # optional: override the default framework image
 ```
 

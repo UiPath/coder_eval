@@ -39,6 +39,15 @@ PRIOR_RESULT_FILENAME = "prior.json"
 # Rationale: .claude/notes/persistence.md § Run-directory filename constants
 DOCKER_LOG_FILENAME = "docker.log"
 GRADE_DOCKER_LOG_FILENAME = "grade.docker.log"
+# The egress sidecar's ALLOW/DENY log under ``network: llm_only``, kept apart from
+# ``docker.log`` so container stdout cannot forge its lines; and its grading fold-back name.
+EGRESS_LOG_FILENAME = "egress.log"
+GRADE_EGRESS_LOG_FILENAME = "grade.egress.log"
+# The in-container run asks for the grading allowlist through the first file; the host
+# answers in the second with EGRESS_GRADING_ACK_OK or "error: <reason>".
+EGRESS_GRADING_REQUEST_FILENAME = ".coder_eval_egress_grading_request"
+EGRESS_GRADING_ACK_FILENAME = ".coder_eval_egress_grading_ack"
+EGRESS_GRADING_ACK_OK = "ok"
 
 # The virtualenv directory `setup` creates and `adopt` discovers. Named because
 # whether it is on PATH decides which binaries a criterion resolves.

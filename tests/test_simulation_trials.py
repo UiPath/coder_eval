@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
@@ -80,6 +82,22 @@ class TestSimulationMergeAcrossLayers:
         assert resolved.simulation.goal == "task goal"
         assert resolved.simulation.stop_token == "<<<DONE>>>"
 
+    def test_variant_turns_replace_the_task_script_wholesale(self):
+        """A script is one ordered whole: a variant swaps it, it never splices into it."""
+        task_kwargs = _base_task_kwargs()
+        del task_kwargs["initial_prompt"]
+        task = TaskDefinition(
+            **task_kwargs,
+            simulation=SimulationConfig(enabled=True, turns=["task one", "task two", "task three"], max_turns=3),
+        )
+        exp = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="short", simulation={"turns": ["variant one"]})],
+        )
+        resolved, *_ = resolve_task_for_variant(self._default_exp(), task, exp, exp.variants[0])
+        assert resolved.simulation is not None
+        assert resolved.simulation.turns == ["variant one"]
+
     def test_no_simulation_anywhere_stays_none(self):
         """No layer provides simulation — resolved stays None (single-shot)."""
         task = TaskDefinition(**_base_task_kwargs())
@@ -105,6 +123,41 @@ class TestSimulationMergeAcrossLayers:
         resolved, *_ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.simulation is not None
         assert resolved.simulation.enabled is True
+
+
+class TestScriptedTaskUnderAVariantPrompt:
+    def test_variant_initial_prompt_cannot_override_a_script(self, tmp_path: Path):
+        """The script already holds the first prompt; a second one would be silently dropped."""
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text(
+            """
+task_id: scripted-task
+description: Scripted test
+agent:
+  type: claude-code
+sandbox:
+  driver: tempdir
+success_criteria:
+  - type: file_exists
+    path: out.txt
+    description: file
+simulation:
+  enabled: true
+  turns: [one, two]
+""".strip()
+        )
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="rewrite", initial_prompt="A different opener.")],
+        )
+
+        with pytest.raises(ValueError, match=r"simulation\.turns"):
+            resolve_all_tasks([task_yaml], experiment, default_exp, BatchRunConfig(run_dir=tmp_path / "runs"))
 
 
 class TestResolveAllTasksWithTrials:

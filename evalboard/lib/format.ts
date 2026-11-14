@@ -70,3 +70,11 @@ export function fmtDuration(s: number | null): string {
     const mRem = m - h * 60;
     return `${h}h ${mRem}m`;
 }
+
+export function fmtUtcDay(ms: number): string {
+    return new Date(ms).toISOString().slice(5, 10);
+}
+
+export function fmtUtcMinute(ms: number): string {
+    return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+}

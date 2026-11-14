@@ -12,7 +12,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.models import AgentKind, ApiRoute, BedrockRoute, DirectRoute, LiteLLMRoute, parse_agent_config
 
 
 def test_claude_agent_initialization():
@@ -996,6 +996,94 @@ async def test_claude_agent_process_error_no_stderr_at_all():
             await agent.communicate("do something")
 
 
+@pytest.mark.parametrize(
+    ("detail", "status", "expected"),
+    [
+        ("Employees have a spending limit of $402 per trip.", None, "agent_crash"),
+        ("HTTP 402 Payment Required", None, "agent_crash"),
+        ("POST /respond → 402 Payment Required", 402, "agent_billing_error"),
+        ("API Error: Request rejected (429) · capacity unavailable", 429, "agent_rate_limit"),
+        ("Invalid invoice and payment 402", 401, "agent_auth_error"),
+    ],
+)
+async def test_claude_process_failure_classifies_its_sdk_result(detail, status, expected, tmp_path):
+    from claude_agent_sdk import ResultMessage
+
+    from coder_eval.errors.categorization import categorize_error
+    from coder_eval.errors.retry import should_retry
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    await agent.start(str(tmp_path))
+
+    async def failed_query(*args, **kwargs):
+        yield ResultMessage(
+            subtype="error_during_execution",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="failed",
+            usage={"input_tokens": 1, "output_tokens": 1},
+            result=detail,
+            api_error_status=status,
+        )
+        raise ProcessError("process failed", exit_code=1, stderr="")
+
+    with patch("coder_eval.agents.claude_code_agent.query", failed_query), pytest.raises(AgentCrashError) as caught:
+        await agent.communicate("explain the process")
+
+    category = categorize_error(caught.value, {"component": "agent"})
+    assert category.value == expected
+    assert should_retry(category, 0) is (expected in {"agent_crash", "agent_rate_limit"})
+
+
+@pytest.mark.parametrize(
+    ("sdk_error", "parent", "is_error", "expected"),
+    [
+        ("billing_error", None, True, "agent_billing_error"),
+        ("rate_limit", None, True, "agent_rate_limit"),
+        ("server_error", None, True, "agent_rate_limit"),
+        ("authentication_failed", None, True, "agent_auth_error"),
+        ("billing_error", "child-tool", True, None),
+        ("billing_error", None, False, None),
+    ],
+)
+async def test_claude_assistant_error_metadata_only_applies_to_failed_root_turn(
+    sdk_error, parent, is_error, expected, tmp_path
+):
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+
+    from coder_eval.errors.categorization import categorize_error
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    await agent.start(str(tmp_path))
+
+    async def messages(**kwargs):
+        yield AssistantMessage(content=[], model="test", parent_tool_use_id=parent, error=sdk_error)
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=is_error,
+            num_turns=1,
+            session_id="session",
+            result="Invoice invalid payment 402",
+            api_error_status=429
+            if sdk_error in {"billing_error", "server_error"} and parent is None and is_error
+            else None,
+        )
+
+    with patch("coder_eval.agents.claude_code_agent.query", messages):
+        if expected is not None:
+            with pytest.raises(AgentCrashError) as caught:
+                await agent.communicate("question")
+            assert categorize_error(caught.value, {"component": "agent"}).value == expected
+            assert agent.pending_turn is not None and agent.pending_turn.crashed
+        else:
+            turn = await agent.communicate("question")
+            assert not turn.crashed
+
+
 @pytest.mark.asyncio
 async def test_claude_agent_session_resumption():
     """Test that session_id from first communicate() is passed as resume on subsequent calls."""
@@ -1943,6 +2031,57 @@ class TestClaudeTurnState:
         tool_ends = [e for e in events if isinstance(e, ToolEndEvent)]
         assert len(tool_ends) == 1
         assert tool_ends[0].status == ToolEndStatus.OK
+
+    def _run_alias_turn(self, route: ApiRoute, config_model: str | None, *, crashed: bool = False):
+        """Drive one turn whose SDK reports the alias ``claude-sonnet-5``; a crash ends it as a TIMEOUT."""
+        from coder_eval.streaming.events import AgentEndStatus
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, TextBlock
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE), route=route)
+        state, events = self._state(agent)
+        state.effective_model = agent._resolve_effective_model(config_model, {}, None)
+
+        state.on_assistant_message(AssistantMessage([TextBlock("done")], message_id="m1", model="claude-sonnet-5"))
+        status = AgentEndStatus.TIMEOUT if crashed else AgentEndStatus.COMPLETED
+        state.finalize(status, crashed=crashed, crash_reason="boom" if crashed else None)
+        return agent, state, events
+
+    @pytest.mark.parametrize(
+        ("route", "config_model", "expected"),
+        [
+            pytest.param(
+                BedrockRoute(region="eu-north-1"),
+                "claude-sonnet-5",
+                "eu.anthropic.claude-sonnet-5",
+                id="bedrock-records-qualified-alias",
+            ),
+            pytest.param(
+                BedrockRoute(region="eu-north-1"),
+                None,
+                "claude-sonnet-5",
+                id="bedrock-without-resolved-model-falls-back-to-sdk",
+            ),
+            pytest.param(DirectRoute(), "sonnet", "claude-sonnet-5", id="direct-records-sdk-model"),
+            pytest.param(
+                LiteLLMRoute(model="zai.glm-5"), "zai.glm-5", "claude-sonnet-5", id="litellm-records-sdk-model"
+            ),
+        ],
+    )
+    def test_model_used_on_agent_end(self, route: ApiRoute, config_model: str | None, expected: str):
+        from coder_eval.streaming.events import AgentEndEvent
+
+        _, state, events = self._run_alias_turn(route, config_model)
+
+        (end,) = [e for e in events if isinstance(e, AgentEndEvent)]
+        assert end.model_used == expected
+        assert state.collector.build_turn_record().model_used == expected
+        assert state.sdk_messages[0].model == "claude-sonnet-5"
+
+    def test_model_used_on_crashed_partial_turn(self):
+        agent, _, _ = self._run_alias_turn(BedrockRoute(region="eu-north-1"), "claude-sonnet-5", crashed=True)
+
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.model_used == "eu.anthropic.claude-sonnet-5"
 
 
 class TestAgentBaseHelpers:

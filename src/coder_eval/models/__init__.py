@@ -147,6 +147,7 @@ from coder_eval.models.results import (
     EarlyStopReason,
     EvaluationResult,
     FailedRowSummary,
+    GradingErrorInfo,
     JudgeCriterionResult,
     JudgeTranscript,
     JudgeTranscriptToolCall,
@@ -183,6 +184,7 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    LOOPBACK_HOSTS,
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
     RECORD_CLI_LOG_NAME,
@@ -195,6 +197,8 @@ from coder_eval.models.sandbox import (
     RecordedCli,
     ResourceLimits,
     SandboxConfig,
+    normalize_egress_target,
+    url_egress_target,
     validate_template_sources_list,
 )
 from coder_eval.models.system_one import (
@@ -344,6 +348,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "RECORD_CLI_LOG_NAME",
     "SIDECAR_MODULES",
     "ResourceLimits",
+    "LOOPBACK_HOSTS",
+    "normalize_egress_target",
+    "url_egress_target",
     "validate_template_sources_list",
     # Telemetry
     "AssistantMessage",
@@ -377,6 +384,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "EarlyStopInfo",
     "EarlyStopReason",
     "EvaluationResult",
+    "GradingErrorInfo",
     "SimulationTelemetry",
     "SuiteRollup",
     "TaskConfigRecord",

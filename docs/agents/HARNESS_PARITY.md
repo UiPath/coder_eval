@@ -15,6 +15,7 @@ This page is the contract for what each run limit means per harness, plus the sh
 | `run_limits.max_turns` (main-thread model API calls on every harness, see below) | native CLI cap, plus a harness backstop when call N+1 begins | a call runs from its first item to its `thread/tokenUsage/updated`, and one that ran tools opens the next call there | a call runs from its first new MODEL step to the step carrying its usage | one `step_start` step | one `turn_start` turn | a call opens on its first streamed text, or on its `usage` frame when it streams none; a tool-only call N+1's first tool can start before the kill |
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline checked both between reads and while blocked inside one (`asyncio.wait_for`); force-kills the host subprocess and drops the handle so the next turn respawns |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.max_turn_retries` | orchestrator-level cap on whole-turn retries | orchestrator-level cap on whole-turn retries | orchestrator-level cap on whole-turn retries | orchestrator-level cap on whole-turn retries | orchestrator-level cap on whole-turn retries | orchestrator-level cap on whole-turn retries |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) | cooperative `should_stop`, polled per forwarded SDK event; the host is abandoned (no interrupt command exists) and a fresh one spawns for the next turn |
 
 ## Timing capture
@@ -552,8 +553,11 @@ Each harness finds the call boundary in its own stream (the table above):
   `error_max_turns` stop. The CLI does not apply it on every route, so the harness
   also counts distinct main-thread `message_id`s and ends the turn itself when call
   N+1 begins.
-- **Codex** sends `thread/tokenUsage/updated` once per call, after that call's
-  tools finish. An item starts as its tool runs, so waiting for the next call's
+- **Codex** sends `thread/tokenUsage/updated` after a call's tools finish. Context
+  compaction also sends a zero-delta context-size estimate; that bookkeeping
+  update does not count as another call. The compaction model call itself counts,
+  unlike Claude Code's compaction, which emits no main-thread assistant message.
+  An item starts as its tool runs, so waiting for the next call's
   first item would let one tool of call N+1 act. A call that ran tools therefore
   opens the next call at its `tokenUsage`, since the results always go back to the
   model, and the cap fires before call N+1 can run anything.
@@ -770,6 +774,26 @@ both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
   `turn_timeout` / `task_timeout`.
 
 Full detail: [Pi](PI.md).
+
+## Network modes under the docker driver
+
+`sandbox.docker.network` has the same meaning on every harness: `bridge` gives the container the
+full network, `none` gives it no network, and `llm_only` lets it reach only the model APIs and
+`egress_allowlist` through a proxy sidecar
+([Docker Isolation § Network modes](../DOCKER_ISOLATION.md#network-modes)). A harness works under
+`llm_only` only if its CLI honours the `HTTPS_PROXY` variables; one that does not fails closed.
+
+| | claude-code | codex | antigravity | opencode | pi | delegate | none |
+|---|---|---|---|---|---|---|---|
+| `bridge` | works | works | works | works (custom image) | works | works (custom image) | works |
+| `none` | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | no model API: the turn fails | works |
+| `llm_only` honours the proxy | yes | yes | yes | yes (custom image with the CLI) | yes | CLI not in the framework image; untested | no egress needed |
+| Verified by | runs R2, R11, R12 (Bedrock); spike S3 (direct) | run R3 (Luna on Azure `CODEX_BASE_URL`) | run R4 | Bedrock and Azure `gpt-5.6-luna` runs (custom image; hosts in `egress_allowlist`) | Bedrock and Azure `gpt-5.6-luna` runs | spike S8 (absent) | — |
+| `docker_egress_probe` 9 of 9 | Sonnet 5 on Bedrock | `gpt-5.6-terra` on Azure | `gemini-3.5-flash` | Sonnet 5 on Bedrock (custom image) | Sonnet 5 on Bedrock | not run (no login) | — |
+
+The hosts each harness gets by default, and the harmless `DENY` lines it produces, are in
+[Docker Isolation § The derived allowlist](../DOCKER_ISOLATION.md#the-derived-allowlist) and
+[§ Expected DENY lines](../DOCKER_ISOLATION.md#expected-deny-lines).
 
 ## Reproducing
 

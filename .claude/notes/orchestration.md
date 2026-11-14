@@ -50,9 +50,10 @@
   path. Three things are refused rather than degraded: `--junit-xml` (a report of
   verdicts, and there are none — though `reports/junit.py` still emits `<skipped>` for
   an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row
-  is GRADED, and `execute` grades nothing), and simulation tasks (their
-  turn-continuation logic reads criteria results, so an ungraded dialog would silently
-  change its own stopping behavior). `stop_early:` blocks are inert under `execute` for
+  is GRADED, and `execute` grades nothing), and simulation tasks with an LLM-simulated
+  user (their turn-continuation logic reads criteria results, so an ungraded dialog would
+  silently change its own stopping behavior). A scripted dialog reads none, so `execute`
+  accepts it. `stop_early:` blocks are inert under `execute` for
   the same reason the kill switch exists: the full trajectory is the deliverable.
   Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its
   own container, calls coder-eval as the agent, and grades with its own tests.
@@ -86,6 +87,40 @@ produces is under isolation.md § Detached grading and `Sandbox.adopt`).
 `tests/test_seed_from_prior_result.py` pins the status in a test of its own, apart from
 the loop over the real execution facts.
 
+### Grading incidents and execution facts
+
+`FinalStatus.is_execution_fact` is deliberately conservative and context-free.
+`EvaluationResult.has_execution_failure` is the result-aware predicate: only an
+explicit `ERROR` with `error_phase: grading` can be replaced by a new verdict.
+Unknown legacy ERROR, TIMEOUT, build and budget outcomes remain execution facts.
+No error-message matching or transcript inference is used.
+
+Execution limits are settled immediately after each recorded turn, before grading.
+The limit error is raised after grading returns, preserving partial-credit results.
+A grading crash cannot hide the already-settled execution fact. A real task watchdog
+keeps its phase: a fresh run times out execution, while a detached grading attempt
+times out grading. A checker merely raising a timeout or budget exception is not a
+watchdog or an agent limit.
+
+Grading sites wrap failures in one typed error. Reference-integrity failures pass
+through unchanged. A per-turn dialog grade that prevents the remaining execution
+writes an execution-phase ERROR; a completed single-shot or end-only grade writes
+a repairable grading-phase ERROR. No dialog telemetry heuristic is needed to decide
+which one a new record means.
+
+Current failure details remain in the primary error fields. Secondary and repaired
+grading incidents belong in `error_history`. A failed detached grade does not write
+an authoritative result, transcript or HTML verdict: its caller appends the incident
+to a deep copy of the immediate prior row and writes that selected row once. The
+first execute audit copy remains immutable and is never used as a rollback source.
+The Docker path may serialize a failed attempt to its private scratch transport;
+its explicit incident marker is consumed before any authoritative write or fold-back.
+
+Explicit grading ERROR rows owe a grade even if a partial vector or zero score was
+recorded. Otherwise resume eligibility and scoring keep their existing semantics:
+a graded empty vector scores zero, and execute leaves the score unset. No additional
+execution-error rows are automatically scheduled because their vector is empty.
+
 ### The four grading sites
 
 `grade=False` is checked in exactly four places, and they do not behave alike:
@@ -95,11 +130,13 @@ the loop over the real execution facts.
 2. **The single-shot loop** stops after capturing the trajectory. Returning False keeps
    `FinalStatus` off SUCCESS and the status chain turns it into NOT_GRADED. The
    reference-integrity check is skipped too — it protects a grade that is not happening.
-3. **The dialog loop** RAISES, and is unreachable today because `execute` rejects
-   simulation tasks at the CLI: the dialog reads criteria results to decide whether to
-   keep talking, so an ungraded dialog would silently change its own stopping behavior.
-   An empty-list "defensive no-op" here would be worse than a refusal — both callers go
-   straight on to the gate, which treats an empty criteria list as a vacuous pass.
+3. **The dialog loop** checks criteria only on a graded run. Its end-of-dialog and
+   budget-gate checks are skipped when ungraded, so a scripted dialog finalizes
+   NOT_GRADED. The per-turn check still RAISES, and is unreachable today because
+   `execute` rejects LLM-simulated tasks at the CLI: that dialog reads criteria results to
+   decide whether to keep talking, so an ungraded run would silently change its own
+   stopping behavior. An empty-list "defensive no-op" there would be worse than a
+   refusal — the gate treats an empty criteria list as a vacuous pass.
 4. **The diagnostics path** records nothing: a `not_evaluated` vector would imply criteria
    we were supposed to run and could not.
 
@@ -632,9 +669,36 @@ unchanged.
 § Gate selection is fired-only — so `result.early_stop` is never assigned here and an armed
 simulation task gates strict-AND on a possibly truncated trajectory.
 
-`execute` rejects simulation tasks at the CLI, because the loop reads criteria results to
+`execute` rejects LLM-simulated tasks at the CLI, because the loop reads criteria results to
 decide whether to keep talking: an ungraded dialog would silently change its own stopping
 behaviour rather than merely skipping the score.
+
+### Scripted dialogs
+
+`simulation.turns` swaps the LLM user for `ScriptedUser`, which answers the loop's own
+`next_user_message` call. `_evaluation_loop` composes it and hands it to the loop as
+`user=`; the loop never branches on the kind afterwards, so the stop, telemetry and logging
+paths are shared.
+
+- **The cursor is the loop's history.** `ScriptedUser` returns `turns[len(dialog_pairs)]`
+  and keeps no counter, so it cannot drift from the exchanges the loop actually completed.
+  The dialog ends in `evaluate_stop` (`script_exhausted`) before the user is asked past the
+  last turn.
+- **`turns[0]` is the pinned opener.** `_evaluation_loop` hands it to the loop as
+  `initial_prompt`, so turn 1 is recorded like any pinned opener (no simulator timing, an
+  accurate `conversation.log` label) and the task carries one source of truth for its
+  first prompt: `initial_prompt` beside `turns` is rejected.
+- **The fields a script ignores are compared by value, not by `model_fields_set`.**
+  `evaluate` rebuilds the task from a full `model_dump()`, which marks every field as set,
+  so a "was it set" test would reject every recorded scripted task.
+- **Script length owns the dialog length.** Derive `max_turns` after simulation config
+  validation, including merged variant scripts, so a replacement cannot inherit a stale cap.
+  Prompt overrides are rejected before mutation because a script owns every user turn.
+- **No criteria steer a script.** `check_criteria` and `stop_on_criteria_pass` stay at their
+  defaults, so the one criteria check is the end-of-dialog verdict. That is also why
+  `execute` can accept it: nothing the dialog does depends on a verdict it lacks.
+- **No simulator, no simulator egress.** `isolation/egress.py` adds the simulator's model
+  route only for a simulated user.
 
 ## Embedded commands
 
@@ -868,6 +932,18 @@ replaces it, turning the no-op task into that agent.
 Ungraded replicates — and ONLY those — drop out of a mean entirely: `or 0.0` would average
 a clean `execute` run down to a real-looking zero, while dropping an ERRORED one would pay
 it a bonus.
+
+The rule lives once, in `result_metrics.measured_scores`, read by `VariantAggregate.average_score`
+and run.md's Avg Reliability Score. run.md also hides that score whenever `nothing_was_measured`
+holds, as the pass rate beside it does. Two known gaps remain. Closing either one changes a
+serialized field that downstream consumers read, so each is a separate change:
+
+- `SuiteRollup.average_weighted_score` (suite.json) still averages scored rows only, so an
+  errored row leaves it.
+- `aggregate_results` counts `VariantAggregate.tasks_measured` after `_fold_replicates` has
+  turned an errored replicate's missing score into 0.0, so an `execute` run with a crash
+  reports `pass_rate` 0.0 and `average_score` 0.0 in experiment.json where run.json reports
+  `None`.
 
 Only graded variants can win or set a spread; including ungraded ones at 0.0 would name an
 arbitrary "best" among scores that do not exist. When NOTHING was scored there is no

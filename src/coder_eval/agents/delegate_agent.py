@@ -12,7 +12,7 @@ Wire protocol (one JSON object per line; the package README is the SSOT)::
     stdin                                   stdout
     {"cmd":"init","options":{...}}      ->  {"type":"init_ok"}
     {"cmd":"send","prompt":..,              {"type":"event","event":{...}}  (zero or more)
-            "sessionId":..}                 {"type":"usage","usage":{..}}   (one per model call)
+            "sessionId":..,"iteration":N}   {"type":"usage","usage":{..}}   (one per model call)
                                         ->  {"type":"result","response":..,"sessionId":..,
                                              "usage":{..},"turnUsages":[..],"model":..}
     {"cmd":"destroy"}                   ->  {"type":"destroyed"}
@@ -45,6 +45,8 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
+from coder_eval.errors.categories import ErrorCategory
+from coder_eval.errors.categorization import provider_error_category
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
     AgentKind,
@@ -373,46 +375,7 @@ def _parse_usage(raw: Any) -> TokenUsage | None:
     return usage
 
 
-_WAF_BLOCK_PAGE_MARKERS = ("continue with uipath platform", "not available in your country")
-"""Fingerprints of UiPath's Cloudflare block page, served as a 403 when a WAF managed
-rule matches shell-like text in the REQUEST BODY. It is not a geo or auth block."""
-
 _SESSION_CONFLICT_MARKER = "already being generated"
-"""The backend's 409 for a send into a conversation whose previous generation still runs."""
-
-_SSE_CONNECT_TIMEOUT_MARKER = "sse connect timeout"
-"""The SDK's error once its SSE connect watchdog has failed all of its internal retries."""
-
-
-def _describe_host_error(message: str) -> str | None:
-    """A correctly categorized crash reason for a known host failure, or ``None``.
-
-    The raw message would mis-route under ``errors/categorization.py``: a WAF
-    block reads as geo/auth but is deterministic per payload (stamped "content
-    filter", non-retryable), and an SSE connect failure says "timeout" but is a
-    transient backend window (stamped "connection", retryable, "timeout" defanged).
-    A session conflict keeps its raw message; the caller handles it.
-
-    Rationale: .claude/notes/agents.md § Delegate agent
-    """
-    lowered = message.lower()
-    if any(marker in lowered for marker in _WAF_BLOCK_PAGE_MARKERS):
-        prefix = message.split("<", 1)[0].strip().rstrip(":").strip()
-        return (
-            "Delegate backend request blocked by the Cloudflare WAF content filter in front of the UiPath "
-            + "backend (the generic 'not available in your country' 403 page, not a geo or auth problem): "
-            + "shell-like text in the prompt or a tool result matched a managed rule, and the same payload "
-            + f"would be blocked again on retry. [{prefix}]"
-        )
-    if _SSE_CONNECT_TIMEOUT_MARKER in lowered and _SESSION_CONFLICT_MARKER not in lowered:
-        original = message[lowered.find(_SSE_CONNECT_TIMEOUT_MARKER) :]
-        defanged = re.sub("timeout", "time-out", original, flags=re.IGNORECASE)
-        return (
-            "Delegate backend connection failure: the turn's request got no response headers within the "
-            + "SDK's SSE connect watchdog, on every internal attempt. This is a transient backend "
-            + f"availability window, not a task-budget breach. [{defanged}]"
-        )
-    return None
 
 
 class _TurnState:
@@ -621,7 +584,10 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
             message = str(ack.get("message", "unknown error"))
             if _is_config_init_error(message):
                 raise AgentConfigError(f"Delegate SDK init failed: {message} {_INIT_CONFIG_ERROR_HINT}")
-            raise AgentCrashError(f"Delegate SDK init failed: {message}")
+            raise AgentCrashError(
+                f"Delegate SDK init failed: {message}",
+                category=provider_error_category(code=ack.get("code"), status_code=ack.get("statusCode")),
+            )
 
     def _build_init_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -824,7 +790,9 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         try:
-            await self._send_command({"cmd": "send", "prompt": user_input, "sessionId": self._session_id})
+            await self._send_command(
+                {"cmd": "send", "prompt": user_input, "sessionId": self._session_id, "iteration": self._iteration}
+            )
 
             while True:
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -857,7 +825,7 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
                     self._handle_result(msg, state)
                     break
                 if mtype == "error":
-                    await self._crash_on_host_error(state, collector, emit, str(msg.get("message", "unknown error")))
+                    await self._crash_on_host_error(state, collector, emit, msg)
                 if mtype == "usage":
                     state.on_usage_frame()
                     self._add_call_usage(msg, state)
@@ -1211,30 +1179,21 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         state: _TurnState,
         collector: EventCollector,
         emit: Callable[[StreamEvent], None],
-        message: str,
+        frame: dict[str, Any],
     ) -> NoReturn:
-        """Crash the turn on a host ``error`` frame; the host is never reused.
-
-        A session conflict drops the remembered session id only while no turn of
-        that conversation has finished, so a retry never continues without the
-        earlier turns' context.
-        """
-        reason = _describe_host_error(message)
-        if reason is None:
-            if _SESSION_CONFLICT_MARKER in message.lower():
-                if self._conversation_has_history:
-                    logger.warning(
-                        "delegate: session %s is still generating a reply; it holds earlier turns, so it is kept",
-                        self._session_id,
-                    )
-                else:
-                    logger.warning(
-                        "delegate: session %s is still generating a reply; the retry starts a new conversation",
-                        self._session_id,
-                    )
-                    self._session_id = None
-            reason = f"Delegate send failed: {message}"
-        await self._abandon_host_and_crash(state, collector, emit, reason)
+        """Keep earlier-turn context on conflicts; classify only structured host fields."""
+        message = str(frame.get("message", "unknown error"))
+        if _SESSION_CONFLICT_MARKER in message.lower() and not self._conversation_has_history:
+            self._session_id = None
+        await self._force_kill_host()
+        self._log_stderr_tail(message)
+        self._crash_turn(
+            state,
+            collector,
+            emit,
+            f"Delegate send failed: {message}",
+            category=provider_error_category(code=frame.get("code"), status_code=frame.get("statusCode")),
+        )
 
     def _crash_turn(
         self,
@@ -1244,12 +1203,13 @@ class DelegateAgent(Agent[DelegateAgentConfig]):
         message: str,
         *,
         cause: BaseException | None = None,
+        category: ErrorCategory | None = None,
     ) -> NoReturn:
         def finalize(status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
             self._finalize_turn(state, status, emit, crashed=crashed, crash_reason=crash_reason)
 
         try:
-            self._finalize_and_raise_crash(finalize, message, cause=cause)
+            self._finalize_and_raise_crash(finalize, message, cause=cause, category=category)
         finally:
             self._capture_partial_turn(collector)
 

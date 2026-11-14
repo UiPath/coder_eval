@@ -433,7 +433,7 @@ class TestCommunicate:
         assert command.result_status == "success"
         assert command.result_summary == "file.txt"
         sent = proc.stdin.written[1]
-        assert sent == {"cmd": "send", "prompt": "do something", "sessionId": None}
+        assert sent == {"cmd": "send", "prompt": "do something", "sessionId": None, "iteration": 1}
         # The result's session id is remembered for the NEXT turn.
         assert agent._session_id == "sess-2"
 
@@ -477,30 +477,22 @@ class TestCommunicate:
         assert agent._process is None
 
     @pytest.mark.parametrize(
-        ("host_message", "category"),
+        ("message", "status", "expected"),
         [
-            (
-                "Delegate backend error: HTTP 403: <!DOCTYPE html><title>Continue with UiPath Platform</title>",
-                ErrorCategory.AGENT_INVALID_OUTPUT,
-            ),
-            ("Delegate backend error: SSE connect timeout after 30s", ErrorCategory.AGENT_API_ERROR),
+            ("Invoice marked invalid: payment 402", None, ErrorCategory.AGENT_CRASH),
+            ("POST https://example.com/respond → 402 Payment Required", 402, ErrorCategory.AGENT_BILLING_ERROR),
+            ("API Error: Request rejected (429)", 429, ErrorCategory.AGENT_RATE_LIMIT),
+            ("Any business text", 401, ErrorCategory.AGENT_AUTH_ERROR),
+            ("Delegate backend error: SSE connect timeout after 30s", None, ErrorCategory.AGENT_CRASH),
         ],
-        ids=["waf-block", "sse-connect-timeout"],
     )
-    async def test_known_host_errors_are_recategorized(self, patch_exec, tmp_path, host_message, category):
-        # The stderr tail says "timeout"; a rewritten reason must not carry it.
-        proc = patch_exec(
-            [_line({"type": "init_ok"}), _line({"type": "error", "message": host_message})],
-            [b"[agenticApi] SSE connect timeout, retrying\n"],
-        )
-        agent = DelegateAgent(_config(), task_id="t1")
-        await agent.start(str(tmp_path))
-        await asyncio.sleep(0)
-        assert agent._stderr_lines
-        with pytest.raises(AgentCrashError) as excinfo:
-            await agent.communicate("hi")
-        assert categorize_error(excinfo.value, {"component": "agent"}) is category
-        assert "<" not in str(excinfo.value)
+    async def test_host_failure_uses_structured_status(self, patch_exec, tmp_path, message, status, expected):
+        frame = {"type": "error", "message": message, "statusCode": status}
+        agent, proc = await _started_agent(patch_exec, [_line(frame)], tmp_path)
+        with pytest.raises(AgentCrashError) as caught:
+            await agent.communicate("explain the process")
+        assert categorize_error(caught.value, {"component": "agent"}) is expected
+        assert str(caught.value) == f"Delegate send failed: {message}"
         assert proc._killed
         assert agent._process is None
 
@@ -957,6 +949,67 @@ class TestCommunicate:
         agent = DelegateAgent(_config())
         with pytest.raises(RuntimeError, match="start"):
             await agent.communicate("hi")
+
+    async def test_retry_keeps_logical_iteration_session_and_workspace(self, patch_exec, tmp_path, monkeypatch):
+        from coder_eval.errors import executor
+
+        events = [_result(response=f"answer{n}", sessionId="stable-session") for n in range(1, 4)]
+        events.append(_line({"type": "error", "message": "synthetic transient failure"}))
+        agent, first = await _started_agent(patch_exec, events, tmp_path)
+        restarted = []
+        failures = []
+        records = []
+        try:
+            for n in range(1, 4):
+                records.append(await agent.communicate(f"question{n}"))
+            prior_records = [record.model_dump(mode="json") for record in records]
+
+            async def failed(error, attempt):
+                failures.append((error, attempt, agent.pending_turn))
+                await agent.discard_pending_turn()
+                restarted.append(
+                    patch_exec(
+                        [
+                            _line({"type": "init_ok"}),
+                            _result(response="answer4", sessionId="stable-session"),
+                            _result(response="answer5", sessionId="stable-session"),
+                        ]
+                    )
+                )
+
+            monkeypatch.setattr(executor, "get_retry_delay", lambda *_: 0)
+            fourth = await executor.execute_with_retry(
+                operation=lambda: agent.communicate("question4"),
+                operation_name="Agent communication",
+                context={"task_id": "t1", "component": "agent", "agent_name": "delegate"},
+                max_attempts=2,
+                on_attempt_error=failed,
+            )
+            fifth = await agent.communicate("question5")
+            assert len(failures) == 1
+            error, attempt, partial = failures[0]
+            assert isinstance(error, AgentCrashError) and attempt == 0
+            assert partial is not None and partial.iteration == 4
+            assert partial.crashed and partial.user_input == "question4"
+            sends = [row for proc in [first, *restarted] for row in proc.stdin.written if row["cmd"] == "send"]
+            assert [row["iteration"] for row in sends] == [1, 2, 3, 4, 4, 5]
+            assert [row["prompt"] for row in sends] == [
+                "question1",
+                "question2",
+                "question3",
+                "question4",
+                "question4",
+                "question5",
+            ]
+            assert all(row["sessionId"] == "stable-session" for row in sends[1:])
+            assert all(proc.spawn_kwargs["cwd"] == str(tmp_path) for proc in [first, *restarted])
+            assert fourth.iteration == 4 and fifth.iteration == 5
+            assert [record.model_dump(mode="json") for record in records] == prior_records
+            assert [(record.iteration, record.user_input, record.agent_output) for record in records] == [
+                (n, f"question{n}", f"answer{n}") for n in range(1, 4)
+            ]
+        finally:
+            await agent.stop()
 
     async def test_respawns_after_crash_on_next_turn(self, patch_exec, tmp_path):
         agent, _ = await _started_agent(patch_exec, [], tmp_path)

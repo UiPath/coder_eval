@@ -274,6 +274,10 @@ class ResultSummary(BaseModel):
 class TurnRecord(BaseModel):
     """Record of a single agent turn (input + output)."""
 
+    record_kind: Literal["agent", "standalone_user"] | None = Field(
+        default=None,
+        description="Producer provenance; None is unknown legacy. standalone_user is not an agent answer.",
+    )
     iteration: int = Field(
         description=(
             "Orchestrator iteration number. Multiple records may share this value when "
@@ -343,7 +347,10 @@ class TurnRecord(BaseModel):
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )
     model_used: str | None = Field(
-        default=None, description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514')"
+        default=None,
+        description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514'). On a Bedrock "
+        + "route the Claude Code agent records the resolved inference-profile id (e.g., "
+        + "'eu.anthropic.claude-sonnet-5'), not the SDK's alias, so normalize the id before grouping across routes.",
     )
     assistant_turn_count: int = Field(
         default=0,
@@ -432,6 +439,7 @@ class SimulationTelemetry(BaseModel):
     stop_reason: Literal[
         "criteria_passed",
         "stop_token",
+        "script_exhausted",
         "max_turns",
         "agent_max_turns",
         "budget",
@@ -447,7 +455,7 @@ class SimulationTelemetry(BaseModel):
         description=(
             "Resolved model that played the simulated user, captured so a persisted "
             "task.json is self-describing and its cost prices from a fact rather than "
-            "from the run's route."
+            "from the run's route. None when the user was scripted (``simulation.turns``)."
         ),
     )
 
@@ -528,6 +536,15 @@ class EarlyStopInfo(BaseModel):
     )
 
 
+class GradingErrorInfo(BaseModel):
+    """One failed grading pass, independent of the agent's execution outcome."""
+
+    message: str
+    details: dict[str, Any] | None = None
+    log_tail: str | None = None
+    recorded_at: datetime
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -536,7 +553,10 @@ class EvaluationResult(BaseModel):
     variant_id: str = Field(default="default", description="ID of the experiment variant")
     agent_type: str = Field(description="Type of agent used (registered kind string, e.g. 'claude-code')")
     model_used: str | None = Field(
-        default=None, description="Model identifier used for the evaluation (resolved from iterations or agent config)"
+        default=None,
+        description="Model identifier used for the evaluation: the last iteration's TurnRecord.model_used, else "
+        + "the configured agent model. The config fallback is not route-resolved, so a Bedrock row with no "
+        + "recorded iteration carries the bare configured alias.",
     )
 
     # Execution metadata
@@ -613,6 +633,14 @@ class EvaluationResult(BaseModel):
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if evaluation failed")
+    error_phase: Literal["execution", "grading"] | None = Field(
+        default=None,
+        description="Origin of the terminal error. Absent legacy ERROR rows remain execution facts.",
+    )
+    error_history: list[GradingErrorInfo] = Field(
+        default_factory=list,
+        description="Prior grading incidents retained after another grading pass starts, plus secondary diagnostics.",
+    )
     error_details: dict[str, Any] | None = Field(
         default=None, description="Detailed error context from error_handling module"
     )
@@ -702,6 +730,13 @@ class EvaluationResult(BaseModel):
             "None on a full run — 'early_stop is not None' is itself the stopped-early flag."
         ),
     )
+
+    @property
+    def has_execution_failure(self) -> bool:
+        """Execution facts stay terminal; explicitly grading-origin ERROR rows are repairable."""
+        return self.final_status.is_execution_fact and not (
+            self.final_status is FinalStatus.ERROR and self.error_phase == "grading"
+        )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.

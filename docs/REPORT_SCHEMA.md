@@ -71,6 +71,8 @@ publishing different numbers for the same run.
 | `tasks_cost_incomplete` | `int` | Rows whose recorded spend is missing money (unpriced model, or a hard kill that lost an in-flight turn). |
 | `cost_complete` | `bool` | `tasks_cost_incomplete == 0`. When false, every cost figure above is a **floor**, not the bill. A run is never failed for this — see [Missing cost is never fatal](#missing-cost-is-never-fatal). |
 
+run.md's **Avg Reliability Score** is not stored in `run.json`. It is the mean `weighted_score` over every row except `NOT_GRADED` ones, and a row with no score (`ERROR`, `BUILD_FAILED`, an unscored `TIMEOUT`) counts as `0.0`: the same rule as `VariantAggregate.average_score`. It is left out when no row produced a verdict, as `pass_rate` is.
+
 ### `task_results[]` — the flat per-task row
 
 Each entry is an **untyped dict** (a denormalization, not a Pydantic model) with keys
@@ -160,6 +162,15 @@ The authoritative per-replicate record.
 
 **Errors** (populated on failure): `error_message`, `error_details`,
 `error_log_tail` (carries the Docker build-log tail for `BUILD_FAILED`).
+`error_phase` is `"execution"`, `"grading"` or absent. An absent phase on legacy
+`ERROR` rows is conservative: grading does not erase the execution outcome.
+The current primary failure uses `error_message`, `error_details` and
+`error_log_tail`. `error_history` retains secondary grading incidents and earlier
+repaired grading failures (`message`, structured `details`, `log_tail`,
+`recorded_at`). Only explicitly grading-origin `ERROR` can become a fresh verdict;
+execution `ERROR`, `TIMEOUT`, build and budget failures retain their original cause.
+A failed regrade keeps the immediate prior verdict and appends one incident without
+overwriting its criteria or judge artifacts.
 
 **Config/environment:** `environment_info`, `agent_config`, `sdk_options` (the
 options the agent sent to its SDK; the shape depends on the agent: a raw
@@ -181,6 +192,9 @@ those two the boundary is a reporting change, not a behavioral one.
 (`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
 on append-mode Claude Code runs and a plain string only in replace mode — it is
 no longer `str | null`, so consumers must not string-handle it unconditionally.
+`environment_info.egress_denied_in_grading` (a comma-separated `host:port` string) names the
+hosts the egress proxy refused during grading under `network: llm_only`; it is absent when none
+were refused, a re-grade replaces it, and it never changes `final_status`.
 
 **Telemetry/totals:** `total_token_usage` ([TokenUsage](#tokenusage)),
 `command_stats` (`CommandStatistics`), `total_assistant_turns`, `expected_commands` /
@@ -238,6 +252,17 @@ backend), `num_turns`, `max_turns_exhausted`,
 row per model-provider error the agent's own client reported, including errors it
 retried itself; filled by the codex adapter, empty on other backends), `crashed`,
 `crash_reason`.
+
+`model_used` depends on the route. On a Bedrock route the Claude Code agent records the
+resolved inference-profile id (e.g. `eu.anthropic.claude-sonnet-5`), and the SDK's alias
+stays on each `messages[].model`. On every other route it is the id the agent reports.
+`EvaluationResult.model_used` takes the last iteration's value, else the configured
+model unresolved. Strip the region and `anthropic.` prefixes and any Bedrock version suffix
+(`-v1:0`) before you group rows by model.
+
+`record_kind` records producer provenance: `agent` for collected agent attempts and
+`standalone_user` for an unconsumed simulator utterance preserved by the dialog driver.
+Legacy records keep `null` when their provenance is unknown; grading never fills it by inference.
 
 > **Token invariant.** Summing the four token buckets across `messages`
 > (assistant + the synthetic `reconciliation` entry) equals `token_usage` exactly.
