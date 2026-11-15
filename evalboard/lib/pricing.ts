@@ -34,10 +34,10 @@ export interface Pricing {
 export { PRICING };
 
 // Strip the LiteLLM/Bedrock routing + region/vendor prefixes back to the bare
-// pricing key — mirror of src/coder_eval/pricing.py::_normalize_model, since the
+// pricing key — mirror of src/coder_eval/pricing.py::normalize_model, since the
 // recorded model_used arrives qualified (e.g. "converse/zai.glm-5",
 // "eu.anthropic.claude-sonnet-4-6"). Idempotent on already-bare ids.
-// "openrouter/" is here for the same reason it is in _normalize_model: a harness
+// "openrouter/" is here for the same reason it is in normalize_model: a harness
 // that addresses OpenRouter natively (OpenCode) records the model WITH its
 // provider prefix ("openrouter/deepseek/deepseek-v4-pro"), while the rate keys
 // are the bare vendor/model ids the LiteLLM route records. Without the strip the

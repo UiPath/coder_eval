@@ -363,6 +363,14 @@ The count compared against the budget is **visible turns** — one per tool call
 plus one for the agent's final reply. It is *not* `total_turns`, which counts
 model API calls (the `max_turns` unit), and one call can batch several tool calls.
 
+Turn counts are comparable only **within one model**. Models differ in how much
+work they batch into one call (one model chains a whole phase into a single
+`Bash` call, another sends one probe per call), so the same task and prompt can
+take twice the turns on a different model. Compare turns between runs or variants
+on the same model. Cost and wall-clock time stay comparable across models. The
+experiment report shows the model of each variant and marks a cross-model turn
+comparison (see [Reading the Report](AB_EXPERIMENTS.md#reading-the-report)).
+
 Set it to the number of turns a competent agent should need for the task. Pick
 budgets consistently across a suite — the headline % is only comparable when
 tasks are measured against realistic, like-for-like targets. Omit it (the

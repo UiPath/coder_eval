@@ -305,7 +305,10 @@ The cross-variant summary:
   `{task_id, variant_results, best_variant, is_tie, score_spread, replicate_count}`,
   where each `VariantResult` carries `{variant_id, task_id, weighted_score,
   final_status, duration_seconds, total_tokens, iteration_count,
-  total_assistant_turns, reference_similarity, replicate_index, replicate_count}`.
+  total_assistant_turns, models_used, reference_similarity, replicate_index,
+  replicate_count}`. `models_used` is the sorted list of distinct `model_used`
+  values across the replicates (`[]` when none recorded a model, and in an
+  `experiment.json` written before the field existed).
   `weighted_score` is `float | None`: `null` only when every replicate was
   **ungraded**. An **errored** replicate counts as `0.0` — same rule as
   `VariantAggregate.average_score` above. That is deliberate: dropping errored

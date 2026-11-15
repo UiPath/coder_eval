@@ -14,6 +14,7 @@ from ..path_utils import replicate_subdir_name
 from ..run_record import eval_result_to_task_dict
 from ..stats import bootstrap_mean_ci, stddev, welch_t_test, wilson_interval
 from .helpers import (
+    CROSS_MODEL_TURNS_NOTE,
     VariantSeries,
     collect_variant_series,
     describe_prompt_config,
@@ -23,6 +24,8 @@ from .helpers import (
     is_env_table_key,
     load_variant_eval_results,
     paired_comparison,
+    turns_cross_model,
+    variant_models,
 )
 from .html import write_experiment_html, write_variant_html
 from .markdown import ReportGenerator, resolve_agent_settings, resolve_context_window
@@ -189,10 +192,13 @@ class ExperimentReportGenerator:
         show_p_values: bool,
         vid_a: str,
         vid_b: str,
+        *,
+        cross_model: bool,
     ) -> list[str]:
         """The mean ± stddev rows of the Aggregate Metrics table (Score, Avg Duration,
         and the optional Assistant Turns / Tokens rows), each with a Welch t-test
-        p-value when ``show_p_values``."""
+        p-value when ``show_p_values``. When ``cross_model``, the Assistant Turns row
+        is marked and has no p-value."""
         lines: list[str] = []
 
         # Row: Score (mean ± stddev, p-value)
@@ -215,11 +221,11 @@ class ExperimentReportGenerator:
 
         # Row: Assistant Turns (if data available)
         if any(series[vid].asst_turns for vid in result.variant_ids):
-            row = "| Assistant Turns"
+            row = "| Assistant Turns (cross-model)" if cross_model else "| Assistant Turns"
             for vid in result.variant_ids:
                 row += f" | {fmt_mean_sd(series[vid].asst_turns, '.1f')}"
             if show_p_values:
-                p = welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns)
+                p = None if cross_model else welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns)
                 row += f" | {fmt_p(p)}"
             lines.append(row + " |")
 
@@ -256,8 +262,23 @@ class ExperimentReportGenerator:
         sep += "|"
 
         lines = ["", "## Aggregate Metrics", "", header, sep]
+
+        # Row: Model (if any variant recorded one). Turns depend on the model, so
+        # the table that shows them also shows what each variant ran on.
+        models = variant_models(result)
+        cross_model = turns_cross_model(models)
+        if any(models.values()):
+            row = "| Model"
+            for vid in result.variant_ids:
+                row += f" | {', '.join(models[vid]) or 'n/a'}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
         lines += ExperimentReportGenerator._aggregate_count_rows(result, show_p_values)
-        lines += ExperimentReportGenerator._aggregate_stat_rows(result, series, show_p_values, vid_a, vid_b)
+        lines += ExperimentReportGenerator._aggregate_stat_rows(
+            result, series, show_p_values, vid_a, vid_b, cross_model=cross_model
+        )
 
         # Row: Replicates/task (if any variant ran >1 replicate)
         if any(result.variant_aggregates[vid].replicate_count > 1 for vid in result.variant_ids):
@@ -268,6 +289,9 @@ class ExperimentReportGenerator:
             if show_p_values:
                 row += " | —"
             lines.append(row + " |")
+
+        if cross_model and any(series[vid].asst_turns for vid in result.variant_ids):
+            lines += ["", f"*{CROSS_MODEL_TURNS_NOTE}*"]
 
         return lines
 

@@ -26,6 +26,7 @@ from ..models import (
     TaskExperimentSummary,
 )
 from ..path_utils import TASK_JSON_FILENAME
+from ..pricing import normalize_model
 from ..stats import cohens_d, mean, paired_t_ci, paired_t_test, stddev
 
 
@@ -124,6 +125,46 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             if vr.total_assistant_turns is not None:
                 s.asst_turns.append(float(vr.total_assistant_turns))
     return series
+
+
+# Shown under an Aggregate Metrics table whose Assistant Turns row compares more
+# than one model. Shared so the markdown and HTML reports say the same thing.
+CROSS_MODEL_TURNS_NOTE = (
+    "These turn counts come from more than one model, so the Assistant Turns row has no p-value."
+    + " How many turns a task takes depends on how much work a model batches into one call, so a turn"
+    + " difference across models is mostly model style, not variant cost. Compare turns only between"
+    + " variants on the same model."
+)
+
+
+# Claude Code stamps this on an assistant message it makes up itself (an API
+# error it reports without a model call), and a row that ends on one records it
+# as `model_used`. It names no model, so it never counts as one.
+_SYNTHETIC_MODEL = "<synthetic>"
+
+
+def variant_models(result: ExperimentResult) -> dict[str, list[str]]:
+    """The distinct models each variant ran on, sorted, keyed by variant id.
+
+    Ids are normalized with ``pricing.normalize_model``: a row that errored before
+    the model resolved keeps the qualified route id (``eu.anthropic.claude-sonnet-5``),
+    and a raw comparison would read it as a second model.
+    """
+    models: dict[str, set[str]] = {vid: set() for vid in result.variant_ids}
+    for ts in result.task_summaries:
+        for vr in ts.variant_results:
+            if vr.variant_id in models:
+                models[vr.variant_id].update(normalize_model(m) for m in vr.models_used if m != _SYNTHETIC_MODEL)
+    return {vid: sorted(found) for vid, found in models.items()}
+
+
+def turns_cross_model(models: dict[str, list[str]]) -> bool:
+    """Whether the variants' turn counts come from more than one model.
+
+    A variant with no recorded model is unknown, not different, so it never
+    makes the comparison cross-model on its own.
+    """
+    return len({m for found in models.values() for m in found}) > 1
 
 
 class PairedComparison(NamedTuple):

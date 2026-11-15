@@ -664,6 +664,23 @@ class TestReplicateAggregation:
         assert vr.replicate_count == 3
         assert result.task_summaries[0].replicate_count == 3
 
+    def test_models_used_lists_each_replicate_model_once(self):
+        """The fold keeps every distinct model, so a report can see a mixed-model variant."""
+        reps = [self._make_tr("t", "v", score=1.0, replicate_index=r) for r in range(4)]
+        for rep, model in zip(reps, ["opus", None, "sonnet", "opus"], strict=True):
+            rep.result.model_used = model
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=30.0
+        )
+        assert result.task_summaries[0].variant_results[0].models_used == ["opus", "sonnet"]
+
+    def test_models_used_is_empty_when_no_replicate_recorded_one(self):
+        reps = [self._make_tr("t", "v", score=1.0, replicate_index=r) for r in range(2)]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=30.0
+        )
+        assert result.task_summaries[0].variant_results[0].models_used == []
+
     def test_mixed_statuses_picks_worst(self):
         reps = [
             self._make_tr("t", "v", score=1.0, status="SUCCESS", replicate_index=0),

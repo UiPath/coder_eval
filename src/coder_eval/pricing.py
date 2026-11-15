@@ -217,7 +217,7 @@ _BEDROCK_REGION_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
 _BEDROCK_VERSION_SUFFIX = re.compile(r"-v\d+:\d+$")
 
 
-def _normalize_model(model: str) -> str:
+def normalize_model(model: str) -> str:
     """Strip Bedrock region + vendor qualifiers and version suffix back to the bare pricing key.
 
     ``eu.anthropic.claude-opus-4-8`` → ``claude-opus-4-8``;
@@ -245,7 +245,7 @@ def _normalize_model(model: str) -> str:
 
 def is_priced(model: str) -> bool:
     """Whether the rate card can price this model (after prefix normalization)."""
-    return _lookup_rate(_normalize_model(model)) is not None
+    return _lookup_rate(normalize_model(model)) is not None
 
 
 def unpriced_models(models: Iterable[str | None]) -> list[str]:
@@ -275,7 +275,7 @@ def calculate_cost(
     the same as the bare ``claude-opus-4-8``. Returns None if the (normalized)
     model is not in the pricing table.
     """
-    pricing = _lookup_rate(_normalize_model(model))
+    pricing = _lookup_rate(normalize_model(model))
     if pricing is None:
         return None
 
