@@ -16,6 +16,7 @@ helpers. Folding this module into the experiment reporter would close
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -130,11 +131,16 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
 # Shown under an Aggregate Metrics table whose Assistant Turns row compares more
 # than one model. Shared so the markdown and HTML reports say the same thing.
 CROSS_MODEL_TURNS_NOTE = (
-    "These turn counts come from more than one model, so the Assistant Turns row has no p-value."
-    + " How many turns a task takes depends on how much work a model batches into one call, so a turn"
-    + " difference across models is mostly model style, not variant cost. Compare turns only between"
-    + " variants on the same model."
+    "These turn counts come from more than one model. How many turns a task takes depends on how much"
+    + " work a model batches into one call, so a turn difference across models is mostly model style,"
+    + " not variant cost. Compare turns only between variants on the same model."
 )
+
+
+# A dated snapshot id (`claude-haiku-4-5-20251001`) is the same model as its alias
+# (`claude-haiku-4-5`). A row that replied records the resolved snapshot, a row that
+# crashed first keeps the configured alias.
+_SNAPSHOT_DATE_SUFFIX = re.compile(r"-20\d{6}$")
 
 
 # Claude Code stamps this on an assistant message it makes up itself (an API
@@ -146,15 +152,18 @@ _SYNTHETIC_MODEL = "<synthetic>"
 def variant_models(result: ExperimentResult) -> dict[str, list[str]]:
     """The distinct models each variant ran on, sorted, keyed by variant id.
 
-    Ids are normalized with ``pricing.normalize_model``: a row that errored before
-    the model resolved keeps the qualified route id (``eu.anthropic.claude-sonnet-5``),
-    and a raw comparison would read it as a second model.
+    Ids are normalized with ``pricing.normalize_model`` and a trailing snapshot date
+    is dropped: a row that errored before the model resolved keeps the qualified route
+    id (``eu.anthropic.claude-sonnet-5``) or the configured alias, and a raw comparison
+    would read either as a second model.
     """
     models: dict[str, set[str]] = {vid: set() for vid in result.variant_ids}
     for ts in result.task_summaries:
         for vr in ts.variant_results:
             if vr.variant_id in models:
-                models[vr.variant_id].update(normalize_model(m) for m in vr.models_used if m != _SYNTHETIC_MODEL)
+                models[vr.variant_id].update(
+                    _SNAPSHOT_DATE_SUFFIX.sub("", normalize_model(m)) for m in vr.models_used if m != _SYNTHETIC_MODEL
+                )
     return {vid: sorted(found) for vid, found in models.items()}
 
 

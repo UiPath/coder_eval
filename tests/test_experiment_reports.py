@@ -1400,8 +1400,25 @@ class TestCrossModelTurns:
         assert self._row(md, "Model") == "| Model | claude-sonnet-5 | n/a | — |"
         assert "cross-model" not in md
 
+    def test_snapshot_id_is_the_same_model_as_its_alias(self):
+        """A crashed row keeps the configured alias; a replied row records the dated snapshot."""
+        models = {"a": ["claude-haiku-4-5", "claude-haiku-4-5-20251001"], "b": ["claude-haiku-4-5-20251001"]}
+        md = ExperimentReportGenerator.generate_experiment_report(self._make_result(models))
+        assert "cross-model" not in md
+        assert self._row(md, "Model") == "| Model | claude-haiku-4-5 | claude-haiku-4-5 | — |"
+
+    def test_missing_models_used_key_loads_as_empty(self):
+        """An experiment.json written before models_used existed loads and renders as before."""
+        result = self._make_result({"a": ["gpt-5"], "b": ["gpt-5"]})
+        for ts in result.task_summaries:
+            ts.variant_results = [
+                VariantResult.model_validate({k: v for k, v in vr.model_dump().items() if k != "models_used"})
+                for vr in ts.variant_results
+            ]
+            assert all(vr.models_used == [] for vr in ts.variant_results)
+        assert "| Model |" not in ExperimentReportGenerator.generate_experiment_report(result)
+
     def test_no_recorded_model_renders_no_model_row(self):
-        """An experiment.json written before models_used existed renders as before."""
         md = ExperimentReportGenerator.generate_experiment_report(self._make_result({"a": [], "b": []}))
         assert "| Model |" not in md
         assert "cross-model" not in md
@@ -1428,6 +1445,18 @@ class TestCrossModelTurns:
         assert "<td>Assistant Turns</td>" in same
         assert "cross-model" not in same
         assert html_escape(CROSS_MODEL_TURNS_NOTE) not in same
+
+        no_models = _experiment_aggregate_metrics(self._make_result({"a": [], "b": []}))
+        assert "<td>Model</td>" not in no_models
+
+        no_turns = self._make_result({"a": ["gpt-5"], "b": ["claude-opus-5"]})
+        for ts in no_turns.task_summaries:
+            for vr in ts.variant_results:
+                vr.total_assistant_turns = None
+        out = _experiment_aggregate_metrics(no_turns)
+        assert "<td>Model</td>" in out
+        assert "Assistant Turns" not in out
+        assert html_escape(CROSS_MODEL_TURNS_NOTE) not in out
 
 
 class TestPairedComparisonSection:
