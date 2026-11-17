@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
+import sys
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -21,61 +24,71 @@ assert _SPEC is not None and _SPEC.loader is not None
 _VERIFIER = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_VERIFIER)
 
+pytestmark = pytest.mark.filterwarnings("ignore:XFA datasets:UserWarning")
 
-@pytest.fixture(autouse=True)
-def reject_verifier_skips(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A direct verifier call must fail if it tries to skip a check."""
-    monkeypatch.setattr(pytest, "skip", pytest.fail)
+type RequiredCase = tuple[str, str, str, bool]
+type NamedCase = tuple[str, str]
 
 
-def test_verifier_skip_fails() -> None:
-    with pytest.raises(pytest.fail.Exception, match="missing"):
-        pytest.skip("missing")
+def _write_correct_fill(output: Path) -> Path:
+    reader = PdfReader(_BLANK_PDF)
+    fields = reader.get_fields()
+    assert fields is not None
+    values = {
+        name: expected
+        for pattern, _, expected, _ in _VERIFIER.REQUIRED_CHECKBOXES
+        for name, field in fields.items()
+        if pattern in name and expected in field.get("/_States_", [])
+    }
+    writer = PdfWriter(clone_from=reader)
+    writer.update_page_form_field_values(list(writer.pages), values, auto_regenerate=False)
+    writer.write(output)
+    return output
 
 
 @pytest.mark.parametrize("case", _VERIFIER.REQUIRED_CHECKBOXES, ids=lambda case: case[1])
-def test_required_checkbox_missing_fails(case: tuple) -> None:
+def test_required_checkbox_missing_fails(case: RequiredCase) -> None:
     with pytest.raises(pytest.fail.Exception, match="not found"):
         _VERIFIER.TestCheckboxes().test_checkbox_value({}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.REQUIRED_CHECKBOXES, ids=lambda case: case[1])
-def test_required_checkbox_wrong_value_fails(case: tuple) -> None:
+def test_required_checkbox_wrong_value_fails(case: RequiredCase) -> None:
     with pytest.raises(AssertionError, match="expected value"):
         _VERIFIER.TestCheckboxes().test_checkbox_value({case[0]: "wrong"}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.REQUIRED_CHECKBOXES, ids=lambda case: case[1])
-def test_required_checkbox_correct_value_passes(case: tuple) -> None:
+def test_required_checkbox_correct_value_passes(case: RequiredCase) -> None:
     _VERIFIER.TestCheckboxes().test_checkbox_value({case[0]: case[2]}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.UNCHECKED_CHECKBOXES, ids=lambda case: case[1])
-def test_unchecked_checkbox_absent_passes(case: tuple) -> None:
+def test_unchecked_checkbox_absent_passes(case: NamedCase) -> None:
     _VERIFIER.TestUncheckedCheckboxes().test_checkbox_unchecked({}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.UNCHECKED_CHECKBOXES, ids=lambda case: case[1])
-def test_unchecked_checkbox_checked_fails(case: tuple) -> None:
+def test_unchecked_checkbox_checked_fails(case: NamedCase) -> None:
     with pytest.raises(AssertionError, match="should be unchecked"):
         _VERIFIER.TestUncheckedCheckboxes().test_checkbox_unchecked({case[0]: "/1"}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.EMPTY_FIELDS, ids=lambda case: case[1])
-def test_empty_field_missing_fails(case: tuple) -> None:
+def test_empty_field_missing_fails(case: NamedCase) -> None:
     values = {name: "" for name, _ in _VERIFIER.EMPTY_FIELDS if name != case[0]}
     with pytest.raises(AssertionError, match="not found"):
         _VERIFIER.TestEmptyFields().test_field_empty(values, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.EMPTY_FIELDS, ids=lambda case: case[1])
-def test_empty_field_filled_fails(case: tuple) -> None:
+def test_empty_field_filled_fails(case: NamedCase) -> None:
     with pytest.raises(AssertionError, match="should be empty"):
         _VERIFIER.TestEmptyFields().test_field_empty({case[0]: "filled"}, *case)
 
 
 @pytest.mark.parametrize("case", _VERIFIER.EMPTY_FIELDS, ids=lambda case: case[1])
-def test_empty_field_blank_passes(case: tuple) -> None:
+def test_empty_field_blank_passes(case: NamedCase) -> None:
     _VERIFIER.TestEmptyFields().test_field_empty({case[0]: ""}, *case)
 
 
@@ -92,19 +105,7 @@ def test_expected_fields_exist_in_shipped_pdf() -> None:
 
 
 def test_correct_pdf_field_roundtrip_passes(tmp_path: Path) -> None:
-    reader = PdfReader(_BLANK_PDF)
-    fields = reader.get_fields()
-    assert fields is not None
-    values = {
-        name: expected
-        for pattern, _, expected, _ in _VERIFIER.REQUIRED_CHECKBOXES
-        for name, field in fields.items()
-        if pattern in name and expected in field.get("/_States_", [])
-    }
-    output = tmp_path / "filled.pdf"
-    writer = PdfWriter(clone_from=reader)
-    writer.update_page_form_field_values(list(writer.pages), values, auto_regenerate=False)
-    writer.write(output)
+    output = _write_correct_fill(tmp_path / "filled.pdf")
     checkboxes = _VERIFIER.extract_checkbox_values(output)
     field_values = _VERIFIER.extract_field_values(output)
     for case in _VERIFIER.REQUIRED_CHECKBOXES:
@@ -149,13 +150,63 @@ def test_field_extraction_preserves_dereference_error(monkeypatch: pytest.Monkey
         _VERIFIER.extract_field_values(_BLANK_PDF)
 
 
-def test_dockerfile_pypdf_pin_matches_dev_pin() -> None:
-    """The regression tests above only vouch for the pypdf the verifier image installs."""
-    dev = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["optional-dependencies"][
-        "dev"
-    ]
-    dev_pins = [re.fullmatch(r"pypdf(?:\[[^]]*\])?==(\S+)", dep) for dep in dev]
-    dockerfile_pins = re.findall(
-        r"\bpypdf==(\S+)", (_TASK_DIR / "environment" / "Dockerfile").read_text(encoding="utf-8")
+def test_shipped_xfa_datasets_do_not_parse_and_warn() -> None:
+    """Pins the upstream contract: checkbox grading uses AcroForm values only.
+
+    The namespace cleanup leaves ``xfa:`` attribute prefixes, so the shipped datasets never parse. Making them
+    parse would grade XFA values too (a blank ``"0"`` matches unchecked patterns such as ``Checkbox11``), which
+    is a separate grading change.
+    """
+    xfa_xml = _VERIFIER.extract_xfa_xml(_BLANK_PDF)
+    assert xfa_xml
+    with pytest.warns(UserWarning, match="XFA datasets did not parse.*unbound prefix"):
+        assert _VERIFIER.parse_xfa_checkboxes(xfa_xml) == {}
+
+
+def _run_verifier(tmp_path: Path, output_pdf: Path) -> tuple[int, ET.Element]:
+    """Run the verifier as test.sh does, with OUTPUT_FILE pointed at ``output_pdf``."""
+    source = (_TASK_DIR / "verifier" / "test_outputs.py").read_text(encoding="utf-8")
+    original = 'OUTPUT_FILE = Path("/root/sc100-filled.pdf")'
+    assert source.count(original) == 1
+    verifier = tmp_path / "test_outputs.py"
+    verifier.write_text(source.replace(original, f"OUTPUT_FILE = Path({str(output_pdf)!r})"), encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    command = [sys.executable, "-m", "pytest", str(verifier), "-k", "Checkboxes or EmptyFields"]
+    proc = subprocess.run(
+        [*command, "-p", "no:cacheprovider", "-c", str(tmp_path / "pytest.ini"), f"--junitxml={junit}"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
     )
-    assert [m.group(1) for m in dev_pins if m] == dockerfile_pins
+    suite = ET.parse(junit).getroot().find("testsuite")
+    assert suite is not None, proc.stdout
+    return proc.returncode, suite
+
+
+def test_verifier_run_fails_blank_form_without_skips(tmp_path: Path) -> None:
+    returncode, suite = _run_verifier(tmp_path, _BLANK_PDF)
+    assert returncode != 0
+    assert int(suite.get("failures", "0")) > 0
+    assert suite.get("skipped") == "0"
+
+
+def test_verifier_run_passes_correct_fill(tmp_path: Path) -> None:
+    output = _write_correct_fill(tmp_path / "filled.pdf")
+    returncode, suite = _run_verifier(tmp_path, output)
+    assert returncode == 0
+    assert int(suite.get("tests", "0")) > 0
+    assert suite.get("skipped") == "0"
+
+
+def test_dockerfile_pins_match_lock() -> None:
+    """The regression tests above only vouch for the PDF stack the verifier image installs."""
+    dockerfile = (_TASK_DIR / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    locked = {
+        package["name"]: package["version"]
+        for package in tomllib.loads((_REPO / "uv.lock").read_text(encoding="utf-8"))["package"]
+    }
+    for name in ("pypdf", "cryptography"):
+        assert re.findall(rf"\b{name}==(\S+)", dockerfile) == [locked[name]], name

@@ -1,4 +1,4 @@
-# Modified from benchflow-ai/skillsbench@95b3e60: require form fields, preserve AcroForm read and field dereference errors, and expose extract_field_values (issue #234).
+# Modified from benchflow-ai/skillsbench@95b3e60: fail on missing form data (issue #234).
 """
 Tests for court-form-filling task (SC-100 Small Claims Court form).
 
@@ -12,6 +12,7 @@ For checkboxes, extracts values from XFA XML stream or AcroForm fields.
 
 import re
 import subprocess
+import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -26,8 +27,10 @@ def extract_xfa_xml(pdf_path: Path) -> str:
     Extract XFA XML datasets from a PDF file.
     Returns the raw XML string or empty string if not found.
     """
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+
     try:
-        from pypdf import PdfReader
         reader = PdfReader(str(pdf_path))
 
         # Try to access XFA data
@@ -43,8 +46,8 @@ def extract_xfa_xml(pdf_path: Path) -> str:
                             if stream_name == "datasets":
                                 stream_obj = xfa[i + 1].get_object()
                                 return stream_obj.get_data().decode("utf-8", errors="ignore")
-    except Exception:
-        pass
+    except (KeyError, PdfReadError) as exc:
+        warnings.warn(f"XFA datasets could not be read; using AcroForm checkboxes only: {exc!r}", stacklevel=2)
     return ""
 
 
@@ -118,8 +121,8 @@ def parse_xfa_checkboxes(xfa_xml: str) -> dict:
                 find_checkboxes(child, current_path)
 
         find_checkboxes(root)
-    except Exception:
-        pass
+    except ET.ParseError as exc:
+        warnings.warn(f"XFA datasets did not parse; using AcroForm checkboxes only: {exc}", stacklevel=2)
 
     return checkbox_values
 
@@ -338,14 +341,14 @@ def pdf_field_values():
     return extract_field_values(OUTPUT_FILE)
 
 
-def extract_field_values(pdf_path: Path) -> dict:
+def extract_field_values(pdf_path: Path) -> dict[str, str]:
     """Return every AcroForm field value as a string ("" when unset)."""
     from pypdf import PdfReader
 
     reader = PdfReader(str(pdf_path))
     fields = reader.get_fields() or {}
 
-    field_values = {}
+    field_values: dict[str, str] = {}
     for name, field in fields.items():
         value = field.get("/V", "")
         if value:

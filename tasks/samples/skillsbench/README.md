@@ -16,6 +16,10 @@ coder_eval task wiring were added locally, along with two verifier patches:
   remain blank are missing (issue #234). Its blank-field checks also replace
   a nonexistent county field with the omitted third trial court address field.
   AcroForm read and field dereference errors propagate to the test runner.
+  The output must keep the SC-100 AcroForm fields: a flattened PDF scores 0,
+  even when it renders correctly. Checkbox grading reads AcroForm values only.
+  The verifier's XFA fallback cannot parse the shipped form's datasets, as
+  upstream, and now emits a warning when that happens.
   Its environment pins pypdf 7.0.1 (upstream 5.1.0) and cryptography 50.0.2
   (upstream 43.0.3) to pick up their security fixes. It keeps upstream's
   `PyPDF2==3.0.1`, the final release of that deprecated package, which has
@@ -98,12 +102,8 @@ is non-deterministic, so exact numbers vary from run to run:
 | Task | Typical score |
 |------|---------------|
 | `3d-scan-calc` | 1.00 |
-| `court-form-filling` | 1.00 |
+| `court-form-filling` | TBD (re-baseline after #234) |
 | `dialogue-parser` | ~0.83 |
-
-The court-form score above predates the verifier fix for issue #234 and the
-pypdf update. Those historical scores are not comparable with scores from
-the updated sample.
 
 ## How it works (brief)
 
