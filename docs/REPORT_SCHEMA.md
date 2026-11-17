@@ -294,7 +294,10 @@ A single aggregate (not wrapped): `variant_id`, `tasks_run`, `tasks_succeeded`,
 `average_score` (`float | None` — the mean over **measured** rows: an errored row counts
 as `0.0`, an ungraded one leaves both sides; `null` when nothing was measured),
 `average_duration`, `total_tokens`, `replicate_count`, `tasks_token_budget_exceeded`,
-`tasks_cost_budget_exceeded`.
+`tasks_cost_budget_exceeded`, `tasks_measured` (tasks with at least one replicate that
+carries a criteria verdict, counted from the replicates rather than the folded score, so
+an errored replicate's `0.0` is not a verdict; it gates `pass_rate` and `average_score`
+as `RunSummary.tasks_measured` gates the run's rate).
 
 ## `experiment.json` — `ExperimentResult`
 

@@ -37,6 +37,7 @@ from ..models import (
     VariantAggregate,
     VariantResult,
     apply_prompt_mutations,
+    nothing_was_measured,
 )
 from ..path_utils import resolve_dir_template
 from ..result_metrics import measured_scores
@@ -889,6 +890,11 @@ def aggregate_results(
     for (task_id, variant_id), reps in task_variant_reps.items():
         task_variants.setdefault(task_id, []).append(_fold_replicates(task_id, variant_id, reps))
 
+    # Read from the replicates, not the fold: the fold scores an errored replicate 0.0.
+    measured_keys = {
+        key for key, reps in task_variant_reps.items() if any(r.result.weighted_score is not None for r in reps)
+    }
+
     # Build task summaries
     task_summaries: list[TaskExperimentSummary] = []
     for task_id, variants in task_variants.items():
@@ -933,20 +939,26 @@ def aggregate_results(
 
         token_values = [v.total_tokens for v in vr_list if v.total_tokens is not None]
         total_tokens = sum(token_values) if token_values else None
+        tasks_not_graded = sum(1 for v in vr_list if v.final_status.category == "ungraded")
+        # Verdict evidence: a TIMEOUT lands in `failed` with no criterion
+        # having run, so the buckets alone cannot answer this.
+        tasks_measured = sum(1 for v in vr_list if (v.task_id, vid) in measured_keys)
         variant_aggregates[vid] = VariantAggregate(
             variant_id=vid,
             tasks_run=len(vr_list),
             tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
             tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
             tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
-            tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
+            tasks_not_graded=tasks_not_graded,
             tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
             tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            # Verdict evidence: a TIMEOUT lands in `failed` with no criterion
-            # having run, so the buckets alone cannot answer this.
-            tasks_measured=sum(1 for v in vr_list if v.weighted_score is not None),
+            tasks_measured=tasks_measured,
             # GRADED rows only, and None when there are none.
-            average_score=_mean_graded_score(vr_list),
+            average_score=(
+                None
+                if nothing_was_measured(not_graded=tasks_not_graded, measured=tasks_measured)
+                else _mean_graded_score(vr_list)
+            ),
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,
             replicate_count=vr_list[0].replicate_count if vr_list else 1,

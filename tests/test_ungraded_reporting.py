@@ -20,8 +20,16 @@ from typing import Any
 
 import pytest
 
-from coder_eval.models import FinalStatus, RunSummary, VariantAggregate, VariantResult
-from coder_eval.orchestration.experiment import _mean_graded_score, _pick_worst_status
+from coder_eval.models import (
+    EvaluationResult,
+    FinalStatus,
+    RunSummary,
+    TaskResult,
+    VariantAggregate,
+    VariantResult,
+)
+from coder_eval.orchestration.batch import build_run_summary
+from coder_eval.orchestration.experiment import _mean_graded_score, _pick_worst_status, aggregate_results
 
 
 def _summary(**kwargs: object) -> RunSummary:
@@ -110,6 +118,76 @@ def test_the_three_published_pass_rates_agree_on_one_set_of_counts() -> None:
     assert summary.pass_rate is None
     assert summary.error_share is None
     assert aggregate.pass_rate is None
+
+
+def _task_row(task_id: str, status: FinalStatus, score: float | None = None, replicate_index: int = 0) -> TaskResult:
+    result = EvaluationResult(
+        task_id=task_id,
+        task_description="t",
+        variant_id="v",
+        agent_type="claude-code",
+        started_at=datetime(2026, 1, 1),
+        final_status=status,
+        weighted_score=score,
+        duration_seconds=1.0,
+        iteration_count=1,
+    )
+    return TaskResult(task_id=task_id, variant_id="v", result=result, duration=1.0, replicate_index=replicate_index)
+
+
+_NG, _ERR, _OK = FinalStatus.NOT_GRADED, FinalStatus.ERROR, FinalStatus.SUCCESS
+
+
+@pytest.mark.parametrize(
+    ("rows", "measured", "pass_rate", "average_score"),
+    [
+        pytest.param(
+            [*(_task_row(f"t{i}", _NG) for i in range(9)), _task_row("t9", _ERR)],
+            0,
+            None,
+            None,
+            id="execute-run-with-a-crash-has-no-rate-or-score",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t0", _NG, replicate_index=1), _task_row("t1", _NG)],
+            0,
+            None,
+            None,
+            id="a-crashed-replicate-is-not-a-verdict",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t0", _OK, 1.0, replicate_index=1), _task_row("t1", _NG)],
+            1,
+            0.0,
+            0.5,
+            id="one-scored-replicate-measures-the-task",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t1", _ERR)],
+            0,
+            0.0,
+            0.0,
+            id="all-error-graded-run-still-scores-zero",
+        ),
+    ],
+)
+def test_variant_aggregate_counts_verdicts_from_the_replicates_not_the_fold(
+    rows: list[TaskResult], measured: int, pass_rate: float | None, average_score: float | None
+) -> None:
+    aggregate = aggregate_results("e", "", ["v"], rows, 1.0).variant_aggregates["v"]
+
+    assert aggregate.tasks_measured == measured
+    assert aggregate.pass_rate == pass_rate
+    assert aggregate.average_score == average_score
+
+
+def test_run_json_and_experiment_json_agree_on_an_execute_run_with_a_crash() -> None:
+    rows = [*(_task_row(f"t{i}", _NG) for i in range(9)), _task_row("t9", _ERR)]
+
+    summary = build_run_summary("r", rows, datetime(2026, 1, 1), datetime(2026, 1, 1))
+    aggregate = aggregate_results("e", "", ["v"], rows, 1.0).variant_aggregates["v"]
+
+    assert (aggregate.tasks_measured, aggregate.pass_rate) == (summary.tasks_measured, summary.pass_rate) == (0, None)
 
 
 def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -> None:

@@ -258,7 +258,7 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     tasks_measured: int = Field(
         default=0,
         ge=0,
-        description="Rows carrying a criteria verdict (weighted_score is not None). Gates pass_rate.",
+        description="Tasks with at least one replicate carrying a criteria verdict. Gates pass_rate and average_score.",
     )
 
     @model_validator(mode="after")
