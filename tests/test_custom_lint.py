@@ -5399,3 +5399,64 @@ class TestCE068EvalMaterialReadableUnderPluginRoot:
         from coder_eval.isolation import eval_material
 
         assert eval_material.manifest_skill_dirs is manifest_skill_dirs
+
+
+@pytest.mark.lint
+class TestCE071PatchedBinaryVerifiersDoNotSkip:
+    """CE071 + CE005 over every SkillsBench verifier that carries the patch marker.
+
+    The rule and its scope are documented in ``tests/lint/rules/ce071_patched_verifier_no_skip.py``.
+    """
+
+    @staticmethod
+    def _patched_verifiers() -> list[Path]:
+        from tests.lint.rules.ce071_patched_verifier_no_skip import PATCHED_MARKER
+
+        root = SRC.parent / "tasks" / "samples" / "skillsbench"
+        return sorted(
+            path
+            for path in root.glob("*/verifier/test_outputs.py")
+            if path.read_text(encoding="utf-8").startswith(PATCHED_MARKER)
+        )
+
+    @staticmethod
+    def _run(tmp_path: Path, source: str) -> list[str]:
+        from tests.lint.rules.ce071_patched_verifier_no_skip import PatchedVerifierNoSkip
+        from tests.lint.rules.no_silent_except import NoSilentExcept
+
+        path = tmp_path / "test_outputs.py"
+        path.write_text(source, encoding="utf-8")
+        return [v.rule_id for v in check_paths([path], rules=[PatchedVerifierNoSkip, NoSilentExcept])]
+
+    def test_patched_verifiers_are_found(self) -> None:
+        names = {path.parts[-3] for path in self._patched_verifiers()}
+        assert {"3d-scan-calc", "court-form-filling"} <= names
+
+    def test_patched_verifiers_clean(self) -> None:
+        from tests.lint.rules.ce071_patched_verifier_no_skip import PatchedVerifierNoSkip
+        from tests.lint.rules.no_silent_except import NoSilentExcept
+
+        violations = check_paths(self._patched_verifiers(), rules=[PatchedVerifierNoSkip, NoSilentExcept])
+        assert not violations, "\n".join(str(v) for v in violations)
+
+    @pytest.mark.parametrize(
+        ("source", "rule_id"),
+        [
+            ("pytest.skip('missing')", "CE071"),
+            ("pytest.importorskip('pypdf')", "CE071"),
+            ("pytest.xfail('missing')", "CE071"),
+            ("@pytest.mark.skip\ndef test(): pass", "CE071"),
+            ("@pytest.mark.skipif(True, reason='missing')\ndef test(): pass", "CE071"),
+            ("@pytest.mark.xfail\ndef test(): pass", "CE071"),
+            ("try: read()\nexcept: pass", "CE005"),
+            ("try: read()\nexcept Exception: pass", "CE005"),
+        ],
+    )
+    def test_detects_silent_outcomes(self, tmp_path: Path, source: str, rule_id: str) -> None:
+        assert self._run(tmp_path, source) == [rule_id]
+
+    def test_allows_failure_and_narrow_exception(self, tmp_path: Path) -> None:
+        assert not self._run(tmp_path, "try: read()\nexcept ValueError: pytest.fail('invalid')")
+
+    def test_honours_noqa(self, tmp_path: Path) -> None:
+        assert not self._run(tmp_path, "pytest.skip('optional')  # noqa: CE071")

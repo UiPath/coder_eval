@@ -961,3 +961,17 @@ the module as a parameter instead of a third copy.
 Taking the class name from the model follows CE056 importing `IN_CONTAINER_ENV` and CE057
 deriving its target set from `SIDECAR_MODULES`. Alias resolution removes the *local
 binding* spelling, not every rename; taking the name from the model covers the rest.
+
+## CE071
+
+The court-form verifier skipped checks when checkbox data or blank-field keys
+were absent. Its shell runner treated pytest's successful exit as reward 1.
+CE071 rejects skip and xfail calls or marks in every SkillsBench verifier whose
+first line carries the `# Modified from benchflow-ai/skillsbench@` marker, so a
+newly patched verifier is in scope without a list edit. The same test runs CE005
+on those files, because the removed defect was an `except Exception: pass` that
+an inline `BaseException`-only check did not see. `dialogue-parser` is out of
+scope: it is unpatched, and its runner scores passed / total, so a skip lowers
+the reward instead of passing it. Real PDF regression tests, including two
+whole-verifier pytest runs, anchor the court-form field names, extraction and
+exit code to the shipped input.
