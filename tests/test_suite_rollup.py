@@ -82,6 +82,9 @@ def _make_row(
     )
 
 
+_GRADED_ROWS: list[tuple[str, float | None]] = [("SUCCESS", 1.0), ("FAILURE", 0.0)]
+
+
 class TestComputeSuiteRollup:
     def test_all_passed(self, tmp_path: Path) -> None:
         rows = [
@@ -134,12 +137,32 @@ class TestComputeSuiteRollup:
         assert rollup.rows_failed == 1
         assert rollup.rows_error == 1
         assert abs(rollup.pass_rate - 1 / 3) < 1e-9
-        # average only over rows with weighted_score
-        assert rollup.average_weighted_score is not None
-        assert abs(rollup.average_weighted_score - 0.7) < 1e-9
+        assert rollup.average_weighted_score == pytest.approx((1.0 + 0.4 + 0.0) / 3)
         # failed samples cover the failed and error rows
         ids = sorted(s.row_id for s in rollup.failed_samples if s.row_id is not None)
         assert ids == ["r2", "r3"]
+
+    @pytest.mark.parametrize(
+        ("statuses_and_scores", "expected"),
+        [
+            pytest.param([*_GRADED_ROWS, ("ERROR", None)], 1 / 3, id="error-counts-as-zero"),
+            pytest.param([*_GRADED_ROWS, ("BUILD_FAILED", None)], 1 / 3, id="build-failed-counts-as-zero"),
+            pytest.param([*_GRADED_ROWS, ("TIMEOUT", None)], 1 / 3, id="unscored-timeout-counts-as-zero"),
+            pytest.param([*_GRADED_ROWS, ("NOT_GRADED", None)], 0.5, id="not-graded-leaves-the-mean"),
+            pytest.param([("ERROR", None), ("ERROR", None)], 0.0, id="all-error-suite-scores-zero"),
+            pytest.param([("NOT_GRADED", None), ("NOT_GRADED", None)], None, id="all-not-graded-suite-has-no-score"),
+            pytest.param([("NOT_GRADED", None), ("ERROR", None)], None, id="execute-suite-with-a-crash-has-no-score"),
+        ],
+    )
+    def test_average_weighted_score_zeroes_unscored_rows_and_drops_ungraded(
+        self, tmp_path: Path, statuses_and_scores: list[tuple[str, float | None]], expected: float | None
+    ) -> None:
+        rows = [
+            _make_row(suite_id="s", row_id=f"r{i}", final_status=FinalStatus(status), weighted_score=score, criteria=[])
+            for i, (status, score) in enumerate(statuses_and_scores)
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+        assert rollup.average_weighted_score == (pytest.approx(expected) if expected is not None else None)
 
     def test_informational_criterion_is_not_a_failure_reason(self, tmp_path: Path) -> None:
         """A weight-0 criterion cannot fail a row, so it must not explain one.
@@ -466,13 +489,13 @@ class TestRenderSuiteMarkdown:
             _make_row(
                 suite_id="s",
                 row_id="r1",
-                final_status=FinalStatus.ERROR,
+                final_status=FinalStatus.NOT_GRADED,
                 weighted_score=None,
                 criteria=[],
-                error_message="boom",
             ),
         ]
         rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+        assert rollup.average_weighted_score is None
         md = _render_suite_markdown(rollup)
         assert "Average weighted score" not in md
 

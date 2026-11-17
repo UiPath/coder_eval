@@ -956,14 +956,15 @@ def _compute_suite_rollup(
     rows_not_graded = sum(1 for r in rows if r.result.final_status.category == "ungraded")
     rows_graded = rows_total - rows_not_graded
 
-    scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
     # Verdict evidence, distinct from `rows_graded` (a bucket complement): a
     # TIMEOUT counts as graded while no criterion ever ran on it.
-    rows_measured = len(scored)
-    # Not yet `measured_scores`: an errored row still leaves this mean. A known gap, kept apart
-    # because closing it changes suite.json's `average_weighted_score`.
-    # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
-    average_weighted_score = sum(scored) / len(scored) if scored else None
+    rows_measured = sum(1 for r in rows if r.result.weighted_score is not None)
+    scores = measured_scores((r.result.final_status, r.result.weighted_score) for r in rows)
+    average_weighted_score = (
+        sum(scores) / len(scores)
+        if scores and not nothing_was_measured(not_graded=rows_not_graded, measured=rows_measured)
+        else None
+    )
 
     # Per-criterion-type tallies (scores + errors) for the type-level summary.
     by_type: dict[str, list[float]] = defaultdict(list)

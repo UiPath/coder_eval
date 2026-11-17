@@ -330,7 +330,7 @@ Written for dataset-backed suites; its `passed` flag drives the CI exit code.
 | `rows_total` / `rows_passed` / `rows_failed` / `rows_error` / `rows_not_graded` | `int` | Row counts. **Invariant:** the four category counts sum to `rows_total`. `rows_not_graded` defaults to `0`. |
 | `pass_rate` | `float \| null` | `rows_passed / rows_graded` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. `null` when nothing was graded (0/0 is unknown, not 0%) **and** when no row produced a verdict, via the same shared `nothing_was_measured` helper the other two rates use. |
 | `rows_graded` | `int` | `rows_total - rows_not_graded`. The denominator above, serialized so a consumer never has to re-derive it. |
-| `average_weighted_score` | `float \| null` | Mean row score. |
+| `average_weighted_score` | `float \| null` | Mean `weighted_score` over every row except `NOT_GRADED` ones. A row with no score (`ERROR`, `BUILD_FAILED`, an unscored `TIMEOUT`) counts as `0.0`: the same rule as run.md's Avg Reliability Score and `VariantAggregate.average_score`. `null` when no row produced a verdict, as `pass_rate` is. |
 | `criterion_stats` | `list[{criterion_type, rows_evaluated, average_score, error_count}]` | Per-criterion summary. |
 | `failed_samples` | `list[FailedRowSummary]` | Capped at 20 (`{row_id, task_id, final_status, weighted_score, failure_reasons, error_message, task_json_relpath, replicate_index}`). |
 | `criterion_aggregates` | `list[CriterionAggregate]` | The thresholdable metrics — see below. |

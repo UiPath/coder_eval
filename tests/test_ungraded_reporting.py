@@ -147,6 +147,45 @@ def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -
     assert f"- **Avg Reliability Score**: {variant_mean:.3f}" in ReportGenerator.generate_markdown(summary)
 
 
+def test_suite_json_and_the_variant_average_publish_one_mean_for_one_set_of_rows(tmp_path: Path) -> None:
+    from coder_eval.models import EvaluationResult, TaskResult
+    from coder_eval.reports.markdown import _compute_suite_rollup
+
+    rows: list[tuple[FinalStatus, float | None]] = [
+        (FinalStatus.SUCCESS, 1.0),
+        (FinalStatus.FAILURE, 0.0),
+        (FinalStatus.ERROR, None),
+        (FinalStatus.TIMEOUT, None),
+        (FinalStatus.NOT_GRADED, None),
+    ]
+    variant_rows = [
+        VariantResult(variant_id="v", task_id=f"t{i}", weighted_score=score, final_status=status, duration_seconds=1.0)
+        for i, (status, score) in enumerate(rows)
+    ]
+    suite_rows = [
+        TaskResult(
+            task_id=f"s/r{i}",
+            variant_id="v",
+            duration=1.0,
+            suite_id="s",
+            row_id=f"r{i}",
+            result=EvaluationResult(
+                task_id=f"s/r{i}",
+                task_description="t",
+                agent_type="claude-code",
+                started_at=datetime(2026, 1, 1),
+                final_status=status,
+                weighted_score=score,
+                iteration_count=1,
+            ),
+        )
+        for i, (status, score) in enumerate(rows)
+    ]
+
+    rollup = _compute_suite_rollup("s", "v", suite_rows, tmp_path)
+    assert rollup.average_weighted_score == _mean_graded_score(variant_rows) == 0.25
+
+
 def test_category_of_reads_a_serialized_status_and_counts_an_unknown_one_as_error() -> None:
     assert FinalStatus.category_of("NOT_GRADED") == "ungraded"
     assert FinalStatus.category_of("TIMEOUT") == "failed"
