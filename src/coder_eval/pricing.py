@@ -6,7 +6,8 @@ Sources: https://platform.claude.com/docs/en/about-claude/pricing,
 https://developers.openai.com/api/docs/pricing,
 https://ai.google.dev/gemini-api/docs/pricing, and OpenRouter's live
 ``/api/v1/models`` (every row re-verified 2026-10-07, except the Bedrock
-open-weight block: AWS publishes no eu-north-1 figures for those three).
+open-weight block: AWS publishes no eu-north-1 figures for those three; the
+GPT-6.1 Terra rows and the Delegate GPT-6.1 rows were added 2026-11-18).
 
 SSOT for rates on both halves of the repo: ``evalboard/lib/pricing.generated.ts`` is
 generated from it by ``make pricing-mirror`` and guarded by CE065. Never hand-edit the
@@ -51,6 +52,8 @@ _DELEGATE_PRICING: dict[str, ModelPricing] = {
     "gpt-5-6-sol": ModelPricing(5.0, 30.0, 6.25, 0.50),
     "gpt-5-6-terra": ModelPricing(2.0, 12.0, 2.50, 0.20),
     "gpt-5-6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
+    "gpt-6-1-sol": ModelPricing(2.0, 10.0, 2.50, 0.10),
+    "gpt-6-1-terra": ModelPricing(1.0, 5.0, 1.25, 0.05),
     "kimi-k2-7-code": ModelPricing(0.95, 4.0, 0.0, 0.19),
     "glm-5-3-flash": ModelPricing(0.15, 0.50, 0.0, 0.03),
 }
@@ -122,11 +125,12 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.6-sol": ModelPricing(4.0, 20.0, 5.0, 0.40),
     "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.50, 0.20),
     "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
-    # CAVEAT: flat rate; GPT-6's >272K-input tier (2x input / 1.5x output) is not modelled and reads low.
+    # CAVEAT: flat rate; GPT-6/6.1's >272K-input tier (2x input / 1.5x output) is not modelled and reads low.
     "gpt-6-astra": ModelPricing(10.0, 50.0, 12.50, 1.00),
-    "gpt-6.1-sol": ModelPricing(2.0, 10.0, 2.50, 0.10),
     "gpt-6-sol": ModelPricing(2.0, 10.0, 2.50, 0.20),
     "gpt-6-luna": ModelPricing(0.10, 0.50, 0.125, 0.01),
+    "gpt-6.1-sol": ModelPricing(2.0, 10.0, 2.50, 0.10),
+    "gpt-6.1-terra": ModelPricing(1.0, 5.0, 1.25, 0.05),
     # Keyed on the literal ids ListModels returns. No cache-write fee, so
     # cache_write == input (unused). CAVEAT: Pro's >200K-token tier costs more, so
     # a very-large-context run reads LOW. List rates; 3.6-3.8 Flash are discounted
