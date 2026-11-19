@@ -41,7 +41,6 @@ export interface DoctorStatus {
     reason: string;
     startedAt: string | null;
     buildUrl: string | null;
-    costUsd: number | null;
     triageFile: string | null;
     fixesDir: string | null;
     trigger: string | null;
@@ -67,8 +66,8 @@ export interface DoctorTask {
     evidence: string | null;
     passedBefore: string | null;
     related: string | null;
+    // Only the source of a third-party "Proposed PR" (an open PR the fix names).
     existingPrs: DoctorPr[];
-    relatedSkillPrs: DoctorPr[];
     envGroup: string | null;
     doctorPr: string | null;
 }
@@ -99,7 +98,6 @@ export interface DoctorFix {
     taskId: string;
     covers: string[];
     outcome: string;
-    costUsd: number | null;
     patchLines: { added: number; removed: number } | null;
     title: string;
     gates: DoctorGates;
@@ -107,8 +105,6 @@ export interface DoctorFix {
 
 export interface DoctorFixes {
     fixMode: string | null;
-    costUsd: number | null;
-    totalCapUsd: number | null;
     candidates: DoctorFix[];
 }
 
@@ -117,9 +113,9 @@ export interface RunDoctor {
     // Set only when the status is `done` and its triage file parsed.
     triage: DoctorTriage | null;
     fixes: DoctorFixes | null;
-    // Prepared PR bodies (`<fixes_dir>/<id>.md`) of pr-ready candidates in
-    // patchIds, by candidate id. Markdown text, rendered without raw HTML.
-    fixBodies?: Record<string, string>;
+    // PRs the doctor opened (`<fixes_dir>/opened.json`): task id → PR URL,
+    // allowlisted URLs only.
+    opened?: Record<string, string>;
 }
 
 // ---------- coercion helpers ----------
@@ -131,9 +127,6 @@ function isObj(v: unknown): v is Obj {
 }
 function str(v: unknown): string | null {
     return typeof v === "string" ? v : null;
-}
-function num(v: unknown): number | null {
-    return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 function int(v: unknown, dflt = 0): number {
     return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : dflt;
@@ -163,7 +156,6 @@ export function parseDoctorStatus(raw: string | null | undefined): DoctorStatus 
         reason: str(j.reason) ?? "",
         startedAt: str(j.started_at),
         buildUrl: str(j.build_url),
-        costUsd: num(j.cost_usd),
         // A name outside the pattern is treated as absent: it lands in a path.
         triageFile: triageFile && TRIAGE_FILE_RE.test(triageFile) ? triageFile : null,
         fixesDir: fixesDir && FIXES_DIR_RE.test(fixesDir) ? fixesDir : null,
@@ -200,7 +192,6 @@ function parseTask(v: unknown): DoctorTask | null {
         passedBefore: str(v.passed_before),
         related: str(v.related),
         existingPrs: prList(v.existing_prs),
-        relatedSkillPrs: prList(v.related_skill_prs),
         envGroup: str(v.env_group),
         doctorPr: str(v.doctor_pr),
     };
@@ -219,7 +210,9 @@ export function parseTriage(raw: string | null | undefined): DoctorTriage | null
         tasks: j.tasks.map(parseTask).filter((t): t is DoctorTask => t !== null),
         actions: Array.isArray(j.actions)
             ? j.actions.flatMap((a): DoctorAction[] =>
-                  isObj(a) && typeof a.text === "string"
+                  // "open-pr" actions list PRs that merely touch the files, not
+                  // fixes: the board leaves them out.
+                  isObj(a) && typeof a.text === "string" && a.kind !== "open-pr"
                       ? [{ count: int(a.count), text: a.text, taskIds: strList(a.task_ids) }]
                       : [],
               )
@@ -243,8 +236,6 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
     if (!isObj(j) || j.schema_version !== 1 || !Array.isArray(j.candidates)) return null;
     return {
         fixMode: str(j.fix_mode),
-        costUsd: num(j.cost_usd),
-        totalCapUsd: num(j.total_cap_usd),
         candidates: j.candidates.flatMap((c): DoctorFix[] => {
             if (!isObj(c)) return [];
             const id = str(c.id);
@@ -257,7 +248,6 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
                     taskId,
                     covers: strList(c.covers),
                     outcome: str(c.outcome) ?? "unknown",
-                    costUsd: num(c.cost_usd),
                     patchLines: pl
                         ? { added: int(pl.added), removed: int(pl.removed) }
                         : null,
@@ -285,16 +275,24 @@ export function patchIds(fixes: DoctorFixes | null): Set<string> {
     return ids;
 }
 
-/** The patchIds whose prepared PR body (`<id>.md`) the board loads: pr-ready only. */
-export function bodyIds(fixes: DoctorFixes | null): string[] {
-    const ids = patchIds(fixes);
-    return (fixes?.candidates ?? [])
-        .filter((c) => c.outcome === "pr-ready" && ids.has(c.id))
-        .map((c) => c.id);
+/**
+ * `<fixes_dir>/opened.json` from the doctor's open step:
+ * `{"opened": [{"task_id", "pr_url", ...} | {"task_id", "problem"}], "error"?}`.
+ * Untrusted: only entries with a task id and an allowlisted PR URL map;
+ * problem entries and anything else are skipped. Null when it does not parse.
+ */
+export function parseOpened(raw: string | null | undefined): Record<string, string> | null {
+    const j = parseJson(raw);
+    if (!isObj(j) || !Array.isArray(j.opened)) return null;
+    const out: Record<string, string> = {};
+    for (const e of j.opened) {
+        if (!isObj(e)) continue;
+        const id = str(e.task_id);
+        const url = str(e.pr_url);
+        if (id && isSkillsPrUrl(url) && !(id in out)) out[id] = url;
+    }
+    return out;
 }
-
-// A prepared PR body is a few KB; anything far larger is cut.
-export const MAX_BODY_CHARS = 64_000;
 
 /** `<fixes_dir>/<id>.patch` → the id, or null for any other doctor path. */
 export function patchIdFromPath(rel: string): { fixesDir: string; id: string } | null {

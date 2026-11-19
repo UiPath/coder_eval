@@ -8,6 +8,7 @@ import {
     isSkillsPrUrl,
     parseDoctorStatus,
     parseFixes,
+    parseOpened,
     parseTriage,
     patchIds,
     planAnalysis,
@@ -93,7 +94,6 @@ describe("parseDoctorStatus", () => {
         expect(s.state).toBe("done");
         expect(s.triageFile).toBe("triage-1000001.json");
         expect(s.fixesDir).toBe("fixes-1000001");
-        expect(s.costUsd).toBe(1.25);
     });
 
     test("schema_version 2 is absent", () => {
@@ -162,7 +162,10 @@ describe("parseTriage / parseFixes", () => {
             doctorPr: null,
         });
         expect(t1.existingPrs).toHaveLength(3);
-        expect(t1.relatedSkillPrs[0].url).toBe("https://github.com/UiPath/skills/pull/125");
+        expect(t1).not.toHaveProperty("relatedSkillPrs");
+        // open-pr actions (PRs that merely touch the files) are left out.
+        expect(t.actions.map((a) => a.text)).not.toContainEqual(expect.stringMatching(/^Open PR/));
+        expect(t.actions).toHaveLength(2);
         expect(t.tasks[0].envGroup).toBe("connection example-conn");
     });
 
@@ -170,6 +173,27 @@ describe("parseTriage / parseFixes", () => {
         expect(parseTriage(JSON.stringify({ ...JSON.parse(TRIAGE), schema_version: 2 }))).toBeNull();
         expect(parseTriage("{")).toBeNull();
         expect(parseTriage(JSON.stringify({ schema_version: 1 }))).toBeNull();
+    });
+
+    test("parseOpened: allowlisted PR URLs map by task; the rest is skipped", () => {
+        expect(
+            parseOpened(
+                JSON.stringify({
+                    opened: [
+                        { task_id: "a", pr_url: "https://github.com/UiPath/skills/pull/300", branch: "x" },
+                        { task_id: "b", pr_url: "https://github.com.example.invalid/UiPath/skills/pull/301" },
+                        { task_id: "c", pr_url: "javascript:alert(1)" },
+                        { task_id: "d", problem: "push refused" },
+                        { pr_url: "https://github.com/UiPath/skills/pull/302" },
+                        "junk",
+                    ],
+                    error: "1 of 5 failed",
+                }),
+            ),
+        ).toEqual({ a: "https://github.com/UiPath/skills/pull/300" });
+        expect(parseOpened("{oops")).toBeNull();
+        expect(parseOpened(JSON.stringify({ opened: "x" }))).toBeNull();
+        expect(parseOpened(JSON.stringify({ opened: [] }))).toEqual({});
     });
 
     test("fixes.json with schema_version 2, or none, is absent", () => {

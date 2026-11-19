@@ -48,9 +48,7 @@ function seedBlobs(status: string = STATUS) {
         [`${d}/fixes-1000001/example-grader-fix.patch`]: fixture(
             "fixes-1000001/example-grader-fix.patch",
         ),
-        [`${d}/fixes-1000001/example-grader-fix.md`]: fixture(
-            "fixes-1000001/example-grader-fix.md",
-        ),
+        [`${d}/fixes-1000001/opened.json`]: JSON.stringify({ opened: [] }),
     };
 }
 
@@ -118,8 +116,7 @@ describe("readRunDoctor: what it fetches", () => {
                 `${D}/triage-1000001.json`,
                 `${D}/fixes-1000001/fixes.json`,
                 `${D}/fixes-1000001/example-grader-fix.patch`,
-                // The pr-ready candidate's prepared PR body.
-                `${D}/fixes-1000001/example-grader-fix.md`,
+                `${D}/fixes-1000001/opened.json`,
             ].sort(),
         );
     });
@@ -188,19 +185,35 @@ describe("readRunDoctor", () => {
         expect(d?.status.state).toBe("done");
         expect(d?.triage?.tasks).toHaveLength(5);
         expect(d?.fixes?.candidates).toHaveLength(2);
-        // Only the pr-ready candidate in patchIds gets its body.
-        expect(Object.keys(d!.fixBodies!)).toEqual(["example-grader-fix"]);
-        expect(d!.fixBodies!["example-grader-fix"]).toContain("## Summary");
+        expect(d!.opened).toEqual({});
     });
 
-    test("a body that is not in patchIds is never fetched", async () => {
-        const doc = JSON.parse(fixture("fixes-1000001/fixes.json"));
-        doc.candidates[0].patch_lines = null;
-        state.blobs[`${D}/fixes-1000001/fixes.json`] = JSON.stringify(doc);
+    test("opened.json maps opened PRs by task; a bad host or a problem entry does not", async () => {
+        state.blobs[`${D}/fixes-1000001/opened.json`] = JSON.stringify({
+            opened: [
+                { task_id: "example-t1", pr_url: "https://github.com/UiPath/skills/pull/300" },
+                { task_id: "example-t2", pr_url: "https://evil.example/UiPath/skills/pull/301" },
+                { task_id: "example-e1", problem: "push refused" },
+            ],
+        });
         const { readRunDoctor } = await import("../runs");
         const d = await readRunDoctor(RUN);
-        expect(d!.fixBodies).toEqual({});
-        expect(state.downloads.some((n) => n.endsWith(".md"))).toBe(false);
+        expect(d!.opened).toEqual({ "example-t1": "https://github.com/UiPath/skills/pull/300" });
+    });
+
+    test("no or malformed opened.json: no opened PRs, no throw", async () => {
+        delete state.blobs[`${D}/fixes-1000001/opened.json`];
+        const { readRunDoctor } = await import("../runs");
+        expect((await readRunDoctor(RUN))!.opened).toEqual({});
+        vi.resetModules();
+        state.blobs[`${D}/fixes-1000001/opened.json`] = "{not json";
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const { readRunDoctor: again } = await import("../runs");
+        // Cached copy from before is fresh, so drop it to read the bad one.
+        await fs.rm(path.join(root, RUN, "skill-doctor", "fixes-1000001", "opened.json"), { force: true });
+        expect((await again(RUN))!.opened).toEqual({});
+        expect(warn).toHaveBeenCalled();
+        warn.mockRestore();
     });
 
     test("never throws: a storage error is no report", async () => {
@@ -294,8 +307,9 @@ describe("readRunDoctor", () => {
             "skill-doctor/status.json",
             "skill-doctor/triage-1000001.json",
             "skill-doctor/fixes-1000001/fixes.json",
-            // Bodies travel in the page data; /api/file never serves a .md.
+            // /api/file serves .patch files only.
             "skill-doctor/fixes-1000001/example-grader-fix.md",
+            "skill-doctor/fixes-1000001/opened.json",
             "skill-doctor/fixes-1000001/../status.json",
             "skill-doctor/other/x.patch",
             "skill-doctor/fixes-1000001/a/b.patch",
