@@ -30,11 +30,13 @@ function doctor(): RunDoctor {
 }
 
 describe("TaskFailureAnalysis", () => {
-    test("header: counts by layer and class, new vs recurring, cost, build link", () => {
+    test("header: counts by layer, class and task state, history, cost, build link", () => {
         render(<TaskFailureAnalysis doctor={doctor()} runId={RUN} sourceId="skills" />);
         const panel = screen.getByRole("region", { name: "Task Failure Analysis" });
         expect(panel).toHaveTextContent("3 failed, 2 diagnosed");
-        expect(panel).toHaveTextContent("2 new, 1 recurring");
+        expect(panel).toHaveTextContent("new 2");
+        expect(panel).toHaveTextContent("known 1");
+        expect(panel).toHaveTextContent("vs 2099-01-02_04-25-52: 2 new, 1 persisting, 0 fixed");
         expect(panel).toHaveTextContent("diagnosis $1.25");
         expect(panel).toHaveTextContent("grader 1");
         expect(panel).toHaveTextContent("failure 2");
@@ -91,6 +93,36 @@ describe("TaskFailureAnalysis", () => {
         expect(screen.getByText("build").tagName).toBe("SPAN");
     });
 
+    test("no base run: no history line", () => {
+        const d = doctor();
+        d.triage!.summary.vsHistory = null;
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
+        expect(screen.queryByText(/^vs /)).toBeNull();
+    });
+
+    test("a task id the task page would reject is plain text, not a link", () => {
+        const d = doctor();
+        d.triage!.tasks[0].taskId = "../escape";
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
+        expect(screen.getByText("../escape").closest("a")).toBeNull();
+        const links = screen.getAllByRole("link").map((a) => a.getAttribute("href"));
+        expect(links.some((h) => h?.includes("escape"))).toBe(false);
+    });
+
+    test("a patch whose id is not a safe file name shows its size without a link", () => {
+        const d = doctor();
+        d.fixes!.candidates[0].id = "../bad";
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
+        expect(screen.getByText("+3/-1").closest("a")).toBeNull();
+    });
+
+    test("no candidates", () => {
+        const d = doctor();
+        d.fixes!.candidates = [];
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
+        expect(screen.getByText("No fix candidates.")).toBeInTheDocument();
+    });
+
     test("no fixes.json: no Fixes table", () => {
         const d = { ...doctor(), fixes: null };
         render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
@@ -118,6 +150,13 @@ describe("DoctorStatusLine", () => {
         expect(screen.getByTestId("doctor-status-line")).toHaveTextContent("failed: diagnose timed out");
         rerender(<DoctorStatusLine status={status({ state: "skipped", reason: "ad-hoc run" })} />);
         expect(screen.getByTestId("doctor-status-line")).toHaveTextContent("skipped: ad-hoc run");
+    });
+
+    test("done without a triage says why there is no panel", () => {
+        render(<DoctorStatusLine status={status()} />);
+        expect(screen.getByTestId("doctor-status-line")).toHaveTextContent(
+            "report done, but its triage file is missing or did not parse",
+        );
     });
 
     test("retracted is a one-line note", () => {

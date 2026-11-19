@@ -70,56 +70,80 @@ afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
 });
 
-async function ensure() {
-    const { ensureRunDoctor } = await import("../blob");
-    return ensureRunDoctor("runs", RUN, root);
+async function read() {
+    const { readRunDoctor } = await import("../runs");
+    return readRunDoctor(RUN);
 }
 
-describe("ensureRunDoctor", () => {
+const D = `${RUN}/skill-doctor`;
+
+describe("readRunDoctor: what it fetches", () => {
     test("a done report: status, triage, fixes.json and the one patch", async () => {
-        await ensure();
+        await read();
         expect(state.downloads.sort()).toEqual(
             [
-                `${RUN}/skill-doctor/status.json`,
-                `${RUN}/skill-doctor/triage-1000001.json`,
-                `${RUN}/skill-doctor/fixes-1000001/fixes.json`,
-                `${RUN}/skill-doctor/fixes-1000001/example-grader-fix.patch`,
+                `${D}/status.json`,
+                `${D}/triage-1000001.json`,
+                `${D}/fixes-1000001/fixes.json`,
+                `${D}/fixes-1000001/example-grader-fix.patch`,
             ].sort(),
         );
     });
 
     test("no report: one 404, swallowed", async () => {
         state.blobs = {};
-        await expect(ensure()).resolves.toBeUndefined();
-        expect(state.downloads).toEqual([`${RUN}/skill-doctor/status.json`]);
+        await expect(read()).resolves.toBeNull();
+        expect(state.downloads).toEqual([`${D}/status.json`]);
     });
 
     test("running: the triage is not fetched", async () => {
         seedBlobs(statusWith({ state: "running", fixes_dir: null }));
-        await ensure();
-        expect(state.downloads).toEqual([`${RUN}/skill-doctor/status.json`]);
+        expect((await read())?.status.state).toBe("running");
+        expect(state.downloads).toEqual([`${D}/status.json`]);
     });
 
     test("a bad triage_file name is never fetched", async () => {
         seedBlobs(statusWith({ triage_file: "../run.json", fixes_dir: null }));
-        await ensure();
-        expect(state.downloads).toEqual([`${RUN}/skill-doctor/status.json`]);
+        expect((await read())?.triage).toBeNull();
+        expect(state.downloads).toEqual([`${D}/status.json`]);
     });
 
-    test("schema_version 2: nothing beyond status.json", async () => {
+    test("schema_version 2: nothing beyond status.json, and a warning", async () => {
         seedBlobs(statusWith({ schema_version: 2 }));
-        await ensure();
-        expect(state.downloads).toEqual([`${RUN}/skill-doctor/status.json`]);
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        await expect(read()).resolves.toBeNull();
+        expect(state.downloads).toEqual([`${D}/status.json`]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        // Names the file, never its contents.
+        expect(String(warn.mock.calls[0][0])).toContain("status.json");
+        expect(String(warn.mock.calls[0][0])).not.toContain("schema_version");
+        warn.mockRestore();
     });
 
-    test("status.json is refetched after a minute; the triage never", async () => {
-        await ensure();
+    test("status.json is refetched after a minute, not within it; the rest never", async () => {
+        await read();
+        state.downloads = [];
+        await read();
+        expect(state.downloads).toEqual([]);
         const st = path.join(root, RUN, "skill-doctor", "status.json");
         const old = new Date(Date.now() - 120_000);
         await fs.utimes(st, old, old);
-        state.downloads = [];
-        await ensure();
-        expect(state.downloads).toEqual([`${RUN}/skill-doctor/status.json`]);
+        await read();
+        expect(state.downloads).toEqual([`${D}/status.json`]);
+    });
+
+    test("patch fan-out is capped and ids are checked", async () => {
+        const doc = JSON.parse(fixture("fixes-1000001/fixes.json"));
+        const base = doc.candidates[0];
+        doc.candidates = [
+            { ...base, id: "../escape" },
+            ...Array.from({ length: 15 }, (_, i) => ({ ...base, id: `fix-${i}` })),
+        ];
+        state.blobs[`${D}/fixes-1000001/fixes.json`] = JSON.stringify(doc);
+        await read();
+        const patches = state.downloads.filter((n) => n.endsWith(".patch"));
+        expect(patches).toHaveLength(10);
+        expect(patches.some((n) => n.includes(".."))).toBe(false);
     });
 });
 
@@ -146,7 +170,7 @@ describe("readRunDoctor", () => {
         await expect(readRunDoctor(RUN)).resolves.toBeNull();
     });
 
-    test("the patch is served by /api/file's path check from the cache", async () => {
+    test("/api/file's path check serves a cached patch without a listing", async () => {
         const { readRunDoctor, resolveSafePath } = await import("../runs");
         await readRunDoctor(RUN);
         state.downloads = [];
@@ -163,8 +187,34 @@ describe("readRunDoctor", () => {
                 "example-grader-fix.patch",
             ),
         );
-        // No listing or run.json fetch for a doctor path.
         expect(state.downloads).toEqual([]);
-        expect(await resolveSafePath(RUN, "skill-doctor/../../x")).toBeNull();
+    });
+
+    test("a cold cache fetches the patch on demand, by name", async () => {
+        const { resolveSafePath } = await import("../runs");
+        const abs = await resolveSafePath(
+            RUN,
+            "skill-doctor/fixes-1000001/example-grader-fix.patch",
+        );
+        expect(state.downloads).toEqual([
+            `${D}/fixes-1000001/example-grader-fix.patch`,
+        ]);
+        expect(await fs.readFile(abs!, "utf-8")).toContain("diff --git");
+    });
+
+    test("only patch paths are served from skill-doctor/", async () => {
+        const { resolveSafePath } = await import("../runs");
+        for (const bad of [
+            "skill-doctor/status.json",
+            "skill-doctor/triage-1000001.json",
+            "skill-doctor/fixes-1000001/fixes.json",
+            "skill-doctor/fixes-1000001/../status.json",
+            "skill-doctor/other/x.patch",
+            "skill-doctor/fixes-1000001/a/b.patch",
+            "skill-doctor/../../x",
+        ]) {
+            expect(await resolveSafePath(RUN, bad)).toBeNull();
+        }
+        expect(state.downloads).toEqual([]);
     });
 });

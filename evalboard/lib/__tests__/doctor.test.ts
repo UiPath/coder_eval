@@ -3,6 +3,8 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
     isAdoUrl,
+    isLinkableTaskId,
+    patchIdFromPath,
     isSkillsPrUrl,
     parseDoctorStatus,
     parseFixes,
@@ -91,7 +93,6 @@ describe("parseDoctorStatus", () => {
         expect(s.state).toBe("done");
         expect(s.triageFile).toBe("triage-1000001.json");
         expect(s.fixesDir).toBe("fixes-1000001");
-        expect(s.fixes?.counts).toEqual({ "pr-ready": 1, "needs-live-run": 1 });
         expect(s.costUsd).toBe(1.25);
     });
 
@@ -127,7 +128,6 @@ describe("parseDoctorStatus", () => {
         delete old.trigger;
         const s = parseDoctorStatus(JSON.stringify(old))!;
         expect(s.fixesDir).toBeNull();
-        expect(s.fixes).toBeNull();
         expect(s.trigger).toBeNull();
     });
 });
@@ -138,6 +138,8 @@ describe("parseTriage / parseFixes", () => {
         expect(t.tasks.map((x) => x.taskId)).toEqual(["example-e1", "example-t1", "example-t2"]);
         expect(t.summary.byLayer).toEqual({ env: 1, grader: 1, skill: 1 });
         expect(t.tasks[1].nightsSeen).toBe(3);
+        expect(t.tasks.map((x) => x.state)).toEqual(["new", "known", "new"]);
+        expect(t.summary.vsHistory?.baseRun).toBe("2099-01-02_04-25-52");
         expect(t.tasks[1].existingPrs).toHaveLength(3);
         expect(t.actions).toHaveLength(2);
     });
@@ -148,17 +150,44 @@ describe("parseTriage / parseFixes", () => {
         expect(parseTriage(JSON.stringify({ schema_version: 1 }))).toBeNull();
     });
 
+    test("vs_history without a base run is not shown", () => {
+        const doc = JSON.parse(TRIAGE);
+        doc.summary.vs_history.base_run = null;
+        expect(parseTriage(JSON.stringify(doc))!.summary.vsHistory).toBeNull();
+    });
+
+    test("an unknown task state is null", () => {
+        const doc = JSON.parse(TRIAGE);
+        doc.tasks[0].state = "persisting";
+        expect(parseTriage(JSON.stringify(doc))!.tasks[0].state).toBeNull();
+    });
+
+    test("fixes.json with schema_version 2, or none, is absent", () => {
+        const doc = JSON.parse(FIXES);
+        expect(parseFixes(JSON.stringify({ ...doc, schema_version: 2 }))).toBeNull();
+        delete doc.schema_version;
+        expect(parseFixes(JSON.stringify(doc))).toBeNull();
+    });
+
     test("fixes: candidates, gates and patch ids", () => {
         const f = parseFixes(FIXES)!;
         expect(f.candidates.map((c) => c.outcome)).toEqual(["pr-ready", "needs-live-run"]);
         expect(f.candidates[0].gates).toEqual({ replay: "pass", mutants: { n: 10, killed: 9 }, review: "SEND" });
-        expect(patchIds(f)).toEqual(["example-grader-fix"]);
+        expect([...patchIds(f)]).toEqual(["example-grader-fix"]);
     });
 
     test("a candidate id that is not a safe file name gets no patch", () => {
         const doc = JSON.parse(FIXES);
         doc.candidates[0].id = "../../run";
-        expect(patchIds(parseFixes(JSON.stringify(doc)))).toEqual([]);
+        expect(patchIds(parseFixes(JSON.stringify(doc))).size).toBe(0);
+    });
+
+    test("patchIdFromPath", () => {
+        expect(patchIdFromPath("fixes-1/a.patch")).toEqual({ fixesDir: "fixes-1", id: "a" });
+        expect(patchIdFromPath("fixes/a.b.patch")).toEqual({ fixesDir: "fixes", id: "a.b" });
+        for (const bad of ["fixes-1/fixes.json", "fixes-1/.patch", "x/a.patch", "fixes-1/../a.patch", "a.patch", "fixes-1/a/b.patch"]) {
+            expect(patchIdFromPath(bad)).toBeNull();
+        }
     });
 });
 
@@ -196,6 +225,18 @@ describe("link validation", () => {
     });
 });
 
+describe("isLinkableTaskId", () => {
+    test("accepts the ids the task page accepts", () => {
+        expect(isLinkableTaskId("example-t1")).toBe(true);
+        expect(isLinkableTaskId("suite/row-3")).toBe(true);
+    });
+    test("rejects path tricks, URLs and odd characters", () => {
+        for (const bad of ["", "../x", "a/../b", "a/./b", "/abs", "a//b", "https://x", "a b", "a?b", "a#b", "x".repeat(256)]) {
+            expect(isLinkableTaskId(bad)).toBe(false);
+        }
+    });
+});
+
 describe("taskAnalysisEnabled (gating + kill switch)", () => {
     test("internal + skills + switch not off", () => {
         expect(taskAnalysisEnabled(true, "skills", undefined)).toBe(true);
@@ -204,6 +245,8 @@ describe("taskAnalysisEnabled (gating + kill switch)", () => {
     });
     test("off, OSS or another source", () => {
         expect(taskAnalysisEnabled(true, "skills", "off")).toBe(false);
+        expect(taskAnalysisEnabled(true, "skills", "OFF")).toBe(false);
+        expect(taskAnalysisEnabled(true, "skills", " Off ")).toBe(false);
         expect(taskAnalysisEnabled(false, "skills", undefined)).toBe(false);
         expect(taskAnalysisEnabled(true, "scribe", undefined)).toBe(false);
         expect(taskAnalysisEnabled(true, "gha", undefined)).toBe(false);
@@ -225,17 +268,25 @@ describe("planAnalysis (states)", () => {
         expect(p.statusLine).toBeNull();
     });
 
-    test("done without a split: today's view plus a status line", () => {
+    test("done without a split: the full analysis, then the panel", () => {
         const md = "# A\n\n## TL;DR\nonly\n";
-        const p = planAnalysis(md, doctor());
-        expect(p).toMatchObject({ summary: md, panel: null });
-        expect(p.statusLine?.state).toBe("done");
-        expect(planAnalysis(null, doctor()).panel).toBeNull();
+        const d = doctor();
+        expect(planAnalysis(md, d)).toEqual({ summary: md, panel: d, statusLine: null });
+    });
+
+    test("done without analysis.md: the panel alone", () => {
+        const d = doctor();
+        expect(planAnalysis(null, d)).toEqual({ summary: null, panel: d, statusLine: null });
+    });
+
+    test("an analysis.md that starts with Findings: no summary, the panel", () => {
+        const d = doctor();
+        expect(planAnalysis("## Findings\nx\n", d)).toEqual({ summary: null, panel: d, statusLine: null });
     });
 
     test("done but the triage did not load: no panel", () => {
         const d = { ...doctor(), triage: null };
-        expect(planAnalysis(MD, d)).toMatchObject({ summary: MD, panel: null });
+        expect(planAnalysis(MD, d)).toEqual({ summary: MD, panel: null, statusLine: d.status });
     });
 
     test.each(["queued", "running", "failed", "skipped", "retracted"])(

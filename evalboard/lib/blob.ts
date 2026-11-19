@@ -3,7 +3,8 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
-import { DOCTOR_DIR, parseDoctorStatus, parseFixes, patchIds } from "./doctor";
+import { isValidId, isValidTaskId } from "./ids";
+import { DOCTOR_DIR } from "./doctor";
 
 const ACCOUNT = "coderevaltests";
 
@@ -13,32 +14,7 @@ const ACCOUNT = "coderevaltests";
 // directly.
 export const LOCAL_RUNS_DIR = process.env.EVALBOARD_LOCAL_RUNS_DIR || null;
 
-// Run / task IDs get reflected into filesystem paths and blob prefixes, so
-// reject anything outside a narrow whitelist before any side effect.
-const ID_RE = /^[\w.-]+$/;
-// Task IDs from dataset-expanded tasks look like "sentiment-classification/r3"
-// (suite/row). Each segment must still pass the narrow ID_RE — only the slash
-// separator between segments is additionally allowed.
-const TASK_ID_RE = /^[\w.-]+(\/[\w.-]+)*$/;
-
-export function isValidId(id: unknown): id is string {
-    return (
-        typeof id === "string" &&
-        id.length > 0 &&
-        id.length < 128 &&
-        ID_RE.test(id)
-    );
-}
-
-export function isValidTaskId(id: unknown): id is string {
-    return (
-        typeof id === "string" &&
-        id.length > 0 &&
-        id.length < 256 &&
-        TASK_ID_RE.test(id) &&
-        !id.split("/").some((s) => s === "." || s === "..")
-    );
-}
+export { isValidId, isValidTaskId };
 
 function assertValidId(id: string, label: string): void {
     if (!isValidId(id)) {
@@ -343,73 +319,41 @@ export async function ensureRunReviewIndex(
     });
 }
 
-// skill-doctor report sidecars under `<runId>/skill-doctor/` (see lib/doctor.ts).
-// status.json changes while the doctor runs, so a copy older than a minute is
-// fetched again. The triage file it names (once `done`), fixes.json and the
-// patches are immutable and cached forever. No listing: every name comes from
-// status.json or fixes.json and is checked against its pattern first. 404s are
+// skill-doctor report sidecars under `<runId>/skill-doctor/` (see lib/doctor.ts
+// and readRunDoctor, which decides which files a status implies). Download
+// only, like the siblings above: status.json is mutable and passes a refresh
+// age; the triage file, fixes.json and the patches are immutable and are never
+// fetched again once cached. `relPath` comes from a parsed, pattern-checked
+// field, and is checked here again before it becomes a blob name. 404s are
 // swallowed as for analysis.md.
-export const DOCTOR_STATUS_REFRESH_MS = 60_000;
+const DOCTOR_REL_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)?$/;
 
-async function downloadOptional(
+export async function ensureRunDoctorFile(
     container: string,
-    blobName: string,
+    runId: string,
+    relPath: string,
     destRoot: string,
     refreshAfterMs?: number,
 ): Promise<void> {
-    try {
-        await downloadBlob(container, blobName, destRoot, refreshAfterMs);
-    } catch (err) {
-        if (!isNotFound(err)) throw err;
-    }
-}
-
-export async function ensureRunDoctor(
-    container: string,
-    runId: string,
-    destRoot: string,
-): Promise<void> {
     assertValidId(runId, "runId");
+    if (
+        !DOCTOR_REL_RE.test(relPath) ||
+        relPath.split("/").some((s) => s === "." || s === "..")
+    ) {
+        throw new Error(`Invalid skill-doctor path: ${JSON.stringify(relPath)}`);
+    }
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`doctor:${container}:${runId}`, async () => {
-        const base = `${runId}/${DOCTOR_DIR}`;
-        await downloadOptional(
-            container,
-            `${base}/status.json`,
-            destRoot,
-            DOCTOR_STATUS_REFRESH_MS,
-        );
-        const status = parseDoctorStatus(
-            await fs
-                .readFile(path.join(destRoot, base, "status.json"), "utf-8")
-                .catch(() => null),
-        );
-        if (!status) return;
-        const ops: Promise<void>[] = [];
-        if (status.state === "done" && status.triageFile) {
-            ops.push(
-                downloadOptional(container, `${base}/${status.triageFile}`, destRoot),
+    return dedupe(`doctor:${container}:${runId}/${relPath}`, async () => {
+        try {
+            await downloadBlob(
+                container,
+                `${runId}/${DOCTOR_DIR}/${relPath}`,
+                destRoot,
+                refreshAfterMs,
             );
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
         }
-        if (status.fixesDir) {
-            const dir = `${base}/${status.fixesDir}`;
-            ops.push(
-                (async () => {
-                    await downloadOptional(container, `${dir}/fixes.json`, destRoot);
-                    const fixes = parseFixes(
-                        await fs
-                            .readFile(path.join(destRoot, dir, "fixes.json"), "utf-8")
-                            .catch(() => null),
-                    );
-                    await Promise.all(
-                        patchIds(fixes).map((id) =>
-                            downloadOptional(container, `${dir}/${id}.patch`, destRoot),
-                        ),
-                    );
-                })(),
-            );
-        }
-        await Promise.all(ops);
     });
 }
 

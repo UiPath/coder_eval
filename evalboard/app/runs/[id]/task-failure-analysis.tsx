@@ -7,7 +7,7 @@ import {
     isAdoUrl,
     isLinkableTaskId,
     isSkillsPrUrl,
-    PATCH_ID_RE,
+    patchIds,
     type DoctorFix,
     type DoctorStatus,
     type DoctorTask,
@@ -70,15 +70,6 @@ function Counts({
     );
 }
 
-const STATE_TEXT: Record<DoctorStatus["state"], string> = {
-    queued: "queued",
-    running: "running",
-    done: "done",
-    failed: "failed",
-    skipped: "skipped",
-    retracted: "retracted",
-};
-
 /** One line under the AI summary when the full panel is not shown. */
 export function DoctorStatusLine({ status }: { status: DoctorStatus }) {
     const build = status.buildUrl ? (
@@ -95,7 +86,7 @@ export function DoctorStatusLine({ status }: { status: DoctorStatus }) {
         case "running":
             body = (
                 <>
-                    {STATE_TEXT[status.state]}
+                    {status.state}
                     {status.startedAt &&
                         ` since ${fmtTimestamp(status.startedAt)}`}
                     {build}
@@ -106,7 +97,7 @@ export function DoctorStatusLine({ status }: { status: DoctorStatus }) {
         case "skipped":
             body = (
                 <>
-                    {STATE_TEXT[status.state]}
+                    {status.state}
                     {status.reason && `: ${status.reason}`}
                     {build}
                 </>
@@ -118,7 +109,8 @@ export function DoctorStatusLine({ status }: { status: DoctorStatus }) {
         case "done":
             body = (
                 <>
-                    report done, not shown here
+                    report done, but its triage file is missing or did not
+                    parse
                     {build}
                 </>
             );
@@ -156,9 +148,10 @@ function TaskRow({
                 ) : (
                     t.taskId
                 )}
-                {t.nightsSeen > 1 && (
+                {t.state && t.state !== "new" && (
                     <span className="ml-1 text-[10px] text-amber-700">
-                        {t.nightsSeen} nights
+                        {t.state}
+                        {t.nightsSeen > 1 && `, ${t.nightsSeen} nights`}
                     </span>
                 )}
             </td>
@@ -202,6 +195,17 @@ function gateText(f: DoctorFix): string {
     return parts.length ? parts.join(" · ") : "—";
 }
 
+function PatchCell({ fix, href }: { fix: DoctorFix; href: string | null }) {
+    if (!fix.patchLines) return <>—</>;
+    const text = `+${fix.patchLines.added}/-${fix.patchLines.removed}`;
+    if (!href) return <>{text}</>;
+    return (
+        <a href={href} className="text-studio-blue hover:underline">
+            {text}
+        </a>
+    );
+}
+
 function FixesTable({
     doctor,
     runId,
@@ -214,12 +218,14 @@ function FixesTable({
     const fixes = doctor.fixes;
     const dir = doctor.status.fixesDir;
     if (!fixes || !dir) return null;
+    // The same predicate readRunDoctor fetches with.
+    const linked = patchIds(fixes);
     return (
         <div className="space-y-1.5">
             <h3 className="text-sm font-semibold text-gray-900">
                 Fixes
                 <span className="ml-2 text-xs font-normal text-gray-500">
-                    {fixes.fixMode && `fixMode ${fixes.fixMode} · `}
+                    {fixes.fixMode && `mode ${fixes.fixMode} · `}
                     {fmtUsd(fixes.costUsd)}
                     {fixes.totalCapUsd != null &&
                         ` of ${fmtUsd(fixes.totalCapUsd)} cap`}
@@ -260,24 +266,17 @@ function FixesTable({
                                     {f.covers.length}
                                 </td>
                                 <td className="py-1.5 pr-3 tabular-nums">
-                                    {f.patchLines ? (
-                                        PATCH_ID_RE.test(f.id) ? (
-                                            <a
-                                                href={withSource(
-                                                    `/api/file?run=${encodeURIComponent(runId)}&path=${encodeURIComponent(`${DOCTOR_DIR}/${dir}/${f.id}.patch`)}`,
-                                                    sourceId,
-                                                )}
-                                                className="text-studio-blue hover:underline"
-                                            >
-                                                +{f.patchLines.added}/-
-                                                {f.patchLines.removed}
-                                            </a>
-                                        ) : (
-                                            `+${f.patchLines.added}/-${f.patchLines.removed}`
-                                        )
-                                    ) : (
-                                        "—"
-                                    )}
+                                    <PatchCell
+                                        fix={f}
+                                        href={
+                                            linked.has(f.id)
+                                                ? withSource(
+                                                      `/api/file?run=${encodeURIComponent(runId)}&path=${encodeURIComponent(`${DOCTOR_DIR}/${dir}/${f.id}.patch`)}`,
+                                                      sourceId,
+                                                  )
+                                                : null
+                                        }
+                                    />
                                 </td>
                                 <td className="py-1.5 pr-3">{gateText(f)}</td>
                                 <td className="py-1.5 tabular-nums">
@@ -303,8 +302,12 @@ export function TaskFailureAnalysis({
 }) {
     const { status, triage } = doctor;
     if (!triage) return null;
-    const recurring = triage.tasks.filter((t) => t.nightsSeen > 1).length;
-    const fresh = triage.tasks.length - recurring;
+    // Per-task triage state (new / changed / known), counted for the header.
+    const byState: Record<string, number> = {};
+    for (const t of triage.tasks) {
+        if (t.state) byState[t.state] = (byState[t.state] ?? 0) + 1;
+    }
+    const vh = triage.summary.vsHistory;
     return (
         <section
             className="border border-gray-200 rounded-lg bg-white px-4 py-3 space-y-4"
@@ -317,8 +320,7 @@ export function TaskFailureAnalysis({
                     </h2>
                     <span className="text-xs text-gray-500">
                         skill-doctor · {triage.summary.rowsFailed} failed,{" "}
-                        {triage.summary.rowsDiagnosed} diagnosed · {fresh} new,{" "}
-                        {recurring} recurring · diagnosis{" "}
+                        {triage.summary.rowsDiagnosed} diagnosed · diagnosis{" "}
                         {fmtUsd(status.costUsd ?? triage.costUsd)}
                         {status.buildUrl && (
                             <>
@@ -340,6 +342,13 @@ export function TaskFailureAnalysis({
                 </div>
                 <Counts label="layer" counts={triage.summary.byLayer} />
                 <Counts label="class" counts={triage.summary.byClass} />
+                <Counts label="state" counts={byState} />
+                {vh && (
+                    <p className="text-xs text-gray-500">
+                        vs {vh.baseRun}: {vh.new} new, {vh.persisting}{" "}
+                        persisting, {vh.fixed} fixed
+                    </p>
+                )}
                 {triage.disclaimer && (
                     <p className="text-xs italic text-gray-500">
                         {triage.disclaimer}

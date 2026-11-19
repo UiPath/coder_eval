@@ -7,17 +7,22 @@
 // Pure data + string helpers, no Node builtins: the parsed shapes are passed to
 // the run page's components, and the tests import this module directly. The
 // types are written by hand against the doctor's status_v1 / triage_v1 schemas
-// and keep only the fields the board shows. Anything that does not parse, or a
-// schema_version other than 1, is treated as absent: the page must never fail
-// because of a doctor file.
+// and carry only the fields the run page renders. A file that does not parse,
+// or whose schema_version is not 1, is treated as absent: the page must never
+// fail because of a doctor file.
+
+import { isValidTaskId } from "./ids";
+import { SKILLS_SOURCE } from "./sources";
 
 export const DOCTOR_DIR = "skill-doctor";
-export const TRIAGE_FILE_RE = /^triage-[A-Za-z0-9._-]+\.json$/;
+const TRIAGE_FILE_RE = /^triage-[A-Za-z0-9._-]+\.json$/;
 export const FIXES_DIR_RE = /^fixes(-[0-9]+)?$/;
 // Candidate ids name `<id>.patch` inside the fixes dir.
 export const PATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// At most this many patches are fetched (and linked) per run.
+export const MAX_PATCHES = 10;
 
-export const DOCTOR_STATES = [
+const DOCTOR_STATES = [
     "queued",
     "running",
     "done",
@@ -27,25 +32,18 @@ export const DOCTOR_STATES = [
 ] as const;
 export type DoctorState = (typeof DOCTOR_STATES)[number];
 
-export interface DoctorFixesDigest {
-    fixMode: string | null;
-    costUsd: number | null;
-    totalCapUsd: number | null;
-    counts: Record<string, number>;
+function isDoctorState(v: unknown): v is DoctorState {
+    return typeof v === "string" && (DOCTOR_STATES as readonly string[]).includes(v);
 }
 
 export interface DoctorStatus {
     state: DoctorState;
     reason: string;
     startedAt: string | null;
-    finishedAt: string | null;
     buildUrl: string | null;
     costUsd: number | null;
-    rowsFailed: number | null;
-    rowsDiagnosed: number | null;
     triageFile: string | null;
     fixesDir: string | null;
-    fixes: DoctorFixesDigest | null;
     trigger: string | null;
 }
 
@@ -55,48 +53,42 @@ export interface DoctorPr {
     state: string;
 }
 
+// triage_v1 task.state: new tonight, changed since the last night, or known.
+export type DoctorTaskState = "new" | "changed" | "known";
+
 export interface DoctorTask {
     taskId: string;
     skill: string;
     layer: string;
     cls: string;
+    state: DoctorTaskState | null;
+    nightsSeen: number;
     confidence: string | null;
-    contested: string[] | null;
-    criterion: string | null;
-    diagnosed: boolean;
     why: string | null;
     fix: string | null;
-    solvable: string | null;
-    state: string | null;
-    nightsSeen: number;
     owners: string[];
     existingPrs: DoctorPr[];
-    doctorPr: string | null;
-    evidence: string | null;
-    envGroup: string | null;
 }
 
 export interface DoctorAction {
     kind: string;
-    count: number;
     text: string;
-    taskIds: string[];
 }
 
 export interface DoctorTriage {
     disclaimer: string;
     costUsd: number | null;
-    buildUrl: string | null;
     summary: {
         rowsFailed: number;
         rowsDiagnosed: number;
         byClass: Record<string, number>;
         byLayer: Record<string, number>;
+        // Only set when the doctor compared against a base run.
         vsHistory: {
             new: number;
             persisting: number;
             fixed: number;
-            baseRun: string | null;
+            baseRun: string;
         } | null;
     };
     tasks: DoctorTask[];
@@ -117,7 +109,6 @@ export interface DoctorFix {
     costUsd: number | null;
     patchLines: { added: number; removed: number } | null;
     title: string;
-    problem: string;
     gates: DoctorGates;
 }
 
@@ -176,34 +167,18 @@ function parseJson(raw: string | null | undefined): unknown {
 
 export function parseDoctorStatus(raw: string | null | undefined): DoctorStatus | null {
     const j = parseJson(raw);
-    if (!isObj(j) || j.schema_version !== 1) return null;
-    const state = j.state;
-    if (typeof state !== "string" || !(DOCTOR_STATES as readonly string[]).includes(state))
-        return null;
+    if (!isObj(j) || j.schema_version !== 1 || !isDoctorState(j.state)) return null;
     const triageFile = str(j.triage_file);
     const fixesDir = str(j.fixes_dir);
-    let fixes: DoctorFixesDigest | null = null;
-    if (isObj(j.fixes)) {
-        fixes = {
-            fixMode: str(j.fixes.fix_mode),
-            costUsd: num(j.fixes.cost_usd),
-            totalCapUsd: num(j.fixes.total_cap_usd),
-            counts: countMap(j.fixes.counts),
-        };
-    }
     return {
-        state: state as DoctorState,
+        state: j.state,
         reason: str(j.reason) ?? "",
         startedAt: str(j.started_at),
-        finishedAt: str(j.finished_at),
         buildUrl: str(j.build_url),
         costUsd: num(j.cost_usd),
-        rowsFailed: typeof j.rows_failed === "number" ? int(j.rows_failed) : null,
-        rowsDiagnosed: typeof j.rows_diagnosed === "number" ? int(j.rows_diagnosed) : null,
         // A name outside the pattern is treated as absent: it lands in a path.
         triageFile: triageFile && TRIAGE_FILE_RE.test(triageFile) ? triageFile : null,
         fixesDir: fixesDir && FIXES_DIR_RE.test(fixesDir) ? fixesDir : null,
-        fixes,
         trigger: str(j.trigger),
     };
 }
@@ -215,6 +190,10 @@ function parsePr(v: unknown): DoctorPr | null {
     return { url, title: str(v.title) ?? "", state: str(v.state) ?? "unknown" };
 }
 
+function taskState(v: unknown): DoctorTaskState | null {
+    return v === "new" || v === "changed" || v === "known" ? v : null;
+}
+
 function parseTask(v: unknown): DoctorTask | null {
     if (!isObj(v)) return null;
     const taskId = str(v.task_id);
@@ -224,22 +203,15 @@ function parseTask(v: unknown): DoctorTask | null {
         skill: str(v.skill) ?? "",
         layer: str(v.layer) ?? "undiagnosed",
         cls: str(v.class) ?? "",
+        state: taskState(v.state),
+        nightsSeen: int(v.nights_seen, 1),
         confidence: str(v.confidence),
-        contested: Array.isArray(v.contested) ? strList(v.contested) : null,
-        criterion: str(v.criterion),
-        diagnosed: v.diagnosed === true,
         why: str(v.why),
         fix: str(v.fix),
-        solvable: str(v.solvable),
-        state: str(v.state),
-        nightsSeen: int(v.nights_seen, 1),
         owners: strList(v.owners),
         existingPrs: Array.isArray(v.existing_prs)
             ? v.existing_prs.map(parsePr).filter((p): p is DoctorPr => p !== null)
             : [],
-        doctorPr: str(v.doctor_pr),
-        evidence: str(v.evidence),
-        envGroup: str(v.env_group),
     };
 }
 
@@ -250,37 +222,32 @@ export function parseTriage(raw: string | null | undefined): DoctorTriage | null
     const s = j.summary;
     const run = isObj(j.run) ? j.run : {};
     const vh = isObj(s.vs_history) ? s.vs_history : null;
+    const baseRun = vh ? str(vh.base_run) : null;
     return {
         disclaimer: str(j.disclaimer) ?? "",
         costUsd: num(run.cost_usd),
-        buildUrl: str(run.build_url),
         summary: {
             rowsFailed: int(s.rows_failed),
             rowsDiagnosed: int(s.rows_diagnosed),
             byClass: countMap(s.by_class),
             byLayer: countMap(s.by_layer),
-            vsHistory: vh
-                ? {
-                      new: int(vh.new),
-                      persisting: int(vh.persisting),
-                      fixed: int(vh.fixed),
-                      baseRun: str(vh.base_run),
-                  }
-                : null,
+            vsHistory:
+                vh && baseRun
+                    ? {
+                          new: int(vh.new),
+                          persisting: int(vh.persisting),
+                          fixed: int(vh.fixed),
+                          baseRun,
+                      }
+                    : null,
         },
         tasks: j.tasks.map(parseTask).filter((t): t is DoctorTask => t !== null),
         actions: Array.isArray(j.actions)
-            ? j.actions.flatMap((a): DoctorAction[] => {
-                  if (!isObj(a) || typeof a.text !== "string") return [];
-                  return [
-                      {
-                          kind: str(a.kind) ?? "",
-                          count: int(a.count),
-                          text: a.text,
-                          taskIds: strList(a.task_ids),
-                      },
-                  ];
-              })
+            ? j.actions.flatMap((a): DoctorAction[] =>
+                  isObj(a) && typeof a.text === "string"
+                      ? [{ kind: str(a.kind) ?? "", text: a.text }]
+                      : [],
+              )
             : [],
     };
 }
@@ -298,9 +265,7 @@ function parseGates(v: unknown): DoctorGates {
 
 export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
     const j = parseJson(raw);
-    if (!isObj(j) || !Array.isArray(j.candidates)) return null;
-    // fixes.json carries its own schema_version 1; an unknown one is absent.
-    if (j.schema_version !== undefined && j.schema_version !== 1) return null;
+    if (!isObj(j) || j.schema_version !== 1 || !Array.isArray(j.candidates)) return null;
     return {
         fixMode: str(j.fix_mode),
         costUsd: num(j.cost_usd),
@@ -322,7 +287,6 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
                         ? { added: int(pl.added), removed: int(pl.removed) }
                         : null,
                     title: str(c.title) ?? "",
-                    problem: str(c.problem) ?? "",
                     gates: parseGates(c.gates),
                 },
             ];
@@ -330,12 +294,28 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
     };
 }
 
-/** Patch ids whose `<id>.patch` the board fetches and links. */
-export function patchIds(fixes: DoctorFixes | null): string[] {
-    if (!fixes) return [];
-    return fixes.candidates
-        .filter((c) => c.patchLines !== null && PATCH_ID_RE.test(c.id))
-        .map((c) => c.id);
+/**
+ * The candidates whose `<id>.patch` the board fetches and links: one predicate
+ * for both, so a link never points at a patch that is not fetched. A patch
+ * exists only when fixes.json reports patch lines; the id must be a safe file
+ * name; at most MAX_PATCHES per run.
+ */
+export function patchIds(fixes: DoctorFixes | null): Set<string> {
+    const ids = new Set<string>();
+    for (const c of fixes?.candidates ?? []) {
+        if (ids.size >= MAX_PATCHES) break;
+        if (c.patchLines !== null && PATCH_ID_RE.test(c.id)) ids.add(c.id);
+    }
+    return ids;
+}
+
+/** `<fixes_dir>/<id>.patch` → the id, or null for any other doctor path. */
+export function patchIdFromPath(rel: string): { fixesDir: string; id: string } | null {
+    const parts = rel.split("/");
+    if (parts.length !== 2 || !FIXES_DIR_RE.test(parts[0])) return null;
+    const m = /^(.+)\.patch$/.exec(parts[1]);
+    if (!m || !PATCH_ID_RE.test(m[1])) return null;
+    return { fixesDir: parts[0], id: m[1] };
 }
 
 // ---------- links ----------
@@ -353,18 +333,8 @@ export function isAdoUrl(u: unknown): u is string {
     return typeof u === "string" && ADO_RE.test(u);
 }
 
-// Same shape as blob.ts's task-id check (kept here so this module stays free
-// of Node builtins): a task link is only built from an id the task page accepts.
-const TASK_ID_RE = /^[\w.-]+(\/[\w.-]+)*$/;
-
-export function isLinkableTaskId(id: string): boolean {
-    return (
-        id.length > 0 &&
-        id.length < 256 &&
-        TASK_ID_RE.test(id) &&
-        !id.split("/").some((s) => s === "." || s === "..")
-    );
-}
+/** A task link is built only from an id the task page itself accepts. */
+export const isLinkableTaskId = isValidTaskId;
 
 // ---------- analysis.md split ----------
 
@@ -396,44 +366,50 @@ export function splitAnalysis(
 
 // ---------- gating + page plan ----------
 
-/** The panel is internal-only, for the skills nightly, with an env kill switch. */
+/**
+ * The panel is internal-only, for the skills nightly, with an env kill switch
+ * (EVALBOARD_TASK_ANALYSIS=off, in any case).
+ */
 export function taskAnalysisEnabled(
     internal: boolean,
     sourceId: string,
     env: string | undefined,
 ): boolean {
-    return internal && sourceId === "skills" && env !== "off";
+    return (
+        internal &&
+        sourceId === SKILLS_SOURCE.id &&
+        (env ?? "").trim().toLowerCase() !== "off"
+    );
 }
 
 export interface AnalysisPlan {
     // Markdown for the AI summary panel (null: no panel).
     summary: string | null;
-    // Render the Task Failure Analysis panel in place of the cut-off part.
+    // The Task Failure Analysis panel, after the summary (null: none).
     panel: RunDoctor | null;
-    // One-line doctor status under the summary (null: none).
+    // One-line doctor status when there is no panel (null: none).
     statusLine: DoctorStatus | null;
 }
 
 /**
- * What the run page shows. The panel replaces Findings and below only when
- * the report is done and analysis.md has a split point; every other case keeps
- * today's view, plus a status line when a status exists.
+ * What the run page shows. A done report with a parsed triage gets the panel;
+ * when analysis.md has a split point, the summary keeps only the part above
+ * Findings (the panel replaces the rest), else the whole file. Every other
+ * state keeps today's view, plus a status line.
  */
 export function planAnalysis(
     analysis: string | null,
     doctor: RunDoctor | null,
 ): AnalysisPlan {
     if (!doctor) return { summary: analysis, panel: null, statusLine: null };
-    const { status } = doctor;
-    if (status.state === "done" && doctor.triage && analysis) {
-        const split = splitAnalysis(analysis);
-        if (split) {
-            return {
-                summary: split.top.trim() ? split.top : null,
-                panel: doctor,
-                statusLine: null,
-            };
-        }
+    if (doctor.status.state === "done" && doctor.triage) {
+        const split = analysis ? splitAnalysis(analysis) : null;
+        const summary = split ? split.top : analysis;
+        return {
+            summary: summary && summary.trim() ? summary : null,
+            panel: doctor,
+            statusLine: null,
+        };
     }
-    return { summary: analysis, panel: null, statusLine: status };
+    return { summary: analysis, panel: null, statusLine: doctor.status };
 }
