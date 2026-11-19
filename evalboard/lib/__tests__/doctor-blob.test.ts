@@ -181,7 +181,7 @@ describe("readRunDoctor", () => {
         const { readRunDoctor } = await import("../runs");
         const d = await readRunDoctor(RUN);
         expect(d?.status.state).toBe("done");
-        expect(d?.triage?.tasks).toHaveLength(3);
+        expect(d?.triage?.tasks).toHaveLength(5);
         expect(d?.fixes?.candidates).toHaveLength(2);
     });
 

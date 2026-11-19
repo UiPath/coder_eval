@@ -212,9 +212,10 @@ belongs to it.
   `readRunDoctor`). `status.json` is refetched after 60 s; the triage file it
   names, `<fixes_dir>/fixes.json` and up to 10 patches are cached for good.
   `/api/file` serves only the patches fixes.json lists, loading them through
-  the same reader on a cold cache. A done report gets the panel; when
-  `analysis.md` has a `## Findings` line, the AI summary stops there and the
-  panel replaces the rest. Other states keep the AI summary, with a status
-  line. `EVALBOARD_TASK_ANALYSIS=off` turns it off.
+  the same reader on a cold cache. The report is a collapsed block
+  under the AI summary, laid out like the doctor's own page (stats, failures by
+  layer, Fix first, per-skill failure cards). When the report is done and
+  `analysis.md` has a `## Findings` line, the AI summary stops there; other
+  states keep the AI summary and show the doctor's state in the block header. `EVALBOARD_TASK_ANALYSIS=off` turns it off.
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

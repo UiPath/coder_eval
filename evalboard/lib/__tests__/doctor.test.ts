@@ -133,33 +133,44 @@ describe("parseDoctorStatus", () => {
 });
 
 describe("parseTriage / parseFixes", () => {
-    test("reads the fixture", () => {
+    test("reads the fixture: the card fields", () => {
         const t = parseTriage(TRIAGE)!;
-        expect(t.tasks.map((x) => x.taskId)).toEqual(["example-e1", "example-t1", "example-t2"]);
-        expect(t.summary.byLayer).toEqual({ env: 1, grader: 1, skill: 1 });
-        expect(t.tasks[1].nightsSeen).toBe(3);
-        expect(t.tasks.map((x) => x.state)).toEqual(["new", "known", "new"]);
-        expect(t.summary.vsHistory?.baseRun).toBe("2099-01-02_04-25-52");
-        expect(t.tasks[1].existingPrs).toHaveLength(3);
-        expect(t.actions).toHaveLength(2);
+        expect(t.tasks.map((x) => x.taskId)).toEqual([
+            "example-e1",
+            "example-t1",
+            "example-t2",
+            "example-e2",
+            "example-e3",
+        ]);
+        expect(t.rowsRun).toBe(10);
+        expect(t.rowsFailed).toBe(5);
+        expect(t.actions[0]).toEqual({
+            count: 3,
+            text: expect.stringContaining("Reauthorize"),
+            taskIds: ["example-e1", "example-e2", "example-e3"],
+        });
+        const t1 = t.tasks[1];
+        expect(t1).toMatchObject({
+            layer: "grader",
+            solvable: "yes-grader",
+            runStatus: "FAILURE",
+            confidence: "high",
+            criterion: "file_contains",
+            passedBefore: "2099-01-01_04-20-00 (claude-code)",
+            related: "example-t3 fails the same check",
+            owners: ["Example Owner", "Second Owner"],
+            envGroup: null,
+            doctorPr: null,
+        });
+        expect(t1.existingPrs).toHaveLength(3);
+        expect(t1.relatedSkillPrs[0].url).toBe("https://github.com/UiPath/skills/pull/125");
+        expect(t.tasks[0].envGroup).toBe("connection example-conn");
     });
 
     test("schema_version 2 or a broken triage is absent", () => {
         expect(parseTriage(JSON.stringify({ ...JSON.parse(TRIAGE), schema_version: 2 }))).toBeNull();
         expect(parseTriage("{")).toBeNull();
         expect(parseTriage(JSON.stringify({ schema_version: 1 }))).toBeNull();
-    });
-
-    test("vs_history without a base run is not shown", () => {
-        const doc = JSON.parse(TRIAGE);
-        doc.summary.vs_history.base_run = null;
-        expect(parseTriage(JSON.stringify(doc))!.summary.vsHistory).toBeNull();
-    });
-
-    test("an unknown task state is null", () => {
-        const doc = JSON.parse(TRIAGE);
-        doc.tasks[0].state = "persisting";
-        expect(parseTriage(JSON.stringify(doc))!.tasks[0].state).toBeNull();
     });
 
     test("fixes.json with schema_version 2, or none, is absent", () => {
@@ -254,48 +265,44 @@ describe("taskAnalysisEnabled (gating + kill switch)", () => {
 });
 
 describe("planAnalysis (states)", () => {
-    test("absent: today's view, no status line", () => {
-        expect(planAnalysis(MD, null)).toEqual({ summary: MD, panel: null, statusLine: null });
-        expect(planAnalysis(null, null)).toEqual({ summary: null, panel: null, statusLine: null });
+    test("absent: today's view, no block", () => {
+        expect(planAnalysis(MD, null)).toEqual({ summary: MD, doctor: null });
+        expect(planAnalysis(null, null)).toEqual({ summary: null, doctor: null });
     });
 
-    test("done with a split: summary keeps the top, the panel replaces the rest", () => {
+    test("done with a split: summary keeps the top, the block replaces the rest", () => {
         const d = doctor();
         const p = planAnalysis(MD, d);
         expect(p.summary).toBe("# Analysis\n\n## TL;DR\nTop part.\n\n");
-        expect(p.summary).not.toContain("Findings");
-        expect(p.panel).toBe(d);
-        expect(p.statusLine).toBeNull();
+        expect(p.doctor).toBe(d);
     });
 
-    test("done without a split: the full analysis, then the panel", () => {
+    test("done without a split: the full analysis, then the block", () => {
         const md = "# A\n\n## TL;DR\nonly\n";
         const d = doctor();
-        expect(planAnalysis(md, d)).toEqual({ summary: md, panel: d, statusLine: null });
+        expect(planAnalysis(md, d)).toEqual({ summary: md, doctor: d });
     });
 
-    test("done without analysis.md: the panel alone", () => {
+    test("done without analysis.md: the block alone", () => {
         const d = doctor();
-        expect(planAnalysis(null, d)).toEqual({ summary: null, panel: d, statusLine: null });
+        expect(planAnalysis(null, d)).toEqual({ summary: null, doctor: d });
     });
 
-    test("an analysis.md that starts with Findings: no summary, the panel", () => {
+    test("an analysis.md that starts with Findings: no summary", () => {
         const d = doctor();
-        expect(planAnalysis("## Findings\nx\n", d)).toEqual({ summary: null, panel: d, statusLine: null });
+        expect(planAnalysis("## Findings\nx\n", d)).toEqual({ summary: null, doctor: d });
     });
 
-    test("done but the triage did not load: no panel", () => {
+    test("done but the triage did not load: the full analysis", () => {
         const d = { ...doctor(), triage: null };
-        expect(planAnalysis(MD, d)).toEqual({ summary: MD, panel: null, statusLine: d.status });
+        expect(planAnalysis(MD, d)).toEqual({ summary: MD, doctor: d });
     });
 
     test.each(["queued", "running", "failed", "skipped", "retracted"])(
-        "%s: the full analysis (Findings included) plus a status line",
+        "%s: the full analysis (Findings included) and the block",
         (state) => {
-            const p = planAnalysis(MD, doctor({ state, reason: "why" }));
-            expect(p.summary).toBe(MD);
-            expect(p.panel).toBeNull();
-            expect(p.statusLine?.state).toBe(state);
+            const d = doctor({ state, reason: "why" });
+            expect(planAnalysis(MD, d)).toEqual({ summary: MD, doctor: d });
         },
     );
 });

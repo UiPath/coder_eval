@@ -25,10 +25,7 @@ import { sourceById } from "@/lib/sources";
 import { scalarParam } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
-import {
-    DoctorStatusLine,
-    TaskFailureAnalysis,
-} from "./task-failure-analysis";
+import { TaskFailureAnalysis } from "./task-failure-analysis";
 import { planAnalysis, taskAnalysisEnabled } from "@/lib/doctor";
 import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
@@ -100,7 +97,7 @@ export default async function RunPage({
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
     const human = fmtRunTime(id);
     // A done report replaces analysis.md's Findings and everything below it;
-    // otherwise the AI summary is unchanged, plus a status line.
+    // otherwise the AI summary is unchanged. The doctor block sits under it.
     const plan = planAnalysis(analysis, doctor);
     const series = isInternal
         ? seriesForRun(source.id, {
@@ -174,10 +171,9 @@ export default async function RunPage({
             </div>
 
             {plan.summary && <AnalysisPanel markdown={plan.summary} />}
-            {plan.statusLine && <DoctorStatusLine status={plan.statusLine} />}
-            {plan.panel && (
+            {plan.doctor && (
                 <TaskFailureAnalysis
-                    doctor={plan.panel}
+                    doctor={plan.doctor}
                     runId={id}
                     sourceId={source.id}
                 />

@@ -53,44 +53,38 @@ export interface DoctorPr {
     state: string;
 }
 
-// triage_v1 task.state: new tonight, changed since the last night, or known.
-export type DoctorTaskState = "new" | "changed" | "known";
-
+// One failed row, with the fields the skill-doctor page shows on its card.
 export interface DoctorTask {
     taskId: string;
     skill: string;
     layer: string;
-    cls: string;
-    state: DoctorTaskState | null;
-    nightsSeen: number;
+    solvable: string | null;
+    runStatus: string | null;
     confidence: string | null;
     why: string | null;
     fix: string | null;
+    criterion: string | null;
+    evidence: string | null;
+    passedBefore: string | null;
+    related: string | null;
     owners: string[];
     existingPrs: DoctorPr[];
+    relatedSkillPrs: DoctorPr[];
+    envGroup: string | null;
+    doctorPr: string | null;
 }
 
 export interface DoctorAction {
-    kind: string;
+    count: number;
     text: string;
+    taskIds: string[];
 }
 
 export interface DoctorTriage {
-    disclaimer: string;
-    costUsd: number | null;
-    summary: {
-        rowsFailed: number;
-        rowsDiagnosed: number;
-        byClass: Record<string, number>;
-        byLayer: Record<string, number>;
-        // Only set when the doctor compared against a base run.
-        vsHistory: {
-            new: number;
-            persisting: number;
-            fixed: number;
-            baseRun: string;
-        } | null;
-    };
+    // Rows the nightly executed (null when the run did not say).
+    rowsRun: number | null;
+    rowsFailed: number;
+    rowsDiagnosed: number;
     tasks: DoctorTask[];
     actions: DoctorAction[];
 }
@@ -145,14 +139,6 @@ function int(v: unknown, dflt = 0): number {
 function strList(v: unknown): string[] {
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
-function countMap(v: unknown): Record<string, number> {
-    const out: Record<string, number> = {};
-    if (!isObj(v)) return out;
-    for (const [k, n] of Object.entries(v)) {
-        if (typeof n === "number" && Number.isInteger(n) && n >= 0) out[k] = n;
-    }
-    return out;
-}
 
 function parseJson(raw: string | null | undefined): unknown {
     if (raw == null) return null;
@@ -190,8 +176,8 @@ function parsePr(v: unknown): DoctorPr | null {
     return { url, title: str(v.title) ?? "", state: str(v.state) ?? "unknown" };
 }
 
-function taskState(v: unknown): DoctorTaskState | null {
-    return v === "new" || v === "changed" || v === "known" ? v : null;
+function prList(v: unknown): DoctorPr[] {
+    return Array.isArray(v) ? v.map(parsePr).filter((p): p is DoctorPr => p !== null) : [];
 }
 
 function parseTask(v: unknown): DoctorTask | null {
@@ -202,16 +188,20 @@ function parseTask(v: unknown): DoctorTask | null {
         taskId,
         skill: str(v.skill) ?? "",
         layer: str(v.layer) ?? "undiagnosed",
-        cls: str(v.class) ?? "",
-        state: taskState(v.state),
-        nightsSeen: int(v.nights_seen, 1),
+        solvable: str(v.solvable),
+        runStatus: str(v.run_status),
         confidence: str(v.confidence),
         why: str(v.why),
         fix: str(v.fix),
+        criterion: str(v.criterion),
+        evidence: str(v.evidence),
+        passedBefore: str(v.passed_before),
+        related: str(v.related),
         owners: strList(v.owners),
-        existingPrs: Array.isArray(v.existing_prs)
-            ? v.existing_prs.map(parsePr).filter((p): p is DoctorPr => p !== null)
-            : [],
+        existingPrs: prList(v.existing_prs),
+        relatedSkillPrs: prList(v.related_skill_prs),
+        envGroup: str(v.env_group),
+        doctorPr: str(v.doctor_pr),
     };
 }
 
@@ -221,31 +211,15 @@ export function parseTriage(raw: string | null | undefined): DoctorTriage | null
     if (!isObj(j.summary) || !Array.isArray(j.tasks)) return null;
     const s = j.summary;
     const run = isObj(j.run) ? j.run : {};
-    const vh = isObj(s.vs_history) ? s.vs_history : null;
-    const baseRun = vh ? str(vh.base_run) : null;
     return {
-        disclaimer: str(j.disclaimer) ?? "",
-        costUsd: num(run.cost_usd),
-        summary: {
-            rowsFailed: int(s.rows_failed),
-            rowsDiagnosed: int(s.rows_diagnosed),
-            byClass: countMap(s.by_class),
-            byLayer: countMap(s.by_layer),
-            vsHistory:
-                vh && baseRun
-                    ? {
-                          new: int(vh.new),
-                          persisting: int(vh.persisting),
-                          fixed: int(vh.fixed),
-                          baseRun,
-                      }
-                    : null,
-        },
+        rowsRun: typeof run.rows_executed === "number" ? int(run.rows_executed) : null,
+        rowsFailed: int(s.rows_failed),
+        rowsDiagnosed: int(s.rows_diagnosed),
         tasks: j.tasks.map(parseTask).filter((t): t is DoctorTask => t !== null),
         actions: Array.isArray(j.actions)
             ? j.actions.flatMap((a): DoctorAction[] =>
                   isObj(a) && typeof a.text === "string"
-                      ? [{ kind: str(a.kind) ?? "", text: a.text }]
+                      ? [{ count: int(a.count), text: a.text, taskIds: strList(a.task_ids) }]
                       : [],
               )
             : [],
@@ -386,31 +360,25 @@ export function taskAnalysisEnabled(
 export interface AnalysisPlan {
     // Markdown for the AI summary panel (null: no panel).
     summary: string | null;
-    // The Task Failure Analysis panel, after the summary (null: none).
-    panel: RunDoctor | null;
-    // One-line doctor status when there is no panel (null: none).
-    statusLine: DoctorStatus | null;
+    // The Task Failure Analysis block, right under the summary (null: none).
+    doctor: RunDoctor | null;
 }
 
 /**
- * What the run page shows. A done report with a parsed triage gets the panel;
- * when analysis.md has a split point, the summary keeps only the part above
- * Findings (the panel replaces the rest), else the whole file. Every other
- * state keeps today's view, plus a status line.
+ * What the run page shows. With a done report whose triage parsed, the
+ * summary stops at analysis.md's `## Findings` line (the block replaces the
+ * rest), or keeps the whole file when there is no such line. In every other
+ * state the summary is unchanged (Findings included) and the block shows only
+ * the doctor's state.
  */
 export function planAnalysis(
     analysis: string | null,
     doctor: RunDoctor | null,
 ): AnalysisPlan {
-    if (!doctor) return { summary: analysis, panel: null, statusLine: null };
-    if (doctor.status.state === "done" && doctor.triage) {
+    if (doctor && doctor.status.state === "done" && doctor.triage) {
         const split = analysis ? splitAnalysis(analysis) : null;
         const summary = split ? split.top : analysis;
-        return {
-            summary: summary && summary.trim() ? summary : null,
-            panel: doctor,
-            statusLine: null,
-        };
+        return { summary: summary && summary.trim() ? summary : null, doctor };
     }
-    return { summary: analysis, panel: null, statusLine: doctor.status };
+    return { summary: analysis, doctor };
 }

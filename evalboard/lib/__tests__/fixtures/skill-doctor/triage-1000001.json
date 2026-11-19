@@ -2,53 +2,240 @@
  "schema_version": 1,
  "disclaimer": "Probable causes, not verified fixes. Existing PRs are context; only a doctor PR is a proposed fix.",
  "run": {
-  "run_id": "2099-01-03_04-23-30", "harness": "claude-code", "model": "example-model", "skills_git_commit": "0a1b2c3d",
-  "cli_version": "1.0.0", "tasks_run": 10, "rows_executed": 10, "adhoc": false, "history_base_run": "2099-01-02_04-25-52",
-  "run_json_etag": "\"0x8D000000000000A\"", "build_id": "1000001",
+  "run_id": "2099-01-03_04-23-30",
+  "harness": "claude-code",
+  "model": "example-model",
+  "skills_git_commit": "0a1b2c3d",
+  "cli_version": "1.0.0",
+  "tasks_run": 10,
+  "rows_executed": 10,
+  "adhoc": false,
+  "history_base_run": "2099-01-02_04-25-52",
+  "run_json_etag": "\"0x8D000000000000A\"",
+  "build_id": "1000001",
   "build_url": "https://dev.azure.com/example-org/example-project/_build/results?buildId=1000001",
-  "doctor_version": "0.3.0a0", "generated_at": "2099-01-03T09:12:00Z", "mode": "diagnosed",
-  "mode_reason": "example", "cost_usd": 1.25
+  "doctor_version": "0.3.0a0",
+  "generated_at": "2099-01-03T09:12:00Z",
+  "mode": "diagnosed",
+  "mode_reason": "example",
+  "cost_usd": 1.25
  },
  "summary": {
-  "rows_failed": 3, "rows_diagnosed": 2,
-  "by_class": {"env": 1, "failure": 2},
-  "by_layer": {"env": 1, "grader": 1, "skill": 1},
-  "vs_history": {"new": 2, "persisting": 1, "fixed": 0, "fixed_tasks": [], "base_run": "2099-01-02_04-25-52"},
-  "env_groups": [{"cause": "connection example-conn", "count": 1, "task_ids": ["example-e1"]}]
+  "rows_failed": 5,
+  "rows_diagnosed": 2,
+  "by_class": {
+   "env": 3,
+   "failure": 2
+  },
+  "by_layer": {
+   "env": 3,
+   "grader": 1,
+   "skill": 1
+  },
+  "vs_history": {
+   "new": 4,
+   "persisting": 1,
+   "fixed": 0,
+   "fixed_tasks": [],
+   "base_run": "2099-01-02_04-25-52"
+  },
+  "env_groups": [
+   {
+    "cause": "connection example-conn",
+    "count": 3,
+    "task_ids": [
+     "example-e1",
+     "example-e2",
+     "example-e3"
+    ]
+   }
+  ]
  },
  "tasks": [
   {
-   "task_id": "example-e1", "skill": "uipath-example", "class": "env", "family": "preflight", "state": "new",
-   "nights_seen": 1, "owners": ["Example Owner"], "run_status": "ERROR", "criterion": null, "error": "pre-run check failed",
-   "contested": null, "env_group": "connection example-conn", "diagnosed": false, "layer": "env", "confidence": null,
-   "why": "example-conn: no enabled connection", "evidence": null, "solvable": "env-fix",
-   "fix": "Reauthorize the connection, then re-run.", "related": null, "passed_before": null,
-   "existing_prs": null, "doctor_pr": null
-  },
-  {
-   "task_id": "example-t1", "skill": "uipath-example", "class": "failure", "family": "grader", "state": "known",
-   "nights_seen": 3, "owners": ["Example Owner", "Second Owner"], "run_status": "FAILURE", "criterion": "file_contains",
-   "error": null, "contested": null, "env_group": null, "diagnosed": true, "layer": "grader", "confidence": "high",
-   "why": "The grader expects a literal the task prompt never asks for.", "evidence": "example evidence",
-   "solvable": "grader-fix", "fix": "Match the documented output instead of the literal.", "related": null,
-   "passed_before": null,
-   "existing_prs": [
-    {"url": "https://github.com/UiPath/skills/pull/123", "title": "fix: example grader", "state": "open"},
-    {"url": "https://github.com.example.invalid/UiPath/skills/pull/124", "title": "look-alike host", "state": "open"},
-    {"url": "javascript:alert(1)", "title": "script url", "state": "open"}
+   "task_id": "example-e1",
+   "skill": "uipath-example",
+   "class": "env",
+   "family": "preflight",
+   "state": "new",
+   "nights_seen": 1,
+   "owners": [
+    "Example Owner"
    ],
+   "run_status": "ERROR",
+   "criterion": null,
+   "error": "pre-run check failed",
+   "contested": null,
+   "env_group": "connection example-conn",
+   "diagnosed": false,
+   "layer": "env",
+   "confidence": null,
+   "why": "example-conn: no enabled connection",
+   "evidence": null,
+   "solvable": "env-fix",
+   "fix": "Reauthorize the connection, then re-run.",
+   "related": null,
+   "passed_before": null,
+   "existing_prs": null,
    "doctor_pr": null
   },
   {
-   "task_id": "example-t2", "skill": "uipath-example-two", "class": "failure", "family": "skill", "state": "new",
-   "nights_seen": 1, "owners": [], "run_status": "FAILURE", "criterion": "run_command", "error": null,
-   "contested": null, "env_group": null, "diagnosed": true, "layer": "skill", "confidence": "medium",
-   "why": "The skill documents a removed flag.", "evidence": null, "solvable": "skill-fix",
-   "fix": "Document the current flag.", "related": null, "passed_before": null, "existing_prs": [], "doctor_pr": null
+   "task_id": "example-t1",
+   "skill": "uipath-example",
+   "class": "failure",
+   "family": "grader",
+   "state": "known",
+   "nights_seen": 3,
+   "owners": [
+    "Example Owner",
+    "Second Owner"
+   ],
+   "run_status": "FAILURE",
+   "criterion": "file_contains",
+   "error": null,
+   "contested": null,
+   "env_group": null,
+   "diagnosed": true,
+   "layer": "grader",
+   "confidence": "high",
+   "why": "The grader expects a literal the task prompt never asks for.",
+   "evidence": "grader log: pattern `literal` not found",
+   "solvable": "yes-grader",
+   "fix": "Match the documented output instead of the literal.",
+   "related": "example-t3 fails the same check",
+   "passed_before": "2099-01-01_04-20-00 (claude-code)",
+   "existing_prs": [
+    {
+     "url": "https://github.com/UiPath/skills/pull/123",
+     "title": "fix: example grader",
+     "state": "open"
+    },
+    {
+     "url": "https://github.com.example.invalid/UiPath/skills/pull/124",
+     "title": "look-alike host",
+     "state": "open"
+    },
+    {
+     "url": "javascript:alert(1)",
+     "title": "script url",
+     "state": "open"
+    }
+   ],
+   "doctor_pr": null,
+   "related_skill_prs": [
+    {
+     "url": "https://github.com/UiPath/skills/pull/125",
+     "title": "docs(example): document the output",
+     "state": "merged"
+    }
+   ]
+  },
+  {
+   "task_id": "example-t2",
+   "skill": "uipath-example-two",
+   "class": "failure",
+   "family": "skill",
+   "state": "new",
+   "nights_seen": 1,
+   "owners": [],
+   "run_status": "FAILURE",
+   "criterion": "run_command",
+   "error": null,
+   "contested": null,
+   "env_group": null,
+   "diagnosed": true,
+   "layer": "skill",
+   "confidence": "medium",
+   "why": "The skill documents a removed flag.",
+   "evidence": null,
+   "solvable": "yes-skill",
+   "fix": "Document the current flag.",
+   "related": null,
+   "passed_before": null,
+   "existing_prs": [],
+   "doctor_pr": null
+  },
+  {
+   "task_id": "example-e2",
+   "skill": "uipath-example-two",
+   "class": "env",
+   "family": "preflight",
+   "state": "new",
+   "nights_seen": 1,
+   "owners": [
+    "Example Owner"
+   ],
+   "run_status": "ERROR",
+   "criterion": null,
+   "error": "pre-run check failed",
+   "contested": null,
+   "env_group": "connection example-conn",
+   "diagnosed": false,
+   "layer": "env",
+   "confidence": null,
+   "why": "example-conn: no enabled connection",
+   "evidence": null,
+   "solvable": "env-fix",
+   "fix": "Reauthorize the connection, then re-run.",
+   "related": null,
+   "passed_before": null,
+   "existing_prs": null,
+   "doctor_pr": null
+  },
+  {
+   "task_id": "example-e3",
+   "skill": "uipath-example-two",
+   "class": "env",
+   "family": "preflight",
+   "state": "new",
+   "nights_seen": 1,
+   "owners": [
+    "Example Owner"
+   ],
+   "run_status": "ERROR",
+   "criterion": null,
+   "error": "pre-run check failed",
+   "contested": null,
+   "env_group": "connection example-conn",
+   "diagnosed": false,
+   "layer": "env",
+   "confidence": null,
+   "why": "example-conn: no enabled connection",
+   "evidence": null,
+   "solvable": "env-fix",
+   "fix": "Reauthorize the connection, then re-run.",
+   "related": null,
+   "passed_before": null,
+   "existing_prs": null,
+   "doctor_pr": null
   }
  ],
  "actions": [
-  {"kind": "env", "count": 1, "text": "Environment: 1 task stopped at the pre-run check. Reauthorize the connection, then re-run.", "task_ids": ["example-e1"]},
-  {"kind": "layer", "count": 1, "text": "uipath-example: 1 task diagnosed as a grader problem.", "task_ids": ["example-t1"]}
+  {
+   "kind": "env",
+   "count": 3,
+   "text": "Environment: 1 task stopped at the pre-run check. Reauthorize the connection, then re-run.",
+   "task_ids": [
+    "example-e1",
+    "example-e2",
+    "example-e3"
+   ]
+  },
+  {
+   "kind": "open-pr",
+   "count": 1,
+   "text": "Open PR https://github.com/UiPath/skills/pull/123 (fix: example grader) touches the files of 1 failing task. See javascript:alert(1) and https://github.com.example.invalid/x.",
+   "task_ids": [
+    "example-t1"
+   ]
+  },
+  {
+   "kind": "layer",
+   "count": 1,
+   "text": "uipath-example: 1 task diagnosed as a grader problem.",
+   "task_ids": [
+    "example-t1"
+   ]
+  }
  ]
 }

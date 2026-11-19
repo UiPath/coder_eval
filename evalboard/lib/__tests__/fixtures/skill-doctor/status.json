@@ -17,7 +17,7 @@
  "build_url": "https://dev.azure.com/example-org/example-project/_build/results?buildId=1000001",
  "cost_usd": 1.25,
  "cost_complete": true,
- "rows_failed": 3,
+ "rows_failed": 5,
  "rows_diagnosed": 2,
  "triage_file": "triage-1000001.json",
  "trigger": "https://dev.azure.com/example-org/example-project/_build/results?buildId=1000000",
