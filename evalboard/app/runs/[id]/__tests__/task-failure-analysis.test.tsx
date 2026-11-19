@@ -298,6 +298,36 @@ describe("groupBySkill", () => {
         expect(groupBySkill(tie, null, "").map((g) => g.skill)).toEqual(["a-skill", "b-skill"]);
     });
 
+    test("cards: PR ready, then other candidates, then the rest, then layer rank", () => {
+        const d = doctor();
+        const base = d.triage!.tasks[1];
+        d.triage!.tasks = [
+            { ...base, taskId: "z-plain-skill", layer: "skill", doctorPr: null },
+            { ...base, taskId: "a-plain-grader", layer: "grader", doctorPr: null },
+            { ...base, taskId: "m-live", layer: "grader", doctorPr: null },
+            { ...base, taskId: "y-ready", layer: "grader", doctorPr: null },
+            { ...base, taskId: "x-doctor-pr", layer: "grader", doctorPr: "https://github.com/UiPath/skills/pull/7" },
+            { ...base, taskId: "b-bad-pr", layer: "grader", doctorPr: "https://example.invalid/pull/7" },
+            { ...d.triage!.tasks[0], skill: base.skill },
+        ];
+        d.fixes!.candidates = [
+            { ...d.fixes!.candidates[0], id: "f1", taskId: "y-ready", covers: ["y-ready"] },
+            { ...d.fixes!.candidates[1], id: "f2", taskId: "m-live", covers: ["m-live"] },
+        ];
+        const [g] = groupBySkill(d, null, "");
+        expect(g.cards.map((t) => t.taskId)).toEqual([
+            "x-doctor-pr",
+            "y-ready",
+            "m-live",
+            // The rest: skill ranks after grader on the doctor page, so first.
+            "z-plain-skill",
+            "a-plain-grader",
+            "b-bad-pr",
+        ]);
+        // Env tasks stay in their group, rendered after the cards.
+        expect(g.envGroups.map((e) => e.tasks.map((t) => t.taskId))).toEqual([["example-e1"]]);
+    });
+
     test("the rendered accordions follow the same order", () => {
         renderBlock({ ...doctor(), fixes: null });
         openBlock();

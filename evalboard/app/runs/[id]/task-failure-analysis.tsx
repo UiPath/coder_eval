@@ -254,7 +254,19 @@ export function groupBySkill(
                 if (t.envGroup) groups.set(t.envGroup, [...(groups.get(t.envGroup) ?? []), t]);
                 else cards.push(t);
             }
-            cards.sort((a, b) => rank(b.layer) - rank(a.layer) || a.taskId.localeCompare(b.taskId));
+            // Proposed PR ready first, then other fix candidates, then the rest;
+            // within each, the doctor page's layer rank and task id.
+            const tier = (t: DoctorTask) => {
+                const c = fixesForTask(doctor, t.taskId);
+                if (isSkillsPrUrl(t.doctorPr) || c.some(isReady)) return 0;
+                return c.length ? 1 : 2;
+            };
+            cards.sort(
+                (a, b) =>
+                    tier(a) - tier(b) ||
+                    rank(b.layer) - rank(a.layer) ||
+                    a.taskId.localeCompare(b.taskId),
+            );
             const lc = new Map<string, number>();
             for (const t of items) lc.set(t.layer, (lc.get(t.layer) ?? 0) + 1);
             return {
