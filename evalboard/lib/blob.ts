@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
+import { DOCTOR_DIR, parseDoctorStatus, parseFixes, patchIds } from "./doctor";
 
 const ACCOUNT = "coderevaltests";
 
@@ -339,6 +340,76 @@ export async function ensureRunReviewIndex(
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
+    });
+}
+
+// skill-doctor report sidecars under `<runId>/skill-doctor/` (see lib/doctor.ts).
+// status.json changes while the doctor runs, so a copy older than a minute is
+// fetched again. The triage file it names (once `done`), fixes.json and the
+// patches are immutable and cached forever. No listing: every name comes from
+// status.json or fixes.json and is checked against its pattern first. 404s are
+// swallowed as for analysis.md.
+export const DOCTOR_STATUS_REFRESH_MS = 60_000;
+
+async function downloadOptional(
+    container: string,
+    blobName: string,
+    destRoot: string,
+    refreshAfterMs?: number,
+): Promise<void> {
+    try {
+        await downloadBlob(container, blobName, destRoot, refreshAfterMs);
+    } catch (err) {
+        if (!isNotFound(err)) throw err;
+    }
+}
+
+export async function ensureRunDoctor(
+    container: string,
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`doctor:${container}:${runId}`, async () => {
+        const base = `${runId}/${DOCTOR_DIR}`;
+        await downloadOptional(
+            container,
+            `${base}/status.json`,
+            destRoot,
+            DOCTOR_STATUS_REFRESH_MS,
+        );
+        const status = parseDoctorStatus(
+            await fs
+                .readFile(path.join(destRoot, base, "status.json"), "utf-8")
+                .catch(() => null),
+        );
+        if (!status) return;
+        const ops: Promise<void>[] = [];
+        if (status.state === "done" && status.triageFile) {
+            ops.push(
+                downloadOptional(container, `${base}/${status.triageFile}`, destRoot),
+            );
+        }
+        if (status.fixesDir) {
+            const dir = `${base}/${status.fixesDir}`;
+            ops.push(
+                (async () => {
+                    await downloadOptional(container, `${dir}/fixes.json`, destRoot);
+                    const fixes = parseFixes(
+                        await fs
+                            .readFile(path.join(destRoot, dir, "fixes.json"), "utf-8")
+                            .catch(() => null),
+                    );
+                    await Promise.all(
+                        patchIds(fixes).map((id) =>
+                            downloadOptional(container, `${dir}/${id}.patch`, destRoot),
+                        ),
+                    );
+                })(),
+            );
+        }
+        await Promise.all(ops);
     });
 }
 

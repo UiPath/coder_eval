@@ -1,0 +1,29 @@
+{
+ "schema_version": 1,
+ "run_id": "2099-01-03_04-23-30",
+ "fix_mode": "dryrun",
+ "base_sha": "0a1b2c3d4e",
+ "run_commit": "0a1b2c3d",
+ "pr_data": "gh",
+ "considered": 2,
+ "cost_usd": 2.5,
+ "total_cap_usd": 60,
+ "generated_at": "2099-01-03T09:20:00Z",
+ "skipped": [],
+ "candidates": [
+  {
+   "id": "example-grader-fix", "task_id": "example-t1", "covers": ["example-t1", "example-t3"], "layer": "grader",
+   "outcome": "pr-ready", "cost_usd": 1.5, "patch_lines": {"added": 3, "removed": 1}, "title": "fix(example): match the documented output",
+   "problem": "", "files": ["tests/tasks/example/example.yaml"], "overlap": [], "open_prs_on_files": [],
+   "gates": {"replay": {"status": "pass", "table": "", "evidence": ""}, "mutants": {"n": 10, "killed": 9, "survivors": 1, "pre_existing": 0},
+             "flip_judge": null, "genuine": null, "review": "SEND", "holes": null, "history": []}
+  },
+  {
+   "id": "example-skill-fix", "task_id": "example-t2", "covers": ["example-t2"], "layer": "skill",
+   "outcome": "needs-live-run", "cost_usd": 1.0, "patch_lines": null, "title": "",
+   "problem": "blocked-env", "files": [], "overlap": [], "open_prs_on_files": [],
+   "gates": {"replay": {"status": "blocked-env", "table": "", "evidence": ""}, "mutants": null,
+             "flip_judge": null, "genuine": null, "review": null, "holes": null, "history": []}
+  }
+ ]
+}

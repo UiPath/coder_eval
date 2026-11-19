@@ -9,6 +9,7 @@ import {
     findMatureSourceRuns,
     readActivationScore,
     readRunAnalysis,
+    readRunDoctor,
     readRunMeta,
     readRunSummary,
     readRunTasks,
@@ -24,6 +25,11 @@ import { sourceById } from "@/lib/sources";
 import { scalarParam } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
+import {
+    DoctorStatusLine,
+    TaskFailureAnalysis,
+} from "./task-failure-analysis";
+import { planAnalysis, taskAnalysisEnabled } from "@/lib/doctor";
 import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
 import { RunIdentity } from "./run-identity";
@@ -43,7 +49,14 @@ export default async function RunPage({
     // Which container this run lives in. Unknown/absent coerces to the skills
     // nightly, so every URL that predates the Scribe tab keeps resolving as-is.
     const source = sourceById(scalarParam((await searchParams).src));
-    const [summary, tasks, activation, analysis, reviewIndex, meta] =
+    // The skill-doctor report: internal-only, skills nightly only, with an env
+    // kill switch (EVALBOARD_TASK_ANALYSIS=off). readRunDoctor never throws.
+    const doctorOn = taskAnalysisEnabled(
+        isInternal,
+        source.id,
+        process.env.EVALBOARD_TASK_ANALYSIS,
+    );
+    const [summary, tasks, activation, analysis, reviewIndex, meta, doctor] =
         await Promise.all([
             readRunSummary(id, source),
             readRunTasks(id, source),
@@ -53,6 +66,7 @@ export default async function RunPage({
             readRunAnalysis(id, source),
             readRunReviewIndex(id, source),
             readRunMeta(id, source),
+            doctorOn ? readRunDoctor(id, source) : Promise.resolve(null),
         ]);
     if (!summary || !tasks) notFound();
     // Mature-skipped tasks weren't executed this run, so they have no detail page
@@ -85,6 +99,9 @@ export default async function RunPage({
     const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
     const human = fmtRunTime(id);
+    // A done report replaces analysis.md's Findings and everything below it;
+    // otherwise the AI summary is unchanged, plus a status line.
+    const plan = planAnalysis(analysis, doctor);
     const series = isInternal
         ? seriesForRun(source.id, {
               series: meta?.series ?? null,
@@ -156,7 +173,15 @@ export default async function RunPage({
                 )}
             </div>
 
-            {analysis && <AnalysisPanel markdown={analysis} />}
+            {plan.summary && <AnalysisPanel markdown={plan.summary} />}
+            {plan.statusLine && <DoctorStatusLine status={plan.statusLine} />}
+            {plan.panel && (
+                <TaskFailureAnalysis
+                    doctor={plan.panel}
+                    runId={id}
+                    sourceId={source.id}
+                />
+            )}
 
             {/* The header above streams as soon as run.json is parsed, but the
                 grid waits on the review index and the mature-source scan. With

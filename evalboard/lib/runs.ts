@@ -6,6 +6,7 @@ import {
     LOCAL_RUNS_DIR,
     ensureActivationSummary,
     ensureRunAnalysis,
+    ensureRunDoctor,
     ensureRunExperiment,
     ensureRunMeta,
     ensureRunSummary,
@@ -19,6 +20,13 @@ import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
 import { messageCostUsd, normalizeModel } from "./pricing";
+import {
+    DOCTOR_DIR,
+    parseDoctorStatus,
+    parseFixes,
+    parseTriage,
+    type RunDoctor,
+} from "./doctor";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -2680,6 +2688,41 @@ export async function readRunAnalysis(
         .catch(() => null);
 }
 
+// ---------- skill-doctor report (skill-doctor/ sidecars) ----------
+
+// The run's skill-doctor report, or null when there is none, it does not parse,
+// or its schema_version is not 1. Never throws: a doctor file problem must not
+// take the run page down, so a fetch error degrades to "no report".
+export async function readRunDoctor(
+    runId: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RunDoctor | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    try {
+        await ensureRunDoctor(source.container, runId, dir);
+    } catch (err) {
+        console.error(`ensureRunDoctor failed for run ${runId}:`, err);
+    }
+    const base = path.join(dir, runId, DOCTOR_DIR);
+    const read = (name: string) =>
+        fs.readFile(path.join(base, name), "utf-8").catch(() => null);
+    try {
+        const status = parseDoctorStatus(await read("status.json"));
+        if (!status) return null;
+        const triage =
+            status.state === "done" && status.triageFile
+                ? parseTriage(await read(status.triageFile))
+                : null;
+        const fixes = status.fixesDir
+            ? parseFixes(await read(path.join(status.fixesDir, "fixes.json")))
+            : null;
+        return { status, triage, fixes };
+    } catch (err) {
+        console.error(`readRunDoctor failed for run ${runId}:`, err);
+        return null;
+    }
+}
+
 // ---------- run metadata (meta.json sidecar) ----------
 
 // Optional, user-supplied at upload time. Null on pipeline runs and any run
@@ -2952,7 +2995,10 @@ export async function resolveSafePath(
     // (`activation/default/<task-id>/…`), so parts[0..1] are not (variant, task)
     // there; that case falls through to the run-summary fetch as it always did.
     const parts = relPath.split("/");
-    if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
+    if (parts[0] === DOCTOR_DIR) {
+        // skill-doctor sidecars (the fix patches) are fetched by name by
+        // readRunDoctor when the run page renders, never by a listing here.
+    } else if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
         if (!isValidId(parts[1])) return null;
         await ensureTaskDir(source.container, runId, parts[1], dir, parts[0]);
     } else {
