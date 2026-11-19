@@ -31,6 +31,8 @@ EXPECTED_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "gpt-5-6-sol": (5.0 + 30.0, 6.25),
     "gpt-5-6-terra": (2.0 + 12.0, 2.50),
     "gpt-5-6-luna": (0.20 + 1.20, 0.25),
+    "gpt-6-1-sol": (2.0 + 10.0, 2.50),
+    "gpt-6-1-terra": (1.0 + 5.0, 1.25),
     "kimi-k2-7-code": (0.95 + 4.0, 0.0),
     "glm-5-3-flash": (0.15 + 0.50, 0.0),
 }
