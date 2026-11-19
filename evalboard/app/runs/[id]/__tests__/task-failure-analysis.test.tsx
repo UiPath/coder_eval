@@ -294,7 +294,7 @@ describe("TaskFailureAnalysis block", () => {
         if (verdict === "none") d.fixes!.prChecks = {};
         else
             d.fixes!.prChecks["example-t2"] = {
-                ...d.fixes!.prChecks["example-t2"],
+                ...d.fixes!.prChecks["example-t2"]!,
                 verdict: "untested",
                 evidence: "no stored run could replay it",
                 reason: reason ? "needs-windows-run" : null,
@@ -319,7 +319,7 @@ describe("TaskFailureAnalysis block", () => {
     });
 
     test.each([
-        ["not_verified check", (d: RunDoctor) => { d.fixes!.prChecks["example-t2"].verdict = "not_verified"; }],
+        ["not_verified check", (d: RunDoctor) => { d.fixes!.prChecks["example-t2"]!.verdict = "not_verified"; }],
         ["may_help", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.verdict = "may_help"; }],
         ["unrelated", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.verdict = "unrelated"; }],
         ["merged PR", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.number = 127; }],
@@ -356,7 +356,7 @@ describe("TaskFailureAnalysis block", () => {
     ])("untested evidence %j renders as plain text under 'may fix'", (evidence) => {
         const d = doctor();
         d.fixes!.prChecks["example-t2"] = {
-            ...d.fixes!.prChecks["example-t2"],
+            ...d.fixes!.prChecks["example-t2"]!,
             verdict: "untested",
             evidence,
             headSha: "0123456789abcdef0123456789abcdef01234567",
@@ -370,9 +370,46 @@ describe("TaskFailureAnalysis block", () => {
         expect(within(row).getAllByRole("link")).toHaveLength(1);
     });
 
+    test("a malformed check for the task (even a not_verified one) shows nothing", () => {
+        const d = doctor();
+        // What parseFixes keeps for an entry that did not validate.
+        d.fixes!.prChecks["example-t2"] = null;
+        expect(existingPrFix(d, d.triage!.tasks[2])).toBeNull();
+        const raw = JSON.parse(read("fixes-1000001/fixes.json"));
+        raw.pr_checks["example-t2"] = { number: 126, url: "https://evil.example/pull/126", verdict: "not_verified", evidence: "" };
+        const d2 = { ...doctor(), fixes: parseFixes(JSON.stringify(raw)) };
+        renderBlock(d2);
+        openBlock();
+        openSkill("uipath-example-two");
+        const c = card("example-t2");
+        expect(within(c).queryByTestId("maybe-pr")).toBeNull();
+        expect(within(c).queryByTestId("proposed-pr")).toBeNull();
+    });
+
+    test("not-run candidates are hidden and do not lift the sort tier", () => {
+        const d = doctor();
+        d.fixes!.candidates = d.fixes!.candidates.map((c) => ({
+            ...c,
+            outcome: "not-run",
+            patchLines: null,
+            gates: { replay: null, mutants: null, review: null },
+        }));
+        d.triage!.tasks[2].fixedByPr = null;
+        renderBlock(d);
+        openBlock();
+        fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+        expect(block()).not.toHaveTextContent("not-run");
+        expect(screen.queryAllByTestId("fix-candidate")).toHaveLength(0);
+        expect(screen.queryAllByTestId("fix-prepared")).toHaveLength(0);
+        const g = groupBySkill(d, null, "");
+        // Nothing lifts either skill: more failed tasks first.
+        expect(g.map((x) => x.skill)).toEqual(["uipath-example-two", "uipath-example"]);
+        expect(g.every((x) => x.prepared === 0)).toBe(true);
+    });
+
     test("a check for another PR number does not verify this one", () => {
         const d = doctor();
-        d.fixes!.prChecks["example-t2"].number = 4;
+        d.fixes!.prChecks["example-t2"]!.number = 4;
         expect(existingPrFix(d, d.triage!.tasks[2])).toMatchObject({ verified: false, evidence: null });
     });
 
@@ -461,6 +498,40 @@ describe("untrusted keys", () => {
             const c = card("example-t1");
             expect(within(c).getAllByText(k).length).toBeGreaterThan(0);
             expect(screen.getByRole("toolbar", { name: "Filter failures" })).toHaveTextContent(k);
+        },
+    );
+});
+
+describe("prototype-named task ids", () => {
+    test.each(["constructor", "__proto__", "toString"])(
+        "task id %j: opened.json and pr_checks entries resolve to their own rows",
+        (k) => {
+            const d = doctor();
+            const t1 = { ...d.triage!.tasks[1], taskId: k };
+            const t2 = { ...d.triage!.tasks[2], taskId: `${k}-2` };
+            d.triage!.tasks = [t1, t2];
+            d.fixes!.candidates = [
+                { ...d.fixes!.candidates[0], taskId: k, covers: [k] },
+            ];
+            // As parsed from JSON text, so "__proto__" is an own key.
+            d.opened = JSON.parse(JSON.stringify({}).replace("{}", `{"${k}": "${OPENED}"}`));
+            d.fixes!.prChecks = JSON.parse(
+                `{"${k}-2": {"number": 126, "verdict": "verified", "evidence": "ok", "reason": null, "headSha": null}}`,
+            );
+            // t1 claims #126 too, but has no check of its own: "may fix".
+            t1.fixedByPr = { number: 126, verdict: "fixes", basis: "b" };
+            t1.existingPrs = t2.existingPrs;
+            renderBlock(d);
+            openBlock();
+            fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+            const c1 = screen.getAllByTestId("task-card").find((c) => within(c).queryByText(k))!;
+            expect(within(c1).getByRole("link", { name: "PR with fix: #300 ↗" })).toBeInTheDocument();
+            expect(within(c1).getByTestId("maybe-pr")).toHaveTextContent("#126");
+            const c2 = card(`${k}-2`);
+            expect(within(c2).getByTestId("proposed-pr")).toHaveTextContent("#126");
+            expect(within(c2).queryByTestId("pr-with-fix")).toBeNull();
+            // #300 (own) + #126 (verified on the second task).
+            expect(digest(d)).toBe("5 errors · 2 PRs with fix");
         },
     );
 });
@@ -556,7 +627,7 @@ describe("groupBySkill", () => {
         ];
         d.opened = { "w-opened": "https://github.com/UiPath/skills/pull/8" };
         d.fixes!.prChecks = {
-            "p-proposed": { number: 123, url: "https://github.com/UiPath/skills/pull/123", verdict: "verified", evidence: "", reason: null, headSha: null },
+            "p-proposed": { number: 123, verdict: "verified", evidence: "", reason: null, headSha: null },
         };
         const [g] = groupBySkill(d, null, "");
         expect(g.cards.map((t) => t.taskId)).toEqual([

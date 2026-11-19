@@ -9,6 +9,7 @@ import {
     isAdoUrl,
     isLinkableTaskId,
     isSkillsPrUrl,
+    own,
     patchIds,
     type DoctorFix,
     type DoctorPr,
@@ -84,15 +85,9 @@ export function RichText({ text }: { text: string }) {
             const url = seg.replace(/[.,;:]+$/, "");
             if (isSkillsPrUrl(url) || isAdoUrl(url)) {
                 out.push(
-                    <a
-                        key={`${i}-${j}`}
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-studio-blue hover:underline"
-                    >
+                    <ExtA key={`${i}-${j}`} href={url}>
                         {url}
-                    </a>,
+                    </ExtA>,
                     seg.slice(url.length),
                 );
             } else out.push(seg);
@@ -101,19 +96,27 @@ export function RichText({ text }: { text: string }) {
     return <>{out}</>;
 }
 
+/** An external link, opened in a new tab. Callers pass only allowlisted URLs. */
+function ExtA({
+    href,
+    className = "text-studio-blue hover:underline",
+    children,
+}: {
+    href: string;
+    className?: string;
+    children: ReactNode;
+}) {
+    return (
+        <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+            {children}
+        </a>
+    );
+}
+
 /** A build link only for a dev.azure.com URL; anything else is the label as text. */
 function BuildLink({ href, label }: { href: string; label: string }) {
     if (!isAdoUrl(href)) return <span>{label}</span>;
-    return (
-        <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-studio-blue hover:underline"
-        >
-            {label}
-        </a>
-    );
+    return <ExtA href={href}>{label}</ExtA>;
 }
 
 function prLabel(url: string): string {
@@ -171,20 +174,6 @@ interface FixCtx {
     linked: Set<string>;
 }
 
-function PatchCell({ fix, ctx }: { fix: DoctorFix; ctx: FixCtx }) {
-    if (!fix.patchLines) return null;
-    const text = `+${fix.patchLines.added}/-${fix.patchLines.removed}`;
-    if (!ctx.dir || !ctx.linked.has(fix.id)) return <span>{text}</span>;
-    return (
-        <a
-            href={patchHref(ctx.runId, ctx.sourceId, ctx.dir, fix.id)}
-            className="text-studio-blue hover:underline"
-        >
-            {text}
-        </a>
-    );
-}
-
 // ---------- grouping ----------
 
 export interface SkillGroup {
@@ -199,9 +188,11 @@ export interface SkillGroup {
     total: number;
 }
 
+// A candidate whose Fix stage never ran (outcome not-run) has no patch and no
+// gates: the board leaves it out entirely.
 export function fixesForTask(doctor: RunDoctor, taskId: string): DoctorFix[] {
     return (doctor.fixes?.candidates ?? []).filter(
-        (c) => c.taskId === taskId || c.covers.includes(taskId),
+        (c) => c.outcome !== "not-run" && (c.taskId === taskId || c.covers.includes(taskId)),
     );
 }
 
@@ -224,15 +215,15 @@ export interface ExistingPrFix {
  * verdict "fixes", the PR is open in the row's existing PRs, and the Fix
  * stage's pr_checks entry for the row (same number) is verified (counts as a
  * PR with fix) or untested / absent (shown as "may fix this", not counted).
- * not_verified, may_help and unrelated show nothing.
+ * not_verified, a malformed check, may_help and unrelated show nothing.
  */
 export function existingPrFix(doctor: RunDoctor, t: DoctorTask): ExistingPrFix | null {
     const f = t.fixedByPr;
     if (!f || f.verdict !== "fixes") return null;
     const pr = t.existingPrs.find((p) => p.state === "open" && p.url.endsWith(`/pull/${f.number}`));
     if (!pr) return null;
-    const checks = doctor.fixes?.prChecks;
-    const c = checks && Object.hasOwn(checks, t.taskId) ? checks[t.taskId] : null;
+    const c = own(doctor.fixes?.prChecks, t.taskId);
+    if (c === null) return null; // an entry that did not validate
     const check = c && c.number === f.number ? c : null;
     if (check?.verdict === "not_verified") return null;
     return {
@@ -255,31 +246,29 @@ export interface TaskFixes {
     // pr-ready candidates with no PR opened yet: "Fix prepared, PR not
     // opened yet". Not a PR with fix.
     prepared: DoctorFix[];
-    // Someone else's open PR the doctor verified fixes this row ("Proposed
-    // PR"; a PR with fix), or one it could not verify ("Open PR may fix
-    // this", not counted). Never the doctor's own PR.
-    proposed: ExistingPrFix | null;
-    maybe: ExistingPrFix | null;
+    // Someone else's open PR for this row: verified ("Proposed PR"; a PR with
+    // fix) or not ("Open PR may fix this", not counted). Never the doctor's
+    // own PR.
+    existingPr: ExistingPrFix | null;
     // Other fix candidates (needs-live-run, ...).
     others: DoctorFix[];
-    // One key per distinct PR with fix (own or proposed), for counting.
+    // One key per distinct PR with fix (own or verified existing), for counting.
     keys: string[];
     // Card sort tier, lower first (see fixTier).
     tier: number;
 }
 
 function openedFor(doctor: RunDoctor, taskId: string): string | null {
-    const o = doctor.opened;
-    return o && Object.hasOwn(o, taskId) ? o[taskId] : null;
+    return own(doctor.opened, taskId) ?? null;
 }
 
 // Own PR, then a verified proposed PR, then a prepared fix, then an
 // unverified open PR, then other candidates, then the rest.
 function fixTier(f: Omit<TaskFixes, "tier" | "keys">): number {
     if (f.ownPr) return 0;
-    if (f.proposed) return 1;
+    if (f.existingPr?.verified) return 1;
     if (f.prepared.length) return 2;
-    if (f.maybe) return 3;
+    if (f.existingPr) return 3;
     if (f.others.length) return 4;
     return 5;
 }
@@ -293,16 +282,17 @@ export function taskFixes(doctor: RunDoctor, t: DoctorTask): TaskFixes {
         ready.map((c) => openedFor(doctor, c.taskId)).find((u) => u !== null) ??
         t.doctorPr;
     const ext = existingPrFix(doctor, t);
-    const other = ext && ext.pr.url !== ownPr ? ext : null;
     const base = {
         ownPr,
         ready,
         prepared: ownPr ? [] : ready,
-        proposed: other?.verified ? other : null,
-        maybe: other && !other.verified ? other : null,
+        existingPr: ext && ext.pr.url !== ownPr ? ext : null,
         others: cands.filter((c) => !isReady(c)),
     };
-    const keys = [...(ownPr ? [ownPr] : []), ...(base.proposed ? [base.proposed.pr.url] : [])];
+    const keys = [
+        ...(ownPr ? [ownPr] : []),
+        ...(base.existingPr?.verified ? [base.existingPr.pr.url] : []),
+    ];
     return { ...base, keys, tier: fixTier(base) };
 }
 
@@ -459,11 +449,23 @@ function Gates({ cands }: { cands: DoctorFix[] }) {
     return <span className="text-[11px] text-gray-600">{g.join("; ")}</span>;
 }
 
+// "patch +a/-r", linked to the download only for an id in patchIds.
 function Patch({ c, ctx }: { c: DoctorFix; ctx: FixCtx }) {
     if (!c.patchLines) return null;
+    const text = `+${c.patchLines.added}/-${c.patchLines.removed}`;
     return (
         <span className="tabular-nums">
-            patch <PatchCell fix={c} ctx={ctx} />
+            patch{" "}
+            {ctx.dir && ctx.linked.has(c.id) ? (
+                <a
+                    href={patchHref(ctx.runId, ctx.sourceId, ctx.dir, c.id)}
+                    className="text-studio-blue hover:underline"
+                >
+                    {text}
+                </a>
+            ) : (
+                <span>{text}</span>
+            )}
         </span>
     );
 }
@@ -496,14 +498,9 @@ function FixRow({
 
 function PrLink({ pr }: { pr: DoctorPr }) {
     return (
-        <a
-            href={pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-medium text-studio-blue hover:underline"
-        >
+        <ExtA href={pr.url} className="font-medium text-studio-blue hover:underline">
             {prLabel(pr.url)} {pr.title}
-        </a>
+        </ExtA>
     );
 }
 
@@ -530,20 +527,16 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
     if (fx.ownPr) {
         rows.push(
             <FixRow key="own" kind="own" testId="pr-with-fix">
-                <a
-                    href={fx.ownPr}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-semibold text-studio-blue hover:underline"
-                >
+                <ExtA href={fx.ownPr} className="font-semibold text-studio-blue hover:underline">
                     PR with fix: {prLabel(fx.ownPr)} ↗
-                </a>
+                </ExtA>
                 <Gates cands={fx.ready} />
             </FixRow>,
         );
     }
-    if (fx.proposed) {
-        const { pr, evidence, headSha } = fx.proposed;
+    const ext = fx.existingPr;
+    if (ext?.verified) {
+        const { pr, evidence, headSha } = ext;
         rows.push(
             <FixRow key="proposed" kind="proposed" testId="proposed-pr">
                 <b className="text-gray-800">Proposed PR</b>
@@ -562,8 +555,8 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
             </FixRow>,
         );
     }
-    if (fx.maybe) {
-        const { pr, basis, evidence, headSha, needsWindows } = fx.maybe;
+    if (ext && !ext.verified) {
+        const { pr, basis, evidence, headSha, needsWindows } = ext;
         rows.push(
             <FixRow key="maybe" kind="candidate" testId="maybe-pr">
                 <span className="text-gray-800">Open PR may fix this (not verified)</span>

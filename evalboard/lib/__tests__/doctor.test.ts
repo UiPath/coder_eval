@@ -171,6 +171,14 @@ describe("parseTriage / parseFixes", () => {
         expect(t.tasks[0].envGroup).toBe("connection example-conn");
     });
 
+    test("rows_executed must be a non-negative integer", () => {
+        const doc = JSON.parse(TRIAGE);
+        for (const [v, want] of [[10, 10], [0, 0], [-1, null], [2.5, null], ["10", null], [null, null]] as const) {
+            doc.run.rows_executed = v;
+            expect(parseTriage(JSON.stringify(doc))!.rowsRun).toBe(want);
+        }
+    });
+
     test("schema_version 2 or a broken triage is absent", () => {
         expect(parseTriage(JSON.stringify({ ...JSON.parse(TRIAGE), schema_version: 2 }))).toBeNull();
         expect(parseTriage("{")).toBeNull();
@@ -216,7 +224,7 @@ describe("parseTriage / parseFixes", () => {
         };
         const c = parseFixes(JSON.stringify(doc))!.prChecks;
         expect(Object.keys(c).sort()).toEqual(["a", "b", "c", "d"]);
-        expect([c.a.headSha, c.b.headSha, c.c.headSha, c.d.headSha]).toEqual([sha, null, null, null]);
+        expect([c.a!.headSha, c.b!.headSha, c.c!.headSha, c.d!.headSha]).toEqual([sha, null, null, null]);
     });
 
     test("pr_checks: well-formed entries by task; malformed ones skipped", () => {
@@ -234,11 +242,18 @@ describe("parseTriage / parseFixes", () => {
         // A "__proto__" task id, as JSON text (an object literal would set the prototype).
         const raw = JSON.stringify(doc).replace('"pr_checks":{', `"pr_checks":{"__proto__":${JSON.stringify(ok)},`);
         const checks = parseFixes(raw)!.prChecks;
-        expect(Object.keys(checks).sort()).toEqual(["__proto__", "good", "odd_reason"].sort());
-        expect(checks.good.reason).toBe("needs-windows-run");
+        // Malformed entries stay as null, so their task shows no PR row.
+        expect(Object.keys(checks).sort()).toEqual(
+            ["__proto__", "good", "odd_reason", "bad_host", "wrong_number", "bad_verdict", "no_number", "not_obj"].sort(),
+        );
+        for (const k of ["bad_host", "wrong_number", "bad_verdict", "no_number", "not_obj"]) {
+            expect(checks[k]).toBeNull();
+        }
+        expect(checks.__proto__).not.toBeNull();
+        expect(checks.good!.reason).toBe("needs-windows-run");
         // head_sha is optional: no key, null, or a malformed value all parse to null.
-        expect(checks.good.headSha).toBeNull();
-        expect(checks.odd_reason.reason).toBeNull();
+        expect(checks.good!.headSha).toBeNull();
+        expect(checks.odd_reason!.reason).toBeNull();
         expect(Object.getPrototypeOf(checks)).toBe(Object.prototype);
         doc.pr_checks = "nope";
         expect(parseFixes(JSON.stringify(doc))!.prChecks).toEqual({});

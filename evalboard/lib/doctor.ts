@@ -2,12 +2,13 @@
 // `<runId>/skill-doctor/`:
 //   - status.json: pointer + lock, changes while the doctor runs;
 //   - triage-<build>.json: the per-task failure analysis, immutable;
-//   - <fixes_dir>/fixes.json: proposed fixes, optional, create-only.
+//   - <fixes_dir>/fixes.json: fix candidates and pr_checks, optional, create-only;
+//   - <fixes_dir>/opened.json: the PRs the doctor's open step opened, optional.
 //
 // Pure data + string helpers, no Node builtins: the parsed shapes are passed to
 // the run page's components, and the tests import this module directly. The
-// types are written by hand against the doctor's status_v1 / triage_v1 schemas
-// and carry only the fields the run page renders. A file that does not parse,
+// types are written by hand against the doctor's status_v1 / triage_v1 /
+// fixes_v1 schemas and carry only the fields the run page renders. A file that does not parse,
 // or whose schema_version is not 1, is treated as absent: the page must never
 // fail because of a doctor file.
 
@@ -82,10 +83,11 @@ export interface DoctorFixedByPr {
     basis: string;
 }
 
-// The Fix stage's replay of a row's fixedByPr (fixes.json pr_checks).
+// The Fix stage's replay of a row's fixedByPr (fixes.json pr_checks). Its
+// url is validated (allowlisted, ends in /pull/<number>) but not kept: the
+// board links the PR from the row's existing PRs.
 export interface DoctorPrCheck {
     number: number;
-    url: string;
     verdict: "verified" | "not_verified" | "untested";
     evidence: string;
     reason: "needs-windows-run" | null;
@@ -126,8 +128,9 @@ export interface DoctorFix {
 
 export interface DoctorFixes {
     fixMode: string | null;
-    // By task id; built through a Map so task ids are always own keys.
-    prChecks: Record<string, DoctorPrCheck>;
+    // By task id (own keys; read with own()). null: an entry that did not
+    // validate.
+    prChecks: Record<string, DoctorPrCheck | null>;
     candidates: DoctorFix[];
 }
 
@@ -211,7 +214,6 @@ function parsePrCheck(v: unknown): DoctorPrCheck | null {
     if (verdict !== "verified" && verdict !== "not_verified" && verdict !== "untested") return null;
     return {
         number: n,
-        url: v.url,
         verdict,
         evidence: (str(v.evidence) ?? "").slice(0, 600),
         reason: v.reason === "needs-windows-run" ? "needs-windows-run" : null,
@@ -219,15 +221,19 @@ function parsePrCheck(v: unknown): DoctorPrCheck | null {
     };
 }
 
-function parsePrChecks(v: unknown): Record<string, DoctorPrCheck> {
-    const out = new Map<string, DoctorPrCheck>();
+// A malformed entry is kept as null, so its task shows no PR row rather than
+// falling back to "no check" (which would read as "may fix").
+function parsePrChecks(v: unknown): Record<string, DoctorPrCheck | null> {
+    const out = new Map<string, DoctorPrCheck | null>();
     if (isObj(v)) {
-        for (const [k, c] of Object.entries(v)) {
-            const p = parsePrCheck(c);
-            if (p) out.set(k, p);
-        }
+        for (const [k, c] of Object.entries(v)) out.set(k, parsePrCheck(c));
     }
     return Object.fromEntries(out);
+}
+
+/** A report-keyed lookup that never reads the prototype ("constructor", ...). */
+export function own<T>(r: Record<string, T> | null | undefined, key: string): T | undefined {
+    return r && Object.hasOwn(r, key) ? r[key] : undefined;
 }
 
 function prList(v: unknown): DoctorPr[] {
@@ -264,7 +270,12 @@ export function parseTriage(raw: string | null | undefined): DoctorTriage | null
     const s = j.summary;
     const run = isObj(j.run) ? j.run : {};
     return {
-        rowsRun: typeof run.rows_executed === "number" ? int(run.rows_executed) : null,
+        rowsRun:
+            typeof run.rows_executed === "number" &&
+            Number.isInteger(run.rows_executed) &&
+            run.rows_executed >= 0
+                ? run.rows_executed
+                : null,
         rowsFailed: int(s.rows_failed),
         rowsDiagnosed: int(s.rows_diagnosed),
         tasks: j.tasks.map(parseTask).filter((t): t is DoctorTask => t !== null),
