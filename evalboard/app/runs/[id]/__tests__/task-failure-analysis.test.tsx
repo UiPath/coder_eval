@@ -276,6 +276,37 @@ describe("TaskFailureAnalysis block", () => {
 });
 
 describe("groupBySkill", () => {
+    test("skills sort by PRs ready, then failed tasks, then name", () => {
+        // The fixture: uipath-example has 1 ready of 2 failed, -two 0 of 3.
+        expect(groupBySkill(doctor(), null, "").map((g) => g.skill)).toEqual([
+            "uipath-example",
+            "uipath-example-two",
+        ]);
+        // No PR ready anywhere: more failed tasks first.
+        const none = { ...doctor(), fixes: null };
+        expect(groupBySkill(none, null, "").map((g) => g.skill)).toEqual([
+            "uipath-example-two",
+            "uipath-example",
+        ]);
+        // Equal on both: by name.
+        const tie = doctor();
+        tie.fixes = null;
+        tie.triage!.tasks = [
+            { ...tie.triage!.tasks[1], skill: "b-skill", taskId: "x1" },
+            { ...tie.triage!.tasks[1], skill: "a-skill", taskId: "x2" },
+        ];
+        expect(groupBySkill(tie, null, "").map((g) => g.skill)).toEqual(["a-skill", "b-skill"]);
+    });
+
+    test("the rendered accordions follow the same order", () => {
+        renderBlock({ ...doctor(), fixes: null });
+        openBlock();
+        const order = Array.from(document.querySelectorAll("[data-skill]")).map((e) =>
+            e.getAttribute("data-skill"),
+        );
+        expect(order).toEqual(["uipath-example-two", "uipath-example"]);
+    });
+
     test("cards sorted by layer rank, env tasks grouped", () => {
         const g = groupBySkill(doctor(), null, "");
         expect(g.map((x) => x.skill)).toEqual(["uipath-example", "uipath-example-two"]);

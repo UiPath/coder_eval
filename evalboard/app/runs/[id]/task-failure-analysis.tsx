@@ -225,7 +225,10 @@ export function readyTasks(doctor: RunDoctor, taskIds: string[]): number {
     return taskIds.filter((id) => fixesForTask(doctor, id).some(isReady)).length;
 }
 
-/** Visible failures by skill, as the doctor's page groups them. */
+/**
+ * Visible failures by skill, as the doctor's page groups them. Skills with the
+ * most proposed PRs ready come first; ties go to more failed tasks, then name.
+ */
 export function groupBySkill(
     doctor: RunDoctor,
     active: Set<string> | null,
@@ -243,7 +246,6 @@ export function groupBySkill(
         by.set(k, [...(by.get(k) ?? []), t]);
     }
     return [...by.keys()]
-        .sort((a, b) => a.localeCompare(b))
         .map((skill) => {
             const items = by.get(skill)!;
             const groups = new Map<string, DoctorTask[]>();
@@ -265,7 +267,11 @@ export function groupBySkill(
                 ).length,
                 total: items.length,
             };
-        });
+        })
+        .sort(
+            (a, b) =>
+                b.ready - a.ready || b.total - a.total || a.skill.localeCompare(b.skill),
+        );
 }
 
 // ---------- cards ----------
