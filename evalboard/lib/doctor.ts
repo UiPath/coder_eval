@@ -67,11 +67,28 @@ export interface DoctorTask {
     criterion: string | null;
     evidence: string | null;
     passedBefore: string | null;
-    // Only the source of a third-party "Proposed PR" (an open PR the fix names).
+    // Open/merged PRs on the task's files; only used to resolve fixedByPr.
     existingPrs: DoctorPr[];
+    // The diagnosis's judgement of the open PR that best fixes this row.
+    fixedByPr: DoctorFixedByPr | null;
     envGroup: string | null;
     // The doctor's PR for this task, allowlisted (else null).
     doctorPr: string | null;
+}
+
+export interface DoctorFixedByPr {
+    number: number;
+    verdict: "fixes" | "may_help" | "unrelated";
+    basis: string;
+}
+
+// The Fix stage's replay of a row's fixedByPr (fixes.json pr_checks).
+export interface DoctorPrCheck {
+    number: number;
+    url: string;
+    verdict: "verified" | "not_verified" | "untested";
+    evidence: string;
+    reason: "needs-windows-run" | null;
 }
 
 export interface DoctorAction {
@@ -107,6 +124,8 @@ export interface DoctorFix {
 
 export interface DoctorFixes {
     fixMode: string | null;
+    // By task id; built through a Map so task ids are always own keys.
+    prChecks: Record<string, DoctorPrCheck>;
     candidates: DoctorFix[];
 }
 
@@ -172,6 +191,42 @@ function parsePr(v: unknown): DoctorPr | null {
     return { url, title: str(v.title) ?? "", state: str(v.state) ?? "unknown" };
 }
 
+function parseFixedByPr(v: unknown): DoctorFixedByPr | null {
+    if (!isObj(v)) return null;
+    const n = v.number;
+    const verdict = v.verdict;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return null;
+    if (verdict !== "fixes" && verdict !== "may_help" && verdict !== "unrelated") return null;
+    return { number: n, verdict, basis: (str(v.basis) ?? "").slice(0, 300) };
+}
+
+function parsePrCheck(v: unknown): DoctorPrCheck | null {
+    if (!isObj(v)) return null;
+    const n = v.number;
+    const verdict = v.verdict;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return null;
+    if (!isSkillsPrUrl(v.url) || !v.url.endsWith(`/pull/${n}`)) return null;
+    if (verdict !== "verified" && verdict !== "not_verified" && verdict !== "untested") return null;
+    return {
+        number: n,
+        url: v.url,
+        verdict,
+        evidence: (str(v.evidence) ?? "").slice(0, 600),
+        reason: v.reason === "needs-windows-run" ? "needs-windows-run" : null,
+    };
+}
+
+function parsePrChecks(v: unknown): Record<string, DoctorPrCheck> {
+    const out = new Map<string, DoctorPrCheck>();
+    if (isObj(v)) {
+        for (const [k, c] of Object.entries(v)) {
+            const p = parsePrCheck(c);
+            if (p) out.set(k, p);
+        }
+    }
+    return Object.fromEntries(out);
+}
+
 function prList(v: unknown): DoctorPr[] {
     return Array.isArray(v) ? v.map(parsePr).filter((p): p is DoctorPr => p !== null) : [];
 }
@@ -193,6 +248,7 @@ function parseTask(v: unknown): DoctorTask | null {
         evidence: str(v.evidence),
         passedBefore: str(v.passed_before),
         existingPrs: prList(v.existing_prs),
+        fixedByPr: parseFixedByPr(v.fixed_by_pr),
         envGroup: str(v.env_group),
         doctorPr: isSkillsPrUrl(v.doctor_pr) ? v.doctor_pr : null,
     };
@@ -237,6 +293,7 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
     if (!isObj(j) || j.schema_version !== 1 || !Array.isArray(j.candidates)) return null;
     return {
         fixMode: str(j.fix_mode),
+        prChecks: parsePrChecks(j.pr_checks),
         candidates: j.candidates.flatMap((c): DoctorFix[] => {
             if (!isObj(c)) return [];
             const id = str(c.id);

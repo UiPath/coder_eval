@@ -77,7 +77,8 @@
    "related": null,
    "passed_before": null,
    "existing_prs": null,
-   "doctor_pr": null
+   "doctor_pr": null,
+   "fixed_by_pr": null
   },
   {
    "task_id": "example-t1",
@@ -128,7 +129,8 @@
      "title": "docs(example): document the output",
      "state": "merged"
     }
-   ]
+   ],
+   "fixed_by_pr": null
   },
   {
    "task_id": "example-t2",
@@ -149,7 +151,7 @@
    "why": "The skill documents a removed flag.",
    "evidence": null,
    "solvable": "yes-skill",
-   "fix": "Document the current flag. Open PR #126 already does this; #127 tried before.",
+   "fix": "Document the current flag.",
    "related": null,
    "passed_before": null,
    "existing_prs": [
@@ -164,7 +166,12 @@
      "state": "merged"
     }
    ],
-   "doctor_pr": null
+   "doctor_pr": null,
+   "fixed_by_pr": {
+    "number": 126,
+    "verdict": "fixes",
+    "basis": "The PR documents the current flag in the skill's reference page."
+   }
   },
   {
    "task_id": "example-e2",
@@ -191,7 +198,8 @@
    "related": null,
    "passed_before": null,
    "existing_prs": null,
-   "doctor_pr": null
+   "doctor_pr": null,
+   "fixed_by_pr": null
   },
   {
    "task_id": "example-e3",
@@ -218,7 +226,8 @@
    "related": null,
    "passed_before": null,
    "existing_prs": null,
-   "doctor_pr": null
+   "doctor_pr": null,
+   "fixed_by_pr": null
   }
  ],
  "actions": [

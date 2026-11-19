@@ -6,7 +6,7 @@ import {
     countFixPrs,
     digest,
     groupBySkill,
-    proposedPrs,
+    existingPrFix,
     TaskFailureAnalysis,
 } from "../task-failure-analysis";
 import {
@@ -26,8 +26,8 @@ function status(patch: Record<string, unknown> = {}) {
 }
 
 // The fixture: example-t1 has a pr-ready fix with no PR opened yet; example-t2
-// has a needs-live-run candidate and its fix text names open PR #126 (and
-// merged #127).
+// has a needs-live-run candidate, and the diagnosis says open PR #126 fixes it
+// (fixed_by_pr "fixes"), which the Fix stage verified (pr_checks).
 function doctor(patch: Record<string, unknown> = {}): RunDoctor {
     const s = status(patch);
     return {
@@ -63,7 +63,7 @@ describe("digest", () => {
     });
     test("no linked PR: the errors only", () => {
         const d = doctor();
-        d.triage!.tasks[2].fix = "Document the current flag.";
+        d.triage!.tasks[2].fixedByPr = null;
         expect(digest(d)).toBe("5 errors");
     });
     test("not done: the state", () => {
@@ -268,20 +268,91 @@ describe("TaskFailureAnalysis block", () => {
         ).toBeInTheDocument();
     });
 
-    test("a third-party open PR named in the fix text: a Proposed PR row", () => {
+    test("a verified third-party PR: a Proposed PR row with the evidence", () => {
         renderBlock();
         openBlock();
         openSkill("uipath-example-two");
         const c = card("example-t2");
         const rows = within(c).getAllByTestId("proposed-pr");
-        // #127 is named too, but merged: it does not count.
         expect(rows).toHaveLength(1);
         expect(rows[0]).toHaveTextContent("Proposed PR#126 docs(example-two): document the current flagopen");
+        expect(rows[0]).toHaveTextContent("run_command flips to pass on both");
+        expect(within(c).queryByTestId("maybe-pr")).toBeNull();
         expect(within(rows[0]).getByRole("link")).toHaveAttribute(
             "href",
             "https://github.com/UiPath/skills/pull/126",
         );
         expect(within(c).getByTestId("fix-candidate")).toHaveTextContent("Fix candidate: needs-live-run");
+    });
+
+    test.each([
+        ["untested", undefined],
+        ["untested", "needs-windows-run"],
+        ["none", undefined],
+    ])("check %s (%s): 'Open PR may fix this (not verified)', not counted", (verdict, reason) => {
+        const d = doctor();
+        if (verdict === "none") d.fixes!.prChecks = {};
+        else
+            d.fixes!.prChecks["example-t2"] = {
+                ...d.fixes!.prChecks["example-t2"],
+                verdict: "untested",
+                evidence: "no stored run could replay it",
+                reason: reason ? "needs-windows-run" : null,
+            };
+        expect(digest(d)).toBe("5 errors");
+        renderBlock(d);
+        openBlock();
+        openSkill("uipath-example-two");
+        const c = card("example-t2");
+        expect(within(c).queryByTestId("proposed-pr")).toBeNull();
+        const row = within(c).getByTestId("maybe-pr");
+        expect(row).toHaveTextContent("Open PR may fix this (not verified)");
+        expect(within(row).getByRole("link", { name: /#126/ })).toHaveAttribute(
+            "href",
+            "https://github.com/UiPath/skills/pull/126",
+        );
+        expect(row).toHaveTextContent("documents the current flag");
+        if (verdict === "none") expect(row).not.toHaveTextContent("replay");
+        else expect(row).toHaveTextContent("no stored run could replay it");
+        if (reason) expect(row).toHaveTextContent("needs a Windows run");
+        else expect(row).not.toHaveTextContent("Windows");
+    });
+
+    test.each([
+        ["not_verified check", (d: RunDoctor) => { d.fixes!.prChecks["example-t2"].verdict = "not_verified"; }],
+        ["may_help", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.verdict = "may_help"; }],
+        ["unrelated", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.verdict = "unrelated"; }],
+        ["merged PR", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.number = 127; }],
+        ["PR not in existing_prs", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr!.number = 999; }],
+        ["no fixed_by_pr", (d: RunDoctor) => { d.triage!.tasks[2].fixedByPr = null; }],
+    ])("%s: no PR row", (_name, mutate) => {
+        const d = doctor();
+        mutate(d);
+        expect(digest(d)).toBe("5 errors");
+        renderBlock(d);
+        openBlock();
+        openSkill("uipath-example-two");
+        const c = card("example-t2");
+        expect(within(c).queryByTestId("proposed-pr")).toBeNull();
+        expect(within(c).queryByTestId("maybe-pr")).toBeNull();
+    });
+
+    test("a PR only cited in the fix text shows nothing (no prose parsing)", () => {
+        const d = doctor();
+        // #123 is open on t1's files and named in its fix text, but there is no fixed_by_pr.
+        d.triage!.tasks[1].fix = "Open PR #123 (https://github.com/UiPath/skills/pull/123) already fixes this.";
+        renderBlock(d);
+        openBlock();
+        openSkill("uipath-example");
+        const c = card("example-t1");
+        expect(within(c).queryByTestId("proposed-pr")).toBeNull();
+        expect(within(c).queryByTestId("maybe-pr")).toBeNull();
+    });
+
+    test("a check for another PR number does not verify this one", () => {
+        const d = doctor();
+        d.fixes!.prChecks["example-t2"].number = 4;
+        expect(existingPrFix(d, d.triage!.tasks[2])).toMatchObject({ verified: false, evidence: null });
     });
 
     test("an unsafe patch id shows its size without a link", () => {
@@ -407,7 +478,7 @@ describe("doctor PR resolution", () => {
     test("no placeholder row for a fixable task without any PR or candidate", () => {
         const d = doctor();
         d.fixes = null;
-        d.triage!.tasks[2].fix = "no PR named";
+        d.triage!.tasks[2].fixedByPr = null;
         renderBlock(d);
         openBlock();
         fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
@@ -424,7 +495,7 @@ describe("groupBySkill", () => {
         ]);
         // Without #126, the prepared fix beats more failed tasks.
         const d = doctor();
-        d.triage!.tasks[2].fix = "no PR named";
+        d.triage!.tasks[2].fixedByPr = null;
         expect(groupBySkill(d, null, "").map((g) => g.skill)).toEqual([
             "uipath-example",
             "uipath-example-two",
@@ -443,7 +514,7 @@ describe("groupBySkill", () => {
         expect(groupBySkill(tie, null, "").map((g) => g.skill)).toEqual(["a-skill", "b-skill"]);
     });
 
-    test("cards: own PR, proposed PR, prepared fix, other candidates, the rest", () => {
+    test("cards: own PR, verified PR, prepared fix, unverified PR, other candidates, the rest", () => {
         const d = doctor();
         const base = { ...d.triage!.tasks[1], doctorPr: null, fix: "plain" };
         d.triage!.tasks = [
@@ -453,7 +524,8 @@ describe("groupBySkill", () => {
             { ...base, taskId: "y-prepared", layer: "grader" },
             { ...base, taskId: "w-opened", layer: "grader" },
             { ...base, taskId: "x-doctor-pr", layer: "grader", doctorPr: "https://github.com/UiPath/skills/pull/7" },
-            { ...base, taskId: "p-proposed", layer: "grader", fix: "see #123" },
+            { ...base, taskId: "p-proposed", layer: "grader", fixedByPr: { number: 123, verdict: "fixes", basis: "" } },
+            { ...base, taskId: "q-maybe", layer: "grader", fixedByPr: { number: 123, verdict: "fixes", basis: "" } },
             { ...d.triage!.tasks[0], skill: base.skill },
         ];
         d.fixes!.candidates = [
@@ -462,25 +534,29 @@ describe("groupBySkill", () => {
             { ...d.fixes!.candidates[1], id: "f2", taskId: "m-live", covers: ["m-live"] },
         ];
         d.opened = { "w-opened": "https://github.com/UiPath/skills/pull/8" };
+        d.fixes!.prChecks = {
+            "p-proposed": { number: 123, url: "https://github.com/UiPath/skills/pull/123", verdict: "verified", evidence: "", reason: null },
+        };
         const [g] = groupBySkill(d, null, "");
         expect(g.cards.map((t) => t.taskId)).toEqual([
             "w-opened",
             "x-doctor-pr",
             "p-proposed",
             "y-prepared",
+            "q-maybe",
             "m-live",
             // The rest: skill ranks after grader on the doctor page, so first.
             "z-plain-skill",
             "a-plain-grader",
         ]);
         expect(g.envGroups.map((e) => e.tasks.map((t) => t.taskId))).toEqual([["example-e1"]]);
-        // Linked: #8, #7, #123. The prepared f1 is not.
+        // Linked: #8, #7, #123 (verified). The prepared f1 and the unverified q-maybe are not.
         expect(g.fixPrs).toBe(3);
     });
 
     test("the rendered accordions follow the same order", () => {
         const d = doctor();
-        d.triage!.tasks[2].fix = "no PR named";
+        d.triage!.tasks[2].fixedByPr = null;
         renderBlock(d);
         openBlock();
         const order = Array.from(document.querySelectorAll("[data-skill]")).map((e) =>
@@ -489,20 +565,12 @@ describe("groupBySkill", () => {
         expect(order).toEqual(["uipath-example", "uipath-example-two"]);
     });
 
-    test("proposedPrs: named in the fix text and open (URLs are allowlisted by the parser)", () => {
-        const t = doctor().triage!.tasks[2];
-        expect(proposedPrs(t).map((p) => p.url)).toEqual(["https://github.com/UiPath/skills/pull/126"]);
-        expect(proposedPrs({ ...t, fix: "see https://github.com/UiPath/skills/pull/126" })).toHaveLength(1);
-        expect(proposedPrs({ ...t, fix: "see #1260 and #12" })).toHaveLength(0);
-        expect(proposedPrs({ ...t, fix: null })).toHaveLength(0);
-        expect(proposedPrs({ ...t, existingPrs: [{ ...t.existingPrs[0], state: "unknown" }] })).toHaveLength(0);
-    });
-
     test("countFixPrs counts each linked PR once, and never a prepared fix", () => {
         const d = doctor();
-        d.triage!.tasks[1].fix = "see #126";
+        d.triage!.tasks[1].fixedByPr = d.triage!.tasks[2].fixedByPr;
         d.triage!.tasks[1].existingPrs = d.triage!.tasks[2].existingPrs;
-        // t1 and t2 both name #126: one PR.
+        d.fixes!.prChecks["example-t1"] = d.fixes!.prChecks["example-t2"];
+        // t1 and t2 both verified against #126: one PR.
         expect(countFixPrs(d, d.triage!.tasks)).toBe(1);
     });
 });

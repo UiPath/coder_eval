@@ -205,21 +205,42 @@ export function fixesForTask(doctor: RunDoctor, taskId: string): DoctorFix[] {
     );
 }
 
-// "#N" or ".../pull/N" in a task's fix text.
-const PR_REF_RE = /(?:#|\/pull\/)(\d+)\b/g;
+export interface ExistingPrFix {
+    pr: DoctorPr;
+    // The Fix stage replayed the PR and it flipped the row ("Proposed PR").
+    verified: boolean;
+    // The diagnosis's reason for naming this PR.
+    basis: string;
+    // The replay's evidence, when there was a check.
+    evidence: string | null;
+    // The check could not run: it needs a Windows run.
+    needsWindows: boolean;
+}
 
 /**
- * A third-party proposed PR: the task's fix text names it AND it is one of the
- * task's existing PRs, open, with an allowlisted URL. Merged or unknown PRs
- * do not count.
+ * Someone else's open PR that fixes this row, from the doctor's structured
+ * fields only (no reading of prose): the diagnosis says `fixed_by_pr` with
+ * verdict "fixes", the PR is open in the row's existing PRs, and the Fix
+ * stage's pr_checks entry for the row (same number) is verified (counts as a
+ * PR with fix) or untested / absent (shown as "may fix this", not counted).
+ * not_verified, may_help and unrelated show nothing.
  */
-export function proposedPrs(t: DoctorTask): DoctorPr[] {
-    if (!t.fix) return [];
-    const named = new Set([...t.fix.matchAll(PR_REF_RE)].map((m) => m[1]));
-    // existing_prs URLs are allowlisted by the parser, so each ends in /pull/N.
-    return t.existingPrs.filter(
-        (p) => p.state === "open" && named.has(/(\d+)$/.exec(p.url)?.[1] ?? ""),
-    );
+export function existingPrFix(doctor: RunDoctor, t: DoctorTask): ExistingPrFix | null {
+    const f = t.fixedByPr;
+    if (!f || f.verdict !== "fixes") return null;
+    const pr = t.existingPrs.find((p) => p.state === "open" && p.url.endsWith(`/pull/${f.number}`));
+    if (!pr) return null;
+    const checks = doctor.fixes?.prChecks;
+    const c = checks && Object.hasOwn(checks, t.taskId) ? checks[t.taskId] : null;
+    const check = c && c.number === f.number ? c : null;
+    if (check?.verdict === "not_verified") return null;
+    return {
+        pr,
+        verified: check?.verdict === "verified",
+        basis: f.basis,
+        evidence: check?.evidence || null,
+        needsWindows: check?.reason === "needs-windows-run",
+    };
 }
 
 export interface TaskFixes {
@@ -232,8 +253,11 @@ export interface TaskFixes {
     // pr-ready candidates with no PR opened yet: "Fix prepared, PR not
     // opened yet". Not a PR with fix.
     prepared: DoctorFix[];
-    // Third-party open PRs the fix text names ("Proposed PR"), minus ownPr.
-    proposed: DoctorPr[];
+    // Someone else's open PR the doctor verified fixes this row ("Proposed
+    // PR"; a PR with fix), or one it could not verify ("Open PR may fix
+    // this", not counted). Never the doctor's own PR.
+    proposed: ExistingPrFix | null;
+    maybe: ExistingPrFix | null;
     // Other fix candidates (needs-live-run, ...).
     others: DoctorFix[];
     // One key per distinct PR with fix (own or proposed), for counting.
@@ -247,14 +271,15 @@ function openedFor(doctor: RunDoctor, taskId: string): string | null {
     return o && Object.hasOwn(o, taskId) ? o[taskId] : null;
 }
 
-// Own PR, then a proposed PR, then a prepared fix, then other candidates,
-// then the rest.
+// Own PR, then a verified proposed PR, then a prepared fix, then an
+// unverified open PR, then other candidates, then the rest.
 function fixTier(f: Omit<TaskFixes, "tier" | "keys">): number {
     if (f.ownPr) return 0;
-    if (f.proposed.length) return 1;
+    if (f.proposed) return 1;
     if (f.prepared.length) return 2;
-    if (f.others.length) return 3;
-    return 4;
+    if (f.maybe) return 3;
+    if (f.others.length) return 4;
+    return 5;
 }
 
 export function taskFixes(doctor: RunDoctor, t: DoctorTask): TaskFixes {
@@ -265,14 +290,17 @@ export function taskFixes(doctor: RunDoctor, t: DoctorTask): TaskFixes {
         openedFor(doctor, t.taskId) ??
         ready.map((c) => openedFor(doctor, c.taskId)).find((u) => u !== null) ??
         t.doctorPr;
+    const ext = existingPrFix(doctor, t);
+    const other = ext && ext.pr.url !== ownPr ? ext : null;
     const base = {
         ownPr,
         ready,
         prepared: ownPr ? [] : ready,
-        proposed: proposedPrs(t).filter((p) => p.url !== ownPr),
+        proposed: other?.verified ? other : null,
+        maybe: other && !other.verified ? other : null,
         others: cands.filter((c) => !isReady(c)),
     };
-    const keys = [...(ownPr ? [ownPr] : []), ...base.proposed.map((p) => p.url)];
+    const keys = [...(ownPr ? [ownPr] : []), ...(base.proposed ? [base.proposed.pr.url] : [])];
     return { ...base, keys, tier: fixTier(base) };
 }
 
@@ -281,7 +309,7 @@ export function countPrepared(doctor: RunDoctor, tasks: DoctorTask[]): number {
     return tasks.filter((t) => taskFixes(doctor, t).prepared.length > 0).length;
 }
 
-/** Distinct PRs with fix (the doctor's own or a proposed one) over these tasks. */
+/** Distinct PRs with fix (the doctor's own or a verified proposed one) over these tasks. */
 export function countFixPrs(doctor: RunDoctor, tasks: DoctorTask[]): number {
     return new Set(tasks.flatMap((t) => taskFixes(doctor, t).keys)).size;
 }
@@ -464,9 +492,27 @@ function FixRow({
     );
 }
 
+function PrLink({ pr }: { pr: DoctorPr }) {
+    return (
+        <a
+            href={pr.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-studio-blue hover:underline"
+        >
+            {prLabel(pr.url)} {pr.title}
+        </a>
+    );
+}
+
+function Small({ children }: { children: ReactNode }) {
+    return <span className="basis-full text-[11px] text-gray-600">{children}</span>;
+}
+
 // The card's PR rows: "PR with fix" (the doctor's PR), "Proposed PR" (someone
-// else's open PR that the fix names), "Fix prepared, PR not opened yet", and
-// "Fix candidate: <outcome>" for candidates that are not ready.
+// else's open PR, verified by the doctor's replay), "Fix prepared, PR not
+// opened yet", "Open PR may fix this (not verified)", and "Fix candidate:
+// <outcome>" for candidates that are not ready.
 function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
     const rows: ReactNode[] = [];
     if (fx.ownPr) {
@@ -484,19 +530,14 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
             </FixRow>,
         );
     }
-    for (const p of fx.proposed) {
+    if (fx.proposed) {
+        const { pr, evidence } = fx.proposed;
         rows.push(
-            <FixRow key={p.url} kind="proposed" testId="proposed-pr">
+            <FixRow key="proposed" kind="proposed" testId="proposed-pr">
                 <b className="text-gray-800">Proposed PR</b>
-                <a
-                    href={p.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-medium text-studio-blue hover:underline"
-                >
-                    {prLabel(p.url)} {p.title}
-                </a>
-                <span className="text-gray-600">{p.state}</span>
+                <PrLink pr={pr} />
+                <span className="text-gray-600">{pr.state}</span>
+                {evidence && <Small>{evidence}</Small>}
             </FixRow>,
         );
     }
@@ -506,6 +547,18 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
                 <span className="text-gray-800">Fix prepared, PR not opened yet</span>
                 <Patch c={c} ctx={ctx} />
                 <Gates cands={[c]} />
+            </FixRow>,
+        );
+    }
+    if (fx.maybe) {
+        const { pr, basis, evidence, needsWindows } = fx.maybe;
+        rows.push(
+            <FixRow key="maybe" kind="candidate" testId="maybe-pr">
+                <span className="text-gray-800">Open PR may fix this (not verified)</span>
+                <PrLink pr={pr} />
+                {needsWindows && <span className="text-gray-600">needs a Windows run</span>}
+                {basis && <Small>{basis}</Small>}
+                {evidence && <Small>{evidence}</Small>}
             </FixRow>,
         );
     }

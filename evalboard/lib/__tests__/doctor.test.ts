@@ -177,6 +177,58 @@ describe("parseTriage / parseFixes", () => {
         expect(parseTriage(JSON.stringify({ schema_version: 1 }))).toBeNull();
     });
 
+    test("fixed_by_pr: parsed when well-formed, else null", () => {
+        const doc = JSON.parse(TRIAGE);
+        expect(parseTriage(TRIAGE)!.tasks[2].fixedByPr).toEqual({
+            number: 126,
+            verdict: "fixes",
+            basis: expect.stringContaining("documents the current flag"),
+        });
+        for (const bad of [
+            { number: "126", verdict: "fixes", basis: "" },
+            { number: 0, verdict: "fixes", basis: "" },
+            { number: 1.5, verdict: "fixes", basis: "" },
+            { number: 126, verdict: "yes", basis: "" },
+            { number: 126 },
+            [126, "fixes"],
+            "126",
+        ]) {
+            doc.tasks[2].fixed_by_pr = bad;
+            expect(parseTriage(JSON.stringify(doc))!.tasks[2].fixedByPr).toBeNull();
+        }
+        doc.tasks[2].fixed_by_pr = { number: 5, verdict: "may_help", basis: 7 };
+        expect(parseTriage(JSON.stringify(doc))!.tasks[2].fixedByPr).toEqual({
+            number: 5,
+            verdict: "may_help",
+            basis: "",
+        });
+    });
+
+    test("pr_checks: well-formed entries by task; malformed ones skipped", () => {
+        const doc = JSON.parse(FIXES);
+        const ok = { number: 5, url: "https://github.com/UiPath/skills/pull/5", verdict: "untested", evidence: "e" };
+        doc.pr_checks = {
+            good: { ...ok, reason: "needs-windows-run" },
+            odd_reason: { ...ok, reason: "something-else" },
+            bad_host: { ...ok, url: "https://github.com.example.invalid/UiPath/skills/pull/5" },
+            wrong_number: { ...ok, url: "https://github.com/UiPath/skills/pull/6" },
+            bad_verdict: { ...ok, verdict: "fixed" },
+            no_number: { ...ok, number: null },
+            not_obj: "x",
+        };
+        // A "__proto__" task id, as JSON text (an object literal would set the prototype).
+        const raw = JSON.stringify(doc).replace('"pr_checks":{', `"pr_checks":{"__proto__":${JSON.stringify(ok)},`);
+        const checks = parseFixes(raw)!.prChecks;
+        expect(Object.keys(checks).sort()).toEqual(["__proto__", "good", "odd_reason"].sort());
+        expect(checks.good.reason).toBe("needs-windows-run");
+        expect(checks.odd_reason.reason).toBeNull();
+        expect(Object.getPrototypeOf(checks)).toBe(Object.prototype);
+        doc.pr_checks = "nope";
+        expect(parseFixes(JSON.stringify(doc))!.prChecks).toEqual({});
+        delete doc.pr_checks;
+        expect(parseFixes(JSON.stringify(doc))!.prChecks).toEqual({});
+    });
+
     test("doctor_pr is kept only when allowlisted", () => {
         const doc = JSON.parse(TRIAGE);
         doc.tasks[1].doctor_pr = "https://github.com/UiPath/skills/pull/9";
