@@ -204,6 +204,21 @@ describe("parseTriage / parseFixes", () => {
         });
     });
 
+    test("pr_checks: head_sha is kept when it is a 40-hex sha", () => {
+        const doc = JSON.parse(FIXES);
+        const sha = "0123456789abcdef0123456789abcdef01234567";
+        const base = doc.pr_checks["example-t2"];
+        doc.pr_checks = {
+            a: { ...base, head_sha: sha },
+            b: { ...base, head_sha: null },
+            c: { ...base, head_sha: "not-a-sha" },
+            d: { ...base },
+        };
+        const c = parseFixes(JSON.stringify(doc))!.prChecks;
+        expect(Object.keys(c).sort()).toEqual(["a", "b", "c", "d"]);
+        expect([c.a.headSha, c.b.headSha, c.c.headSha, c.d.headSha]).toEqual([sha, null, null, null]);
+    });
+
     test("pr_checks: well-formed entries by task; malformed ones skipped", () => {
         const doc = JSON.parse(FIXES);
         const ok = { number: 5, url: "https://github.com/UiPath/skills/pull/5", verdict: "untested", evidence: "e" };
@@ -221,6 +236,8 @@ describe("parseTriage / parseFixes", () => {
         const checks = parseFixes(raw)!.prChecks;
         expect(Object.keys(checks).sort()).toEqual(["__proto__", "good", "odd_reason"].sort());
         expect(checks.good.reason).toBe("needs-windows-run");
+        // head_sha is optional: no key, null, or a malformed value all parse to null.
+        expect(checks.good.headSha).toBeNull();
         expect(checks.odd_reason.reason).toBeNull();
         expect(Object.getPrototypeOf(checks)).toBe(Object.prototype);
         doc.pr_checks = "nope";

@@ -349,6 +349,27 @@ describe("TaskFailureAnalysis block", () => {
         expect(within(c).queryByTestId("maybe-pr")).toBeNull();
     });
 
+    test.each([
+        "looks like a relaxation, not a fix: the PR loosens the check",
+        "the PR drops the failing criterion run_command: needs review",
+        "stored failure on a criterion the yaml no longer has",
+    ])("untested evidence %j renders as plain text under 'may fix'", (evidence) => {
+        const d = doctor();
+        d.fixes!.prChecks["example-t2"] = {
+            ...d.fixes!.prChecks["example-t2"],
+            verdict: "untested",
+            evidence,
+            headSha: "0123456789abcdef0123456789abcdef01234567",
+        };
+        renderBlock(d);
+        openBlock();
+        openSkill("uipath-example-two");
+        const row = within(card("example-t2")).getByTestId("maybe-pr");
+        expect(row).toHaveTextContent(evidence);
+        expect(row).toHaveTextContent("(at 0123456)");
+        expect(within(row).getAllByRole("link")).toHaveLength(1);
+    });
+
     test("a check for another PR number does not verify this one", () => {
         const d = doctor();
         d.fixes!.prChecks["example-t2"].number = 4;
@@ -535,7 +556,7 @@ describe("groupBySkill", () => {
         ];
         d.opened = { "w-opened": "https://github.com/UiPath/skills/pull/8" };
         d.fixes!.prChecks = {
-            "p-proposed": { number: 123, url: "https://github.com/UiPath/skills/pull/123", verdict: "verified", evidence: "", reason: null },
+            "p-proposed": { number: 123, url: "https://github.com/UiPath/skills/pull/123", verdict: "verified", evidence: "", reason: null, headSha: null },
         };
         const [g] = groupBySkill(d, null, "");
         expect(g.cards.map((t) => t.taskId)).toEqual([

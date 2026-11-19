@@ -211,8 +211,9 @@ export interface ExistingPrFix {
     verified: boolean;
     // The diagnosis's reason for naming this PR.
     basis: string;
-    // The replay's evidence, when there was a check.
+    // The replay's evidence, when there was a check, and the PR head it used.
     evidence: string | null;
+    headSha: string | null;
     // The check could not run: it needs a Windows run.
     needsWindows: boolean;
 }
@@ -239,6 +240,7 @@ export function existingPrFix(doctor: RunDoctor, t: DoctorTask): ExistingPrFix |
         verified: check?.verdict === "verified",
         basis: f.basis,
         evidence: check?.evidence || null,
+        headSha: check?.headSha ?? null,
         needsWindows: check?.reason === "needs-windows-run",
     };
 }
@@ -509,6 +511,16 @@ function Small({ children }: { children: ReactNode }) {
     return <span className="basis-full text-[11px] text-gray-600">{children}</span>;
 }
 
+// The replay's evidence as plain text, with the PR head it ran at.
+function Evidence({ text, headSha }: { text: string; headSha: string | null }) {
+    return (
+        <Small>
+            {text}
+            {headSha && <span className="ml-1 font-mono text-gray-500">(at {headSha.slice(0, 7)})</span>}
+        </Small>
+    );
+}
+
 // The card's PR rows: "PR with fix" (the doctor's PR), "Proposed PR" (someone
 // else's open PR, verified by the doctor's replay), "Fix prepared, PR not
 // opened yet", "Open PR may fix this (not verified)", and "Fix candidate:
@@ -531,13 +543,13 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
         );
     }
     if (fx.proposed) {
-        const { pr, evidence } = fx.proposed;
+        const { pr, evidence, headSha } = fx.proposed;
         rows.push(
             <FixRow key="proposed" kind="proposed" testId="proposed-pr">
                 <b className="text-gray-800">Proposed PR</b>
                 <PrLink pr={pr} />
                 <span className="text-gray-600">{pr.state}</span>
-                {evidence && <Small>{evidence}</Small>}
+                {evidence && <Evidence text={evidence} headSha={headSha} />}
             </FixRow>,
         );
     }
@@ -551,14 +563,14 @@ function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
         );
     }
     if (fx.maybe) {
-        const { pr, basis, evidence, needsWindows } = fx.maybe;
+        const { pr, basis, evidence, headSha, needsWindows } = fx.maybe;
         rows.push(
             <FixRow key="maybe" kind="candidate" testId="maybe-pr">
                 <span className="text-gray-800">Open PR may fix this (not verified)</span>
                 <PrLink pr={pr} />
                 {needsWindows && <span className="text-gray-600">needs a Windows run</span>}
                 {basis && <Small>{basis}</Small>}
-                {evidence && <Small>{evidence}</Small>}
+                {evidence && <Evidence text={evidence} headSha={headSha} />}
             </FixRow>,
         );
     }

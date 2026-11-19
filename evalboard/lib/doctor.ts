@@ -89,6 +89,8 @@ export interface DoctorPrCheck {
     verdict: "verified" | "not_verified" | "untested";
     evidence: string;
     reason: "needs-windows-run" | null;
+    // The PR head the check applied (40 hex), when the doctor recorded it.
+    headSha: string | null;
 }
 
 export interface DoctorAction {
@@ -213,6 +215,7 @@ function parsePrCheck(v: unknown): DoctorPrCheck | null {
         verdict,
         evidence: (str(v.evidence) ?? "").slice(0, 600),
         reason: v.reason === "needs-windows-run" ? "needs-windows-run" : null,
+        headSha: typeof v.head_sha === "string" && /^[0-9a-f]{40}$/.test(v.head_sha) ? v.head_sha : null,
     };
 }
 
