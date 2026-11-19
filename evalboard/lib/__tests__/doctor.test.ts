@@ -158,7 +158,6 @@ describe("parseTriage / parseFixes", () => {
             criterion: "file_contains",
             passedBefore: "2099-01-01_04-20-00 (claude-code)",
             related: "example-t3 fails the same check",
-            owners: ["Example Owner", "Second Owner"],
             envGroup: null,
             doctorPr: null,
         });

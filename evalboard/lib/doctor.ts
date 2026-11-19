@@ -67,7 +67,6 @@ export interface DoctorTask {
     evidence: string | null;
     passedBefore: string | null;
     related: string | null;
-    owners: string[];
     existingPrs: DoctorPr[];
     relatedSkillPrs: DoctorPr[];
     envGroup: string | null;
@@ -118,6 +117,9 @@ export interface RunDoctor {
     // Set only when the status is `done` and its triage file parsed.
     triage: DoctorTriage | null;
     fixes: DoctorFixes | null;
+    // Prepared PR bodies (`<fixes_dir>/<id>.md`) of pr-ready candidates in
+    // patchIds, by candidate id. Markdown text, rendered without raw HTML.
+    fixBodies?: Record<string, string>;
 }
 
 // ---------- coercion helpers ----------
@@ -197,7 +199,6 @@ function parseTask(v: unknown): DoctorTask | null {
         evidence: str(v.evidence),
         passedBefore: str(v.passed_before),
         related: str(v.related),
-        owners: strList(v.owners),
         existingPrs: prList(v.existing_prs),
         relatedSkillPrs: prList(v.related_skill_prs),
         envGroup: str(v.env_group),
@@ -283,6 +284,17 @@ export function patchIds(fixes: DoctorFixes | null): Set<string> {
     }
     return ids;
 }
+
+/** The patchIds whose prepared PR body (`<id>.md`) the board loads: pr-ready only. */
+export function bodyIds(fixes: DoctorFixes | null): string[] {
+    const ids = patchIds(fixes);
+    return (fixes?.candidates ?? [])
+        .filter((c) => c.outcome === "pr-ready" && ids.has(c.id))
+        .map((c) => c.id);
+}
+
+// A prepared PR body is a few KB; anything far larger is cut.
+export const MAX_BODY_CHARS = 64_000;
 
 /** `<fixes_dir>/<id>.patch` → the id, or null for any other doctor path. */
 export function patchIdFromPath(rel: string): { fixesDir: string; id: string } | null {

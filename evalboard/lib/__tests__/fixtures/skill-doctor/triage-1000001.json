@@ -149,10 +149,21 @@
    "why": "The skill documents a removed flag.",
    "evidence": null,
    "solvable": "yes-skill",
-   "fix": "Document the current flag.",
+   "fix": "Document the current flag. Open PR #126 already does this; #127 tried before.",
    "related": null,
    "passed_before": null,
-   "existing_prs": [],
+   "existing_prs": [
+    {
+     "url": "https://github.com/UiPath/skills/pull/126",
+     "title": "docs(example-two): document the current flag",
+     "state": "open"
+    },
+    {
+     "url": "https://github.com/UiPath/skills/pull/127",
+     "title": "docs: older attempt",
+     "state": "merged"
+    }
+   ],
    "doctor_pr": null
   },
   {

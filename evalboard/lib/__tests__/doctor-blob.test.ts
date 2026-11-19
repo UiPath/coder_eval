@@ -48,6 +48,9 @@ function seedBlobs(status: string = STATUS) {
         [`${d}/fixes-1000001/example-grader-fix.patch`]: fixture(
             "fixes-1000001/example-grader-fix.patch",
         ),
+        [`${d}/fixes-1000001/example-grader-fix.md`]: fixture(
+            "fixes-1000001/example-grader-fix.md",
+        ),
     };
 }
 
@@ -115,6 +118,8 @@ describe("readRunDoctor: what it fetches", () => {
                 `${D}/triage-1000001.json`,
                 `${D}/fixes-1000001/fixes.json`,
                 `${D}/fixes-1000001/example-grader-fix.patch`,
+                // The pr-ready candidate's prepared PR body.
+                `${D}/fixes-1000001/example-grader-fix.md`,
             ].sort(),
         );
     });
@@ -183,6 +188,19 @@ describe("readRunDoctor", () => {
         expect(d?.status.state).toBe("done");
         expect(d?.triage?.tasks).toHaveLength(5);
         expect(d?.fixes?.candidates).toHaveLength(2);
+        // Only the pr-ready candidate in patchIds gets its body.
+        expect(Object.keys(d!.fixBodies!)).toEqual(["example-grader-fix"]);
+        expect(d!.fixBodies!["example-grader-fix"]).toContain("## Summary");
+    });
+
+    test("a body that is not in patchIds is never fetched", async () => {
+        const doc = JSON.parse(fixture("fixes-1000001/fixes.json"));
+        doc.candidates[0].patch_lines = null;
+        state.blobs[`${D}/fixes-1000001/fixes.json`] = JSON.stringify(doc);
+        const { readRunDoctor } = await import("../runs");
+        const d = await readRunDoctor(RUN);
+        expect(d!.fixBodies).toEqual({});
+        expect(state.downloads.some((n) => n.endsWith(".md"))).toBe(false);
     });
 
     test("never throws: a storage error is no report", async () => {
@@ -276,6 +294,8 @@ describe("readRunDoctor", () => {
             "skill-doctor/status.json",
             "skill-doctor/triage-1000001.json",
             "skill-doctor/fixes-1000001/fixes.json",
+            // Bodies travel in the page data; /api/file never serves a .md.
+            "skill-doctor/fixes-1000001/example-grader-fix.md",
             "skill-doctor/fixes-1000001/../status.json",
             "skill-doctor/other/x.patch",
             "skill-doctor/fixes-1000001/a/b.patch",

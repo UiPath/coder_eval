@@ -25,6 +25,8 @@ import {
     parseDoctorStatus,
     parseFixes,
     parseTriage,
+    bodyIds,
+    MAX_BODY_CHARS,
     patchIdFromPath,
     patchIds,
     taskAnalysisEnabled,
@@ -2745,13 +2747,27 @@ export async function readRunDoctor(
             triageRel ? load(triageRel, parseTriage) : null,
             fixesRel ? load(fixesRel, parseFixes) : null,
         ]);
-        // Cached patches are not fetched again (downloadBlob skips them).
+        // Cached patches and bodies are not fetched again (downloadBlob skips
+        // them). Bodies are read here and travel in the page data, so
+        // /api/file never serves a .md.
+        const fixBodies: Record<string, string> = {};
         if (status.fixesDir) {
+            const fdir = status.fixesDir;
+            const bodies = bodyIds(fixes);
+            await Promise.all([
+                ...[...patchIds(fixes)].map((id) => get(`${fdir}/${id}.patch`)),
+                ...bodies.map((id) => get(`${fdir}/${id}.md`)),
+            ]);
             await Promise.all(
-                [...patchIds(fixes)].map((id) => get(`${status.fixesDir}/${id}.patch`)),
+                bodies.map(async (id) => {
+                    const raw = await fs
+                        .readFile(path.join(base, fdir, `${id}.md`), "utf-8")
+                        .catch(() => null);
+                    if (raw !== null) fixBodies[id] = raw.slice(0, MAX_BODY_CHARS);
+                }),
             );
         }
-        return { status, triage, fixes };
+        return { status, triage, fixes, fixBodies };
     } catch (err) {
         console.error(`readRunDoctor failed for run ${runId}:`, err);
         return null;

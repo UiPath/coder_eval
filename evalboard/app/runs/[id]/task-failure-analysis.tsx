@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { withSource } from "@/app/_lib/source-param";
 import { fmtTimestamp, fmtUsd } from "@/lib/format";
 import {
@@ -139,7 +141,7 @@ function PrList({ prs }: { prs: DoctorPr[] }) {
 // ---------- digest + state ----------
 
 export function digest(doctor: RunDoctor): string {
-    const { status, triage, fixes } = doctor;
+    const { status, triage } = doctor;
     switch (status.state) {
         case "queued":
         case "running":
@@ -153,11 +155,9 @@ export function digest(doctor: RunDoctor): string {
             return "the report for this run was retracted";
         case "done": {
             if (!triage) return "report done, but its triage file is missing or did not parse";
-            const ready = (fixes?.candidates ?? []).filter(isReady).length;
+            const n = countFixPrs(doctor, triage.tasks);
             const errors = `${triage.rowsFailed} error${triage.rowsFailed === 1 ? "" : "s"}`;
-            return ready
-                ? `${errors} · ${ready} proposed PR${ready === 1 ? "" : "s"} ready`
-                : errors;
+            return n ? `${errors} · ${prsWithFix(n)}` : errors;
         }
     }
 }
@@ -209,7 +209,7 @@ export interface SkillGroup {
     cards: DoctorTask[];
     envGroups: { cause: string; tasks: DoctorTask[] }[];
     layerCounts: [string, number][];
-    // Tasks with a proposed PR ready: a pr-ready fix candidate or a doctor PR.
+    // Distinct PRs with a fix among the skill's tasks (countFixPrs).
     ready: number;
     total: number;
 }
@@ -220,14 +220,62 @@ export function fixesForTask(doctor: RunDoctor, taskId: string): DoctorFix[] {
     );
 }
 
-/** How many of these tasks have a pr-ready fix candidate. */
-export function readyTasks(doctor: RunDoctor, taskIds: string[]): number {
-    return taskIds.filter((id) => fixesForTask(doctor, id).some(isReady)).length;
+// "#N" or ".../pull/N" in a task's fix text.
+const PR_REF_RE = /(?:#|\/pull\/)(\d+)\b/g;
+
+/**
+ * A third-party proposed PR: the task's fix text names it AND it is one of the
+ * task's existing PRs, open, with an allowlisted URL. Merged or unknown PRs
+ * do not count.
+ */
+export function proposedPrs(t: DoctorTask): DoctorPr[] {
+    if (!t.fix) return [];
+    const named = new Set([...t.fix.matchAll(PR_REF_RE)].map((m) => m[1]));
+    return t.existingPrs.filter((p) => {
+        if (p.state !== "open" || !isSkillsPrUrl(p.url)) return false;
+        return named.has(/(\d+)$/.exec(p.url)![1]);
+    });
 }
+
+export interface TaskFixes {
+    // The doctor's own fix: its opened PR (allowlisted), else its prepared
+    // pr-ready candidates. Both render as "PR with fix".
+    doctorPr: string | null;
+    ready: DoctorFix[];
+    // Third-party open PRs the fix text points at ("Proposed PR").
+    proposed: DoctorPr[];
+    // Other fix candidates (needs-live-run, ...).
+    others: DoctorFix[];
+    // One key per distinct PR with a fix, for counting across tasks.
+    keys: string[];
+    // Card sort: own fix, then proposed PR, then other candidates, then rest.
+    tier: number;
+}
+
+export function taskFixes(doctor: RunDoctor, t: DoctorTask): TaskFixes {
+    const cands = fixesForTask(doctor, t.taskId);
+    const doctorPr = isSkillsPrUrl(t.doctorPr) ? t.doctorPr : null;
+    const ready = doctorPr ? [] : cands.filter(isReady);
+    const others = cands.filter((c) => !isReady(c));
+    const proposed = proposedPrs(t);
+    const keys = [
+        ...(doctorPr ? [`pr:${doctorPr}`] : ready.map((c) => `fix:${c.id}`)),
+        ...proposed.map((p) => `pr:${p.url}`),
+    ];
+    const tier = doctorPr || ready.length ? 0 : proposed.length ? 1 : others.length ? 2 : 3;
+    return { doctorPr, ready, proposed, others, keys, tier };
+}
+
+/** Distinct PRs with a fix (own or proposed) over these tasks. */
+export function countFixPrs(doctor: RunDoctor, tasks: DoctorTask[]): number {
+    return new Set(tasks.flatMap((t) => taskFixes(doctor, t).keys)).size;
+}
+
+const prsWithFix = (n: number) => `${n} PR${n === 1 ? "" : "s"} with fix`;
 
 /**
  * Visible failures by skill, as the doctor's page groups them. Skills with the
- * most proposed PRs ready come first; ties go to more failed tasks, then name.
+ * most PRs with fix come first; ties go to more failed tasks, then name.
  */
 export function groupBySkill(
     doctor: RunDoctor,
@@ -254,13 +302,9 @@ export function groupBySkill(
                 if (t.envGroup) groups.set(t.envGroup, [...(groups.get(t.envGroup) ?? []), t]);
                 else cards.push(t);
             }
-            // Proposed PR ready first, then other fix candidates, then the rest;
-            // within each, the doctor page's layer rank and task id.
-            const tier = (t: DoctorTask) => {
-                const c = fixesForTask(doctor, t.taskId);
-                if (isSkillsPrUrl(t.doctorPr) || c.some(isReady)) return 0;
-                return c.length ? 1 : 2;
-            };
+            // The doctor's own fix first, then a proposed PR, then other fix
+            // candidates, then the rest; within each, layer rank and task id.
+            const tier = (t: DoctorTask) => taskFixes(doctor, t).tier;
             cards.sort(
                 (a, b) =>
                     tier(a) - tier(b) ||
@@ -274,9 +318,7 @@ export function groupBySkill(
                 cards,
                 envGroups: [...groups.entries()].map(([cause, tasks]) => ({ cause, tasks })),
                 layerCounts: [...lc.entries()].sort((a, b) => rank(a[0]) - rank(b[0])),
-                ready: items.filter(
-                    (t) => isSkillsPrUrl(t.doctorPr) || fixesForTask(doctor, t.taskId).some(isReady),
-                ).length,
+                ready: countFixPrs(doctor, items),
                 total: items.length,
             };
         })
@@ -317,7 +359,7 @@ function TaskId({ id, ctx }: { id: string; ctx: FixCtx }) {
 
 function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: FixCtx }) {
     const layer = layerOf(t.layer);
-    const cands = fixesForTask(doctor, t.taskId);
+    const fx = taskFixes(doctor, t);
     const rows: [string, ReactNode, boolean?][] = [];
     if (t.fix) rows.push(["Fix", <RichText key="f" text={t.fix} />]);
     if (t.criterion) rows.push(["Failing check", <RichText key="c" text={t.criterion} />]);
@@ -327,7 +369,6 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
     if (t.relatedSkillPrs.length)
         rows.push(["Related skill PRs", <PrList key="s" prs={t.relatedSkillPrs} />]);
     if (t.related) rows.push(["Related", <RichText key="r" text={t.related} />]);
-    if (t.owners.length) rows.push(["Owner", t.owners.join(", ")]);
     return (
         <article
             className="grid min-w-0 gap-2 rounded-md border border-gray-200 bg-white px-4 py-3"
@@ -350,7 +391,7 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
                     <RichText text={t.why} />
                 </p>
             )}
-            <ProposedFix t={t} cands={cands} ctx={ctx} />
+            <FixRows t={t} fx={fx} doctor={doctor} ctx={ctx} />
             {rows.length > 0 && (
                 <dl className="m-0 grid grid-cols-1 gap-x-3.5 gap-y-1 text-xs sm:grid-cols-[max-content_1fr]">
                     {rows.map(([k, v, mono]) => (
@@ -369,54 +410,156 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
     );
 }
 
-// page.html's "Proposed PR" row: the doctor PR when there is one, else each
-// fix candidate for this task (outcome, patch, gates, cost), else "none yet"
-// for a repo-fixable failure.
-function ProposedFix({ t, cands, ctx }: { t: DoctorTask; cands: DoctorFix[]; ctx: FixCtx }) {
-    const box = "inline-flex flex-wrap items-baseline gap-x-2 rounded-md border px-3 py-1 text-xs";
-    if (isSkillsPrUrl(t.doctorPr) || cands.length) {
-        return (
-            <div className="flex flex-wrap gap-2">
-                {isSkillsPrUrl(t.doctorPr) && (
-                    <a
-                        href={t.doctorPr}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`${box} border-studio-blue font-semibold text-studio-blue hover:underline`}
-                    >
-                        Proposed PR: {prLabel(t.doctorPr)} ↗
-                    </a>
-                )}
-                {cands.map((c) => (
-                    <span
-                        key={c.id}
-                        className={`${box} ${isReady(c) ? "border-studio-blue" : "border-dashed border-gray-300"}`}
-                        data-testid="fix-candidate"
-                    >
-                        <b className={isReady(c) ? "text-studio-blue" : "text-gray-700"}>
-                            Proposed PR: {c.outcome}
-                        </b>
-                        {c.patchLines && (
-                            <span className="tabular-nums">
-                                patch <PatchCell fix={c} ctx={ctx} />
-                            </span>
-                        )}
-                        <span className="text-gray-600">{gateText(c)}</span>
-                        <span className="tabular-nums text-gray-600">{fmtUsd(c.costUsd)}</span>
-                        {c.title && <span className="basis-full text-gray-700">{c.title}</span>}
-                    </span>
-                ))}
-            </div>
-        );
-    }
-    if (!isFixable(t)) return null;
+// The prepared PR body is model-written markdown: no raw HTML (ReactMarkdown
+// drops it by default), links only for allowlisted URLs, images as alt text.
+const BODY_COMPONENTS: Components = {
+    a: ({ href, children }) =>
+        isSkillsPrUrl(href) || isAdoUrl(href) ? (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+            </a>
+        ) : (
+            <span>{children}</span>
+        ),
+    img: ({ alt }) => <span>{alt ?? ""}</span>,
+};
+
+const BOX = "rounded-md border px-3 py-1.5 text-xs";
+
+function FixMeta({ c, ctx }: { c: DoctorFix; ctx: FixCtx }) {
     return (
-        <div>
-            <span className={`${box} border-dashed border-gray-300 text-gray-500`}>
-                Proposed PR: none yet
-            </span>
+        <>
+            {c.patchLines && (
+                <span className="tabular-nums">
+                    patch <PatchCell fix={c} ctx={ctx} />
+                </span>
+            )}
+            <span className="text-gray-600">{gateText(c)}</span>
+            <span className="tabular-nums text-gray-600">{fmtUsd(c.costUsd)}</span>
+        </>
+    );
+}
+
+/** The doctor's prepared, unopened fix: title expands to the PR body, then the patch. */
+function PreparedFix({ c, body, ctx }: { c: DoctorFix; body: string | null; ctx: FixCtx }) {
+    const [open, setOpen] = useState(false);
+    const title = c.title || c.id;
+    return (
+        <div className={`${BOX} border-studio-blue`} data-testid="pr-with-fix">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <b className="text-studio-blue">PR with fix</b>
+                {body ? (
+                    <button
+                        type="button"
+                        aria-expanded={open}
+                        onClick={() => setOpen((v) => !v)}
+                        className="text-left font-medium text-gray-900 hover:underline"
+                    >
+                        {title}
+                    </button>
+                ) : (
+                    <span className="font-medium text-gray-900">{title}</span>
+                )}
+                <FixMeta c={c} ctx={ctx} />
+            </div>
+            {open && body && (
+                <div className="mt-2 border-t border-gray-200 pt-2">
+                    <div className="prose prose-sm max-w-none prose-headings:text-sm" data-testid="pr-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={BODY_COMPONENTS}>
+                            {body}
+                        </ReactMarkdown>
+                    </div>
+                    {c.patchLines && ctx.dir && ctx.linked.has(c.id) && (
+                        <a
+                            href={patchHref(ctx.runId, ctx.sourceId, ctx.dir, c.id)}
+                            className="mt-1 inline-block font-semibold text-studio-blue hover:underline"
+                        >
+                            Download patch (+{c.patchLines.added}/-{c.patchLines.removed})
+                        </a>
+                    )}
+                </div>
+            )}
         </div>
     );
+}
+
+// page.html's "Proposed PR" row, split by who made the fix: "PR with fix"
+// (the doctor's opened PR or prepared fix), "Proposed PR" (a third party's open
+// PR the fix text names), "Fix candidate: <outcome>" (not ready), or "none yet"
+// for a repo-fixable failure.
+function FixRows({
+    t,
+    fx,
+    doctor,
+    ctx,
+}: {
+    t: DoctorTask;
+    fx: TaskFixes;
+    doctor: RunDoctor;
+    ctx: FixCtx;
+}) {
+    const rows: ReactNode[] = [];
+    if (fx.doctorPr) {
+        rows.push(
+            <a
+                key="doctor-pr"
+                href={fx.doctorPr}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`${BOX} inline-block border-studio-blue font-semibold text-studio-blue hover:underline`}
+                data-testid="pr-with-fix"
+            >
+                PR with fix: {prLabel(fx.doctorPr)} ↗
+            </a>,
+        );
+    }
+    for (const c of fx.ready) {
+        rows.push(
+            <PreparedFix key={c.id} c={c} body={doctor.fixBodies?.[c.id] ?? null} ctx={ctx} />,
+        );
+    }
+    for (const p of fx.proposed) {
+        rows.push(
+            <div
+                key={p.url}
+                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-studio-blue/60`}
+                data-testid="proposed-pr"
+            >
+                <b className="text-gray-800">Proposed PR</b>
+                <a
+                    href={p.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-studio-blue hover:underline"
+                >
+                    {prLabel(p.url)} {p.title}
+                </a>
+                <span className="text-gray-600">{p.state}</span>
+            </div>,
+        );
+    }
+    for (const c of fx.others) {
+        rows.push(
+            <div
+                key={c.id}
+                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-dashed border-gray-300`}
+                data-testid="fix-candidate"
+            >
+                <b className="text-gray-700">Fix candidate: {c.outcome}</b>
+                <FixMeta c={c} ctx={ctx} />
+                {c.title && <span className="basis-full text-gray-700">{c.title}</span>}
+            </div>,
+        );
+    }
+    if (rows.length === 0 && isFixable(t)) {
+        rows.push(
+            <span key="none" className={`${BOX} inline-block border-dashed border-gray-300 text-gray-500`}>
+                Proposed PR: none yet
+            </span>,
+        );
+    }
+    if (rows.length === 0) return null;
+    return <div className="grid justify-items-start gap-2">{rows}</div>;
 }
 
 function EnvGroup({ cause, tasks, ctx }: { cause: string; tasks: DoctorTask[]; ctx: FixCtx }) {
@@ -489,8 +632,7 @@ function SkillAccordion({
                 <span className="font-bold">{g.skill}</span>
                 <span className="text-sm text-gray-500 tabular-nums">
                     {g.total} failed
-                    {g.ready > 0 &&
-                        ` · ${g.ready} proposed PR${g.ready === 1 ? "" : "s"} ready`}
+                    {g.ready > 0 && ` · ${prsWithFix(g.ready)}`}
                 </span>
                 <span className="ml-auto flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-gray-500">
                     {g.layerCounts.map(([k, n]) => (
@@ -606,7 +748,10 @@ function Body({ doctor, ctx }: { doctor: RunDoctor; ctx: FixCtx }) {
                     <h3 className="text-base font-semibold text-gray-900">Fix first</h3>
                     <ol className="mt-2.5 grid list-decimal gap-2 pl-5 text-sm">
                         {triage.actions.map((a, i) => {
-                            const ready = readyTasks(doctor, a.taskIds);
+                            const ready = countFixPrs(
+                                doctor,
+                                triage.tasks.filter((t) => a.taskIds.includes(t.taskId)),
+                            );
                             return (
                                 <li key={i} className="pl-1">
                                     <span className="font-bold tabular-nums text-studio-blue">
@@ -619,7 +764,7 @@ function Body({ doctor, ctx }: { doctor: RunDoctor; ctx: FixCtx }) {
                                             className="ml-2 whitespace-nowrap rounded bg-studio-blue/10 px-1.5 py-px text-[11px] font-semibold text-studio-blue"
                                             data-testid="action-ready"
                                         >
-                                            {ready} PR ready
+                                            {prsWithFix(ready)}
                                         </span>
                                     )}
                                 </li>
