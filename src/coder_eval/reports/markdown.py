@@ -1034,7 +1034,7 @@ def _compute_suite_rollup(
             break
         reasons: list[str] = []
         for cr in row.result.success_criteria_results:
-            # Informational (weight: 0) criteria cannot fail a row, so they must
+            # Informational criteria cannot fail a row, so they must
             # not supply the reason the row is reported as failed.
             if not cr.gating:
                 continue

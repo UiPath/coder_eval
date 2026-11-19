@@ -152,9 +152,9 @@ export interface CriterionResult {
     details: string | null;
     error: string | null;
     evaluationStatus: "evaluated" | "not_evaluated";
-    // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0) means
-    // the criterion is informational — measured, but excluded from the score and
-    // the pass/fail gate, so it must not render as PASS/FAIL.
+    // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0 or
+    // report_only) means the criterion is informational — measured, but excluded
+    // from the score and the pass/fail gate, so it must not render as PASS/FAIL.
     passThreshold: number;
     gating: boolean;
 }

@@ -100,7 +100,7 @@ class CriterionResult(BaseModel):
         default=True,
         description=(
             "Whether a below-threshold score here fails the task (mirrors "
-            "BaseSuccessCriterion.is_gating, i.e. weight > 0). False marks an informational "
+            "BaseSuccessCriterion.is_gating: weight > 0 and not report_only). False marks an informational "
             "criterion: it is measured and reported but excluded from the score and the "
             "pass/fail gate, so every display surface must render it as informational rather "
             "than failed. Defaults True so a result built without a source criterion reads "
@@ -739,7 +739,11 @@ class EvaluationResult(BaseModel):
         )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
-        """Calculate weighted average score from criterion results.
+        """Calculate weighted average score from the GATING criterion results.
+
+        Informational criteria (``BaseSuccessCriterion.is_gating`` is False:
+        ``weight: 0`` or ``report_only: true``) contribute to neither term, so
+        the score covers exactly the criteria the gate reads.
 
         Args:
             criteria: Original criterion definitions with weights
@@ -761,6 +765,8 @@ class EvaluationResult(BaseModel):
         total_weight = 0.0
 
         for result, criterion in zip(self.success_criteria_results, criteria, strict=True):
+            if not criterion.is_gating:
+                continue
             total_weighted_score += result.score * criterion.weight
             total_weight += criterion.weight
 
@@ -769,12 +775,13 @@ class EvaluationResult(BaseModel):
     def all_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
         """True iff every GATING criterion result meets its pass_threshold.
 
-        Single source of truth for the success gate. ``weight: 0`` criteria are
-        informational (``BaseSuccessCriterion.is_gating`` is False): they are
+        Single source of truth for the success gate. ``weight: 0`` and
+        ``report_only: true`` criteria are informational
+        (``BaseSuccessCriterion.is_gating`` is False): they are
         excluded from the weighted score, so they are excluded from the gate
         too — otherwise a criterion that contributes nothing to the score could
         still single-handedly flip the task to FAILURE. A task whose criteria
-        are ALL weight-0 has an empty gate and therefore passes.
+        are ALL informational has an empty gate and therefore passes.
 
         A results/criteria length mismatch raises ``ValueError`` rather than
         silently truncating — the ``len()`` pre-check is required because
@@ -824,7 +831,7 @@ class EvaluationResult(BaseModel):
         if total_weight <= 0.0:
             # HAZARD: unreachable today, but a defensive guard on a pass/fail gate
             # must fail CLOSED against a future subclass that bypasses the
-            # weight=0 validator.
+            # informational-criterion validator.
             return False
         weighted_score = sum((1.0 if r.score >= c.pass_threshold else 0.0) * c.weight for r, c in armed) / total_weight
         return weighted_score >= gate_threshold

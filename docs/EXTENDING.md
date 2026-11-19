@@ -170,6 +170,7 @@ class MyCriterion(BaseSuccessCriterion):
 Union membership is required — a run validates that every union member's `type` has a
 registered checker, and rejects unknown `type` tags in YAML. `BaseSuccessCriterion`
 gives you `description`, `weight` (default 1.0; `0` = informational/non-gating),
+`report_only` (default `false`; `true` = informational at the declared weight),
 `pass_threshold` (default 0.9) and `suite_thresholds` for free, with
 `extra="forbid"` so YAML typos are caught.
 

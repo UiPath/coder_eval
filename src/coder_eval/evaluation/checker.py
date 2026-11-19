@@ -267,7 +267,7 @@ class SuccessChecker:
 
         logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
         if result.score < criterion.pass_threshold:
-            # An informational (weight: 0) criterion cannot fail the task, so
+            # An informational criterion cannot fail the task, so
             # logging it as FAILED contradicts the final status. Say what it is.
             logger.info(
                 "Criterion '%s' %s (score=%.2f, threshold=%.2f): %s",

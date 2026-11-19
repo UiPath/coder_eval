@@ -127,7 +127,7 @@ Rules that matter:
   live service — nothing verifies the claim, and the command runs unchanged.
 - `weight` reflects importance: `0.5` nice-to-have, `1.0` standard, `1.5`–`2.0` critical.
   `weight: 0` makes a criterion informational (reported, but excluded from the score and
-  the pass/fail gate).
+  the pass/fail gate). `report_only: true` does the same and keeps the declared weight.
 - The default `pass_threshold: 0.9` is right for most criteria; use `1.0` only for binary
   checks.
 - Omit the `agent:` block unless the task needs non-default settings. Agent config is
