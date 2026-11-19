@@ -218,7 +218,7 @@ function FixesTable({
     const fixes = doctor.fixes;
     const dir = doctor.status.fixesDir;
     if (!fixes || !dir) return null;
-    // The same predicate readRunDoctor fetches with.
+    // The same set readRunDoctor fetches and /api/file serves.
     const linked = patchIds(fixes);
     return (
         <div className="space-y-1.5">

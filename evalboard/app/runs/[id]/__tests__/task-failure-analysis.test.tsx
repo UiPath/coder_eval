@@ -93,6 +93,19 @@ describe("TaskFailureAnalysis", () => {
         expect(screen.getByText("build").tagName).toBe("SPAN");
     });
 
+    test("row badges: nothing for new, the state for changed, nights for known", () => {
+        const d = doctor();
+        d.triage!.tasks[0].state = "changed";
+        d.triage!.tasks[0].nightsSeen = 1;
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" />);
+        const e1 = screen.getByRole("link", { name: "Example e1" }).closest("td")!;
+        expect(within(e1).getByText("changed")).toBeInTheDocument();
+        const t1 = screen.getByRole("link", { name: "Example t1" }).closest("td")!;
+        expect(within(t1).getByText("known, 3 nights")).toBeInTheDocument();
+        const t2 = screen.getByRole("link", { name: "Example t2" }).closest("td")!;
+        expect(within(t2).queryByText(/new|nights/)).toBeNull();
+    });
+
     test("no base run: no history line", () => {
         const d = doctor();
         d.triage!.summary.vsHistory = null;

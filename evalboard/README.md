@@ -210,8 +210,9 @@ belongs to it.
 - Task Failure Analysis (internal edition, skills source): the run page reads
   the skill-doctor report under `<run>/skill-doctor/` (`lib/doctor.ts`,
   `readRunDoctor`). `status.json` is refetched after 60 s; the triage file it
-  names, `<fixes_dir>/fixes.json` and up to 10 patches are cached for good, and
-  `/api/file` fetches a patch on demand. A done report gets the panel; when
+  names, `<fixes_dir>/fixes.json` and up to 10 patches are cached for good.
+  `/api/file` serves only the patches fixes.json lists, loading them through
+  the same reader on a cold cache. A done report gets the panel; when
   `analysis.md` has a `## Findings` line, the AI summary stops there and the
   panel replaces the rest. Other states keep the AI summary, with a status
   line. `EVALBOARD_TASK_ANALYSIS=off` turns it off.

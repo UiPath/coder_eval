@@ -326,8 +326,6 @@ export async function ensureRunReviewIndex(
 // fetched again once cached. `relPath` comes from a parsed, pattern-checked
 // field, and is checked here again before it becomes a blob name. 404s are
 // swallowed as for analysis.md.
-const DOCTOR_REL_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)?$/;
-
 export async function ensureRunDoctorFile(
     container: string,
     runId: string,
@@ -336,10 +334,8 @@ export async function ensureRunDoctorFile(
     refreshAfterMs?: number,
 ): Promise<void> {
     assertValidId(runId, "runId");
-    if (
-        !DOCTOR_REL_RE.test(relPath) ||
-        relPath.split("/").some((s) => s === "." || s === "..")
-    ) {
+    // One file directly under skill-doctor/, or one level down (the fixes dir).
+    if (!isValidTaskId(relPath) || relPath.split("/").length > 2) {
         throw new Error(`Invalid skill-doctor path: ${JSON.stringify(relPath)}`);
     }
     if (LOCAL_RUNS_DIR) return;

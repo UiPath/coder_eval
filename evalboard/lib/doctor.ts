@@ -16,11 +16,11 @@ import { SKILLS_SOURCE } from "./sources";
 
 export const DOCTOR_DIR = "skill-doctor";
 const TRIAGE_FILE_RE = /^triage-[A-Za-z0-9._-]+\.json$/;
-export const FIXES_DIR_RE = /^fixes(-[0-9]+)?$/;
+const FIXES_DIR_RE = /^fixes(-[0-9]+)?$/;
 // Candidate ids name `<id>.patch` inside the fixes dir.
-export const PATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-// At most this many patches are fetched (and linked) per run.
-export const MAX_PATCHES = 10;
+const PATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// At most this many patches per run are fetched, linked and served.
+const MAX_PATCHES = 10;
 
 const DOCTOR_STATES = [
     "queued",
@@ -295,10 +295,11 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
 }
 
 /**
- * The candidates whose `<id>.patch` the board fetches and links: one predicate
- * for both, so a link never points at a patch that is not fetched. A patch
- * exists only when fixes.json reports patch lines; the id must be a safe file
- * name; at most MAX_PATCHES per run.
+ * The only patches the board touches. readRunDoctor fetches exactly these,
+ * the Fixes table links exactly these, and /api/file serves only these (via
+ * readRunDoctor, so there is one fetch path). A patch exists only when
+ * fixes.json reports patch lines; the id must be a safe file name; at most
+ * MAX_PATCHES per run.
  */
 export function patchIds(fixes: DoctorFixes | null): Set<string> {
     const ids = new Set<string>();

@@ -27,8 +27,10 @@ import {
     parseTriage,
     patchIdFromPath,
     patchIds,
+    taskAnalysisEnabled,
     type RunDoctor,
 } from "./doctor";
+import { isInternal } from "./edition";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -3031,16 +3033,28 @@ export async function resolveSafePath(
     if (parts[0] === DOCTOR_DIR) {
         // skill-doctor/ belongs to the doctor contract, so no experiment arm can
         // live there: a variant of that name would share the blob prefix with
-        // the report. Only a fix patch is served from it, fetched by name on
-        // demand (a cold cache or a direct link works), never by a listing.
+        // the report. Only a fix patch is served from it, and only one that
+        // this run's status + fixes.json list (patchIds). readRunDoctor is the
+        // one fetch path: it loads status and fixes.json when they are not
+        // cached and fetches exactly those patches, so a cold cache or a direct
+        // link works and a made-up name costs no blob call. Off with the panel.
+        if (
+            !taskAnalysisEnabled(
+                isInternal,
+                source.id,
+                process.env.EVALBOARD_TASK_ANALYSIS,
+            )
+        )
+            return null;
         const patch = patchIdFromPath(parts.slice(1).join("/"));
         if (!patch) return null;
-        await ensureRunDoctorFile(
-            source.container,
-            runId,
-            `${patch.fixesDir}/${patch.id}.patch`,
-            dir,
-        );
+        const doctor = await readRunDoctor(runId, source);
+        if (
+            !doctor ||
+            doctor.status.fixesDir !== patch.fixesDir ||
+            !patchIds(doctor.fixes).has(patch.id)
+        )
+            return null;
     } else if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
         if (!isValidId(parts[1])) return null;
         await ensureTaskDir(source.container, runId, parts[1], dir, parts[0]);
