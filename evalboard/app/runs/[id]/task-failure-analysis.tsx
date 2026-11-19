@@ -14,6 +14,7 @@ import {
     type DoctorPr,
     type DoctorStatus,
     type DoctorTask,
+    type DoctorTriage,
     type RunDoctor,
 } from "@/lib/doctor";
 
@@ -22,35 +23,44 @@ import {
 // skill failures), never by embedding that page. Every string is plain text;
 // the only links are this board's task pages and URLs of an exact known shape.
 
-// Layer order, labels and colors, as on the doctor's page.
-export const LAYERS: Record<string, { label: string; color: string }> = {
-    env: { label: "Environment", color: "#56708f" },
-    grader: { label: "Grader", color: "#b07410" },
-    task: { label: "Task setup", color: "#7a4fb0" },
-    agent: { label: "Agent mistake", color: "#c2413a" },
-    skill: { label: "Skill", color: "#d0661c" },
-    upstream: { label: "Upstream (CLI)", color: "#2f6fd0" },
-    flaky: { label: "Flaky", color: "#7d8794" },
-    undiagnosed: { label: "Not diagnosed", color: "#9aa5b3" },
-};
-const ORDER = Object.keys(LAYERS);
-const UNKNOWN_LAYER = { label: "Other", color: "#9aa5b3" };
-const layerOf = (k: string) => LAYERS[k] ?? { ...UNKNOWN_LAYER, label: k };
+// Layer order, labels and colors, as on the doctor's page. Maps, not object
+// literals: layer and solvable come from the report, and a key such as
+// "constructor" or "__proto__" must not reach the object prototype.
+const LAYERS = new Map<string, { label: string; color: string }>([
+    ["env", { label: "Environment", color: "#56708f" }],
+    ["grader", { label: "Grader", color: "#b07410" }],
+    ["task", { label: "Task setup", color: "#7a4fb0" }],
+    ["agent", { label: "Agent mistake", color: "#c2413a" }],
+    ["skill", { label: "Skill", color: "#d0661c" }],
+    ["upstream", { label: "Upstream (CLI)", color: "#2f6fd0" }],
+    ["flaky", { label: "Flaky", color: "#7d8794" }],
+    ["undiagnosed", { label: "Not diagnosed", color: "#9aa5b3" }],
+]);
+const ORDER = [...LAYERS.keys()];
+const OTHER_COLOR = "#9aa5b3";
+const layerOf = (k: string) => LAYERS.get(k) ?? { label: k, color: OTHER_COLOR };
 const rank = (k: string) => {
     const i = ORDER.indexOf(k);
     return i === -1 ? ORDER.length : i;
 };
 
-const SOLVABLE: Record<string, string> = {
-    "env-fix": "Fix the tenant",
-    "yes-grader": "Fixable: grader",
-    "yes-task": "Fixable: task",
-    "yes-skill": "Fixable: skill",
-    "upstream-report": "Upstream report",
-    no: "Not a repo fix",
-};
+const SOLVABLE = new Map<string, string>([
+    ["env-fix", "Fix the tenant"],
+    ["yes-grader", "Fixable: grader"],
+    ["yes-task", "Fixable: task"],
+    ["yes-skill", "Fixable: skill"],
+    ["upstream-report", "Upstream report"],
+    ["no", "Not a repo fix"],
+]);
 const isFixable = (t: DoctorTask) => /^yes/.test(t.solvable ?? "");
 const isReady = (c: DoctorFix) => c.outcome === "pr-ready";
+
+/** Tasks per layer, in the doctor page's layer order. */
+export function layerCounts(tasks: DoctorTask[]): [string, number][] {
+    const m = new Map<string, number>();
+    for (const t of tasks) m.set(t.layer, (m.get(t.layer) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
+}
 
 // ---------- text ----------
 
@@ -91,17 +101,9 @@ export function RichText({ text }: { text: string }) {
     return <>{out}</>;
 }
 
-function ExternalLink({
-    href,
-    ok,
-    children,
-}: {
-    href: string | null;
-    ok: (u: unknown) => boolean;
-    children?: ReactNode;
-}) {
-    if (!href) return null;
-    if (!ok(href)) return <span>{children ?? href}</span>;
+/** A build link only for a dev.azure.com URL; anything else is the label as text. */
+function BuildLink({ href, label }: { href: string; label: string }) {
+    if (!isAdoUrl(href)) return <span>{label}</span>;
     return (
         <a
             href={href}
@@ -109,7 +111,7 @@ function ExternalLink({
             rel="noopener noreferrer"
             className="text-studio-blue hover:underline"
         >
-            {children ?? href}
+            {label}
         </a>
     );
 }
@@ -158,7 +160,7 @@ function gateText(f: DoctorFix): string {
     if (g.replay) parts.push(`replay ${g.replay}`);
     if (g.mutants) parts.push(`mutants ${g.mutants.killed}/${g.mutants.n}`);
     if (g.review) parts.push(`review ${g.review}`);
-    return parts.length ? parts.join(" · ") : "—";
+    return parts.join(" · ");
 }
 
 interface FixCtx {
@@ -170,7 +172,7 @@ interface FixCtx {
 }
 
 function PatchCell({ fix, ctx }: { fix: DoctorFix; ctx: FixCtx }) {
-    if (!fix.patchLines) return <>—</>;
+    if (!fix.patchLines) return null;
     const text = `+${fix.patchLines.added}/-${fix.patchLines.removed}`;
     if (!ctx.dir || !ctx.linked.has(fix.id)) return <span>{text}</span>;
     return (
@@ -190,8 +192,8 @@ export interface SkillGroup {
     cards: DoctorTask[];
     envGroups: { cause: string; tasks: DoctorTask[] }[];
     layerCounts: [string, number][];
-    // Distinct linked PRs with a fix among the skill's tasks (countFixPrs).
-    ready: number;
+    // Distinct PRs with fix among the skill's tasks (countFixPrs).
+    fixPrs: number;
     // Tasks with a fix prepared but no PR yet: sorts right after linked PRs.
     prepared: number;
     total: number;
@@ -214,50 +216,64 @@ const PR_REF_RE = /(?:#|\/pull\/)(\d+)\b/g;
 export function proposedPrs(t: DoctorTask): DoctorPr[] {
     if (!t.fix) return [];
     const named = new Set([...t.fix.matchAll(PR_REF_RE)].map((m) => m[1]));
-    return t.existingPrs.filter((p) => {
-        if (p.state !== "open" || !isSkillsPrUrl(p.url)) return false;
-        return named.has(/(\d+)$/.exec(p.url)![1]);
-    });
+    // existing_prs URLs are allowlisted by the parser, so each ends in /pull/N.
+    return t.existingPrs.filter(
+        (p) => p.state === "open" && named.has(/(\d+)$/.exec(p.url)?.[1] ?? ""),
+    );
 }
 
 export interface TaskFixes {
-    // The doctor's own PR for this task, opened (opened.json) or recorded in
-    // the triage (doctor_pr); allowlisted. "PR with fix".
+    // The doctor's own PR: opened for this task or for a pr-ready candidate
+    // that covers it (opened.json is keyed by the candidate's primary task),
+    // else the triage's doctor_pr. "PR with fix".
     ownPr: string | null;
     // The pr-ready candidates behind it, for their gate verdicts.
     ready: DoctorFix[];
     // pr-ready candidates with no PR opened yet: "Fix prepared, PR not
     // opened yet". Not a PR with fix.
     prepared: DoctorFix[];
-    // Third-party open PRs the fix text points at ("Proposed PR").
+    // Third-party open PRs the fix text names ("Proposed PR"), minus ownPr.
     proposed: DoctorPr[];
     // Other fix candidates (needs-live-run, ...).
     others: DoctorFix[];
-    // One key per distinct linked PR (own or proposed), for counting.
+    // One key per distinct PR with fix (own or proposed), for counting.
     keys: string[];
-    // Card sort: own PR, proposed PR, prepared fix, other candidates, rest.
+    // Card sort tier, lower first (see fixTier).
     tier: number;
+}
+
+function openedFor(doctor: RunDoctor, taskId: string): string | null {
+    const o = doctor.opened;
+    return o && Object.hasOwn(o, taskId) ? o[taskId] : null;
+}
+
+// Own PR, then a proposed PR, then a prepared fix, then other candidates,
+// then the rest.
+function fixTier(f: Omit<TaskFixes, "tier" | "keys">): number {
+    if (f.ownPr) return 0;
+    if (f.proposed.length) return 1;
+    if (f.prepared.length) return 2;
+    if (f.others.length) return 3;
+    return 4;
 }
 
 export function taskFixes(doctor: RunDoctor, t: DoctorTask): TaskFixes {
     const cands = fixesForTask(doctor, t.taskId);
-    const opened = doctor.opened?.[t.taskId];
-    const ownPr = isSkillsPrUrl(opened) ? opened : isSkillsPrUrl(t.doctorPr) ? t.doctorPr : null;
     const ready = cands.filter(isReady);
-    const prepared = ownPr ? [] : ready;
-    const others = cands.filter((c) => !isReady(c));
-    const proposed = proposedPrs(t);
-    const keys = [...(ownPr ? [ownPr] : []), ...proposed.map((p) => p.url)];
-    const tier = ownPr
-        ? 0
-        : proposed.length
-          ? 1
-          : prepared.length
-            ? 2
-            : others.length
-              ? 3
-              : 4;
-    return { ownPr, ready, prepared, proposed, others, keys, tier };
+    // URLs here are allowlisted by the parsers (parseOpened, parseTriage).
+    const ownPr =
+        openedFor(doctor, t.taskId) ??
+        ready.map((c) => openedFor(doctor, c.taskId)).find((u) => u !== null) ??
+        t.doctorPr;
+    const base = {
+        ownPr,
+        ready,
+        prepared: ownPr ? [] : ready,
+        proposed: proposedPrs(t).filter((p) => p.url !== ownPr),
+        others: cands.filter((c) => !isReady(c)),
+    };
+    const keys = [...(ownPr ? [ownPr] : []), ...base.proposed.map((p) => p.url)];
+    return { ...base, keys, tier: fixTier(base) };
 }
 
 /** Tasks with a fix prepared but no PR opened (sort tie-break only). */
@@ -265,7 +281,7 @@ export function countPrepared(doctor: RunDoctor, tasks: DoctorTask[]): number {
     return tasks.filter((t) => taskFixes(doctor, t).prepared.length > 0).length;
 }
 
-/** Distinct linked PRs with a fix (own or proposed) over these tasks. */
+/** Distinct PRs with fix (the doctor's own or a proposed one) over these tasks. */
 export function countFixPrs(doctor: RunDoctor, tasks: DoctorTask[]): number {
     return new Set(tasks.flatMap((t) => taskFixes(doctor, t).keys)).size;
 }
@@ -302,8 +318,7 @@ export function groupBySkill(
                 if (t.envGroup) groups.set(t.envGroup, [...(groups.get(t.envGroup) ?? []), t]);
                 else cards.push(t);
             }
-            // The doctor's own fix first, then a proposed PR, then other fix
-            // candidates, then the rest; within each, layer rank and task id.
+            // By fix tier (fixTier), then layer rank and task id.
             const tier = (t: DoctorTask) => taskFixes(doctor, t).tier;
             cards.sort(
                 (a, b) =>
@@ -311,21 +326,19 @@ export function groupBySkill(
                     rank(b.layer) - rank(a.layer) ||
                     a.taskId.localeCompare(b.taskId),
             );
-            const lc = new Map<string, number>();
-            for (const t of items) lc.set(t.layer, (lc.get(t.layer) ?? 0) + 1);
             return {
                 skill,
                 cards,
                 envGroups: [...groups.entries()].map(([cause, tasks]) => ({ cause, tasks })),
-                layerCounts: [...lc.entries()].sort((a, b) => rank(a[0]) - rank(b[0])),
-                ready: countFixPrs(doctor, items),
+                layerCounts: layerCounts(items),
+                fixPrs: countFixPrs(doctor, items),
                 prepared: countPrepared(doctor, items),
                 total: items.length,
             };
         })
         .sort(
             (a, b) =>
-                b.ready - a.ready ||
+                b.fixPrs - a.fixPrs ||
                 b.prepared - a.prepared ||
                 b.total - a.total ||
                 a.skill.localeCompare(b.skill),
@@ -369,7 +382,6 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
     if (t.criterion) rows.push(["Failing check", <RichText key="c" text={t.criterion} />]);
     if (t.evidence) rows.push(["Evidence", <RichText key="e" text={t.evidence} />, true]);
     if (t.passedBefore) rows.push(["Passed before", <RichText key="p" text={t.passedBefore} />]);
-    if (t.related) rows.push(["Related", <RichText key="r" text={t.related} />]);
     return (
         <article
             className="grid min-w-0 gap-2 rounded-md border border-gray-200 bg-white px-4 py-3"
@@ -380,7 +392,7 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
                 <TaskId id={t.taskId} ctx={ctx} />
                 <Pill color={layer.color}>{layer.label}</Pill>
                 {t.solvable && (
-                    <Pill>{SOLVABLE[t.solvable.split(" ")[0]] ?? t.solvable}</Pill>
+                    <Pill>{SOLVABLE.get(t.solvable.split(" ")[0]) ?? t.solvable}</Pill>
                 )}
                 {t.runStatus && (
                     <Pill>{t.runStatus.replace(/_/g, " ").toLowerCase()}</Pill>
@@ -392,7 +404,7 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
                     <RichText text={t.why} />
                 </p>
             )}
-            <FixRows t={t} fx={fx} ctx={ctx} />
+            <FixRows fx={fx} ctx={ctx} />
             {rows.length > 0 && (
                 <dl className="m-0 grid grid-cols-1 gap-x-3.5 gap-y-1 text-xs sm:grid-cols-[max-content_1fr]">
                     {rows.map(([k, v, mono]) => (
@@ -411,27 +423,55 @@ function TaskCard({ t, doctor, ctx }: { t: DoctorTask; doctor: RunDoctor; ctx: F
     );
 }
 
-const BOX = "rounded-md border px-3 py-1.5 text-xs";
-
 function Gates({ cands }: { cands: DoctorFix[] }) {
-    const g = cands.map(gateText).filter((x) => x !== "—");
+    const g = cands.map(gateText).filter(Boolean);
     if (!g.length) return null;
     return <span className="text-[11px] text-gray-600">{g.join("; ")}</span>;
 }
 
-// page.html's "Proposed PR" row, split by who made the fix: "PR with fix"
-// (the doctor's opened PR or prepared fix), "Proposed PR" (a third party's open
-// PR the fix text names), "Fix candidate: <outcome>" (not ready), or "none yet"
-// for a repo-fixable failure.
-function FixRows({ t, fx, ctx }: { t: DoctorTask; fx: TaskFixes; ctx: FixCtx }) {
+function Patch({ c, ctx }: { c: DoctorFix; ctx: FixCtx }) {
+    if (!c.patchLines) return null;
+    return (
+        <span className="tabular-nums">
+            patch <PatchCell fix={c} ctx={ctx} />
+        </span>
+    );
+}
+
+const ROW_BORDER = {
+    own: "border-studio-blue",
+    proposed: "border-studio-blue/60",
+    prepared: "border-dashed border-studio-blue/60",
+    candidate: "border-dashed border-gray-300",
+} as const;
+
+function FixRow({
+    kind,
+    testId,
+    children,
+}: {
+    kind: keyof typeof ROW_BORDER;
+    testId: string;
+    children: ReactNode;
+}) {
+    return (
+        <div
+            className={`flex flex-wrap items-baseline gap-x-2 rounded-md border px-3 py-1.5 text-xs ${ROW_BORDER[kind]}`}
+            data-testid={testId}
+        >
+            {children}
+        </div>
+    );
+}
+
+// The card's PR rows: "PR with fix" (the doctor's PR), "Proposed PR" (someone
+// else's open PR that the fix names), "Fix prepared, PR not opened yet", and
+// "Fix candidate: <outcome>" for candidates that are not ready.
+function FixRows({ fx, ctx }: { fx: TaskFixes; ctx: FixCtx }) {
     const rows: ReactNode[] = [];
     if (fx.ownPr) {
         rows.push(
-            <div
-                key="own"
-                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-studio-blue`}
-                data-testid="pr-with-fix"
-            >
+            <FixRow key="own" kind="own" testId="pr-with-fix">
                 <a
                     href={fx.ownPr}
                     target="_blank"
@@ -441,16 +481,12 @@ function FixRows({ t, fx, ctx }: { t: DoctorTask; fx: TaskFixes; ctx: FixCtx }) 
                     PR with fix: {prLabel(fx.ownPr)} ↗
                 </a>
                 <Gates cands={fx.ready} />
-            </div>,
+            </FixRow>,
         );
     }
     for (const p of fx.proposed) {
         rows.push(
-            <div
-                key={p.url}
-                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-studio-blue/60`}
-                data-testid="proposed-pr"
-            >
+            <FixRow key={p.url} kind="proposed" testId="proposed-pr">
                 <b className="text-gray-800">Proposed PR</b>
                 <a
                     href={p.url}
@@ -461,48 +497,25 @@ function FixRows({ t, fx, ctx }: { t: DoctorTask; fx: TaskFixes; ctx: FixCtx }) 
                     {prLabel(p.url)} {p.title}
                 </a>
                 <span className="text-gray-600">{p.state}</span>
-            </div>,
+            </FixRow>,
         );
     }
     for (const c of fx.prepared) {
         rows.push(
-            <div
-                key={c.id}
-                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-dashed border-studio-blue/60`}
-                data-testid="fix-prepared"
-            >
+            <FixRow key={c.id} kind="prepared" testId="fix-prepared">
                 <span className="text-gray-800">Fix prepared, PR not opened yet</span>
-                {c.patchLines && (
-                    <span className="tabular-nums">
-                        patch <PatchCell fix={c} ctx={ctx} />
-                    </span>
-                )}
+                <Patch c={c} ctx={ctx} />
                 <Gates cands={[c]} />
-            </div>,
+            </FixRow>,
         );
     }
     for (const c of fx.others) {
         rows.push(
-            <div
-                key={c.id}
-                className={`${BOX} flex flex-wrap items-baseline gap-x-2 border-dashed border-gray-300`}
-                data-testid="fix-candidate"
-            >
+            <FixRow key={c.id} kind="candidate" testId="fix-candidate">
                 <b className="text-gray-700">Fix candidate: {c.outcome}</b>
-                {c.patchLines && (
-                    <span className="tabular-nums">
-                        patch <PatchCell fix={c} ctx={ctx} />
-                    </span>
-                )}
+                <Patch c={c} ctx={ctx} />
                 <Gates cands={[c]} />
-            </div>,
-        );
-    }
-    if (rows.length === 0 && isFixable(t)) {
-        rows.push(
-            <span key="none" className={`${BOX} inline-block border-dashed border-gray-300 text-gray-500`}>
-                Proposed PR: none yet
-            </span>,
+            </FixRow>,
         );
     }
     if (rows.length === 0) return null;
@@ -515,7 +528,7 @@ function EnvGroup({ cause, tasks, ctx }: { cause: string; tasks: DoctorTask[]; c
     return (
         <div
             className="rounded-md border border-gray-200 bg-white px-4 py-3"
-            style={{ borderLeft: `4px solid ${LAYERS.env.color}` }}
+            style={{ borderLeft: `4px solid ${layerOf("env").color}` }}
             data-testid="env-group"
         >
             <button
@@ -579,7 +592,7 @@ function SkillAccordion({
                 <span className="font-bold">{g.skill}</span>
                 <span className="text-sm text-gray-500 tabular-nums">
                     {g.total} failed
-                    {g.ready > 0 && ` · ${prsWithFix(g.ready)}`}
+                    {g.fixPrs > 0 && ` · ${prsWithFix(g.fixPrs)}`}
                 </span>
                 <span className="ml-auto flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-gray-500">
                     {g.layerCounts.map(([k, n]) => (
@@ -612,29 +625,111 @@ function SkillAccordion({
 const chip = (pressed: boolean) =>
     `rounded-full border px-3 py-0.5 text-xs ${pressed ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 bg-white text-gray-800"}`;
 
-function Body({ doctor, ctx }: { doctor: RunDoctor; ctx: FixCtx }) {
-    const triage = doctor.triage!;
-    const tasks = triage.tasks;
-    const counts = useMemo(() => {
-        const m = new Map<string, number>();
-        for (const t of tasks) m.set(t.layer, (m.get(t.layer) ?? 0) + 1);
-        return [...m.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
-    }, [tasks]);
-    const present = counts.map(([k]) => k);
+function Stats({ triage, counts }: { triage: DoctorTriage; counts: [string, number][] }) {
+    const count = (k: string) => counts.find(([l]) => l === k)?.[1] ?? 0;
+    const stats: [number | null, string][] = [
+        [triage.rowsRun, "rows run"],
+        [triage.tasks.length, "failed rows"],
+        [count("env"), "environment"],
+        [triage.tasks.filter(isFixable).length, "fixable in the repo"],
+        [count("agent"), "agent mistakes"],
+    ];
+    return (
+        <div className="flex flex-wrap gap-x-7 gap-y-2.5 tabular-nums" data-testid="doctor-stats">
+            {stats
+                .filter(([v]) => v !== null)
+                .map(([v, l]) => (
+                    <div key={l}>
+                        <b className="block text-xl leading-tight">{v}</b>
+                        <span className="text-xs text-gray-500">{l}</span>
+                    </div>
+                ))}
+        </div>
+    );
+}
+
+function LayerBar({ counts, n }: { counts: [string, number][]; n: number }) {
+    if (n === 0) return null;
+    return (
+        <div>
+            <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                Failures by layer
+            </div>
+            <div
+                className="flex h-3.5 overflow-hidden rounded-sm bg-gray-100"
+                role="img"
+                aria-label="Failures by layer"
+            >
+                {counts.map(([k, c]) => (
+                    <i
+                        key={k}
+                        className="block h-full"
+                        style={{ width: `${(c / n) * 100}%`, background: layerOf(k).color }}
+                        title={`${layerOf(k).label}: ${c}`}
+                    />
+                ))}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-gray-500">
+                {counts.map(([k, c]) => (
+                    <span key={k}>
+                        <span
+                            className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm align-[-1px]"
+                            style={{ background: layerOf(k).color }}
+                        />
+                        {layerOf(k).label} {c}
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function FixFirst({ doctor, triage }: { doctor: RunDoctor; triage: DoctorTriage }) {
+    if (triage.actions.length === 0) return null;
+    return (
+        <section className="rounded-lg border border-gray-200 px-5 py-4" aria-label="Fix first">
+            <h3 className="text-base font-semibold text-gray-900">Fix first</h3>
+            <ol className="mt-2.5 grid list-decimal gap-2 pl-5 text-sm">
+                {triage.actions.map((a, i) => {
+                    const fixPrs = countFixPrs(
+                        doctor,
+                        triage.tasks.filter((t) => a.taskIds.includes(t.taskId)),
+                    );
+                    return (
+                        <li key={i} className="pl-1">
+                            <span className="font-bold tabular-nums text-studio-blue">{a.count}</span>
+                            {" · "}
+                            <RichText text={a.text} />
+                            {fixPrs > 0 && (
+                                <span
+                                    className="ml-2 whitespace-nowrap rounded bg-studio-blue/10 px-1.5 py-px text-[11px] font-semibold text-studio-blue"
+                                    data-testid="action-ready"
+                                >
+                                    {prsWithFix(fixPrs)}
+                                </span>
+                            )}
+                        </li>
+                    );
+                })}
+            </ol>
+        </section>
+    );
+}
+
+function SkillFailures({
+    doctor,
+    present,
+    ctx,
+}: {
+    doctor: RunDoctor;
+    present: string[];
+    ctx: FixCtx;
+}) {
     // null: every layer shown (all chips pressed), as on the doctor's page.
     const [active, setActive] = useState<Set<string> | null>(null);
     const [query, setQuery] = useState("");
     const [openSkills, setOpenSkills] = useState<Set<string>>(new Set());
     const groups = groupBySkill(doctor, active, query);
-    const n = tasks.length;
-    const count = (k: string) => counts.find(([l]) => l === k)?.[1] ?? 0;
-    const stats: [number | null, string][] = [
-        [triage.rowsRun, "rows run"],
-        [n, "failed rows"],
-        [count("env"), "environment"],
-        [tasks.filter(isFixable).length, "fixable in the repo"],
-        [count("agent"), "agent mistakes"],
-    ];
     const clickChip = (k: string) => {
         setActive((cur) => {
             if (!cur) return new Set([k]);
@@ -645,152 +740,88 @@ function Body({ doctor, ctx }: { doctor: RunDoctor; ctx: FixCtx }) {
         });
     };
     return (
-        <div className="space-y-5 rounded-b-lg bg-white px-5 pb-4 pt-3">
-            <div className="flex flex-wrap gap-x-7 gap-y-2.5 tabular-nums" data-testid="doctor-stats">
-                {stats
-                    .filter(([v]) => v !== null)
-                    .map(([v, l]) => (
-                        <div key={l}>
-                            <b className="block text-xl leading-tight">{v}</b>
-                            <span className="text-xs text-gray-500">{l}</span>
-                        </div>
-                    ))}
-            </div>
-
-            {n > 0 && (
-                <div>
-                    <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
-                        Failures by layer
-                    </div>
-                    <div
-                        className="flex h-3.5 overflow-hidden rounded-sm bg-gray-100"
-                        role="img"
-                        aria-label="Failures by layer"
-                    >
-                        {counts.map(([k, c]) => (
-                            <i
-                                key={k}
-                                className="block h-full"
-                                style={{ width: `${(c / n) * 100}%`, background: layerOf(k).color }}
-                                title={`${layerOf(k).label}: ${c}`}
-                            />
-                        ))}
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-gray-500">
-                        {counts.map(([k, c]) => (
-                            <span key={k}>
-                                <span
-                                    className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm align-[-1px]"
-                                    style={{ background: layerOf(k).color }}
-                                />
-                                {layerOf(k).label} {c}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {triage.actions.length > 0 && (
-                <section className="rounded-lg border border-gray-200 px-5 py-4" aria-label="Fix first">
-                    <h3 className="text-base font-semibold text-gray-900">Fix first</h3>
-                    <ol className="mt-2.5 grid list-decimal gap-2 pl-5 text-sm">
-                        {triage.actions.map((a, i) => {
-                            const ready = countFixPrs(
-                                doctor,
-                                triage.tasks.filter((t) => a.taskIds.includes(t.taskId)),
-                            );
-                            return (
-                                <li key={i} className="pl-1">
-                                    <span className="font-bold tabular-nums text-studio-blue">
-                                        {a.count}
-                                    </span>
-                                    {" · "}
-                                    <RichText text={a.text} />
-                                    {ready > 0 && (
-                                        <span
-                                            className="ml-2 whitespace-nowrap rounded bg-studio-blue/10 px-1.5 py-px text-[11px] font-semibold text-studio-blue"
-                                            data-testid="action-ready"
-                                        >
-                                            {prsWithFix(ready)}
-                                        </span>
-                                    )}
-                                </li>
-                            );
-                        })}
-                    </ol>
-                </section>
-            )}
-
-            <section className="space-y-2.5" aria-label="Skill failures">
-                <h3 className="text-lg font-semibold text-gray-900">Skill failures</h3>
-                <div className="flex flex-wrap gap-2">
-                    <button
-                        type="button"
-                        className={chip(false)}
-                        onClick={() => setOpenSkills(new Set(groups.map((g) => g.skill)))}
-                    >
-                        Expand all
-                    </button>
-                    <button type="button" className={chip(false)} onClick={() => setOpenSkills(new Set())}>
-                        Collapse all
-                    </button>
-                </div>
-                <div
-                    className="flex flex-wrap items-center gap-2 border-b border-gray-200 py-2"
-                    role="toolbar"
-                    aria-label="Filter failures"
+        <section className="space-y-2.5" aria-label="Skill failures">
+            <h3 className="text-lg font-semibold text-gray-900">Skill failures</h3>
+            <div className="flex flex-wrap gap-2">
+                <button
+                    type="button"
+                    className={chip(false)}
+                    onClick={() => setOpenSkills(new Set(groups.map((g) => g.skill)))}
                 >
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
-                        Show
-                    </span>
-                    {present.map((k) => {
-                        const pressed = !active || active.has(k);
-                        return (
-                            <button
-                                key={k}
-                                type="button"
-                                aria-pressed={pressed}
-                                className={chip(pressed)}
-                                onClick={() => clickChip(k)}
-                            >
-                                {layerOf(k).label}
-                            </button>
-                        );
-                    })}
-                    <input
-                        type="search"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Search task, cause, PR…"
-                        aria-label="Search failures"
-                        className="min-w-0 max-w-xs flex-1 rounded-md border border-gray-200 px-2.5 py-1 text-sm"
-                    />
-                </div>
-                <div className="grid gap-2.5">
-                    {groups.length === 0 ? (
-                        <p className="text-sm text-gray-500">No failures match this filter.</p>
-                    ) : (
-                        groups.map((g) => (
-                            <SkillAccordion
-                                key={g.skill}
-                                g={g}
-                                // A search opens every match, as on the doctor's page.
-                                open={openSkills.has(g.skill) || query.trim() !== ""}
-                                onToggle={() =>
-                                    setOpenSkills((cur) => {
-                                        const next = new Set(cur);
-                                        if (next.has(g.skill)) next.delete(g.skill);
-                                        else next.add(g.skill);
-                                        return next;
-                                    })
-                                }
-                                doctor={doctor}
-                                ctx={ctx}
-                            />
-                        ))
-                    )}
-                </div>
-            </section>
+                    Expand all
+                </button>
+                <button type="button" className={chip(false)} onClick={() => setOpenSkills(new Set())}>
+                    Collapse all
+                </button>
+            </div>
+            <div
+                className="flex flex-wrap items-center gap-2 border-b border-gray-200 py-2"
+                role="toolbar"
+                aria-label="Filter failures"
+            >
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                    Show
+                </span>
+                {present.map((k) => {
+                    const pressed = !active || active.has(k);
+                    return (
+                        <button
+                            key={k}
+                            type="button"
+                            aria-pressed={pressed}
+                            className={chip(pressed)}
+                            onClick={() => clickChip(k)}
+                        >
+                            {layerOf(k).label}
+                        </button>
+                    );
+                })}
+                <input
+                    type="search"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search task, cause, PR…"
+                    aria-label="Search failures"
+                    className="min-w-0 max-w-xs flex-1 rounded-md border border-gray-200 px-2.5 py-1 text-sm"
+                />
+            </div>
+            <div className="grid gap-2.5">
+                {groups.length === 0 ? (
+                    <p className="text-sm text-gray-500">No failures match this filter.</p>
+                ) : (
+                    groups.map((g) => (
+                        <SkillAccordion
+                            key={g.skill}
+                            g={g}
+                            // A search opens every match, as on the doctor's page.
+                            open={openSkills.has(g.skill) || query.trim() !== ""}
+                            onToggle={() =>
+                                setOpenSkills((cur) => {
+                                    const next = new Set(cur);
+                                    if (next.has(g.skill)) next.delete(g.skill);
+                                    else next.add(g.skill);
+                                    return next;
+                                })
+                            }
+                            doctor={doctor}
+                            ctx={ctx}
+                        />
+                    ))
+                )}
+            </div>
+        </section>
+    );
+}
+
+function Body({ doctor, ctx }: { doctor: RunDoctor; ctx: FixCtx }) {
+    const triage = doctor.triage!;
+    const counts = useMemo(() => layerCounts(triage.tasks), [triage.tasks]);
+    return (
+        <div className="space-y-5 rounded-b-lg bg-white px-5 pb-4 pt-3">
+            <Stats triage={triage} counts={counts} />
+            <LayerBar counts={counts} n={triage.tasks.length} />
+            <FixFirst doctor={doctor} triage={triage} />
+            <SkillFailures doctor={doctor} present={counts.map(([k]) => k)} ctx={ctx} />
         </div>
     );
 }
@@ -803,17 +834,13 @@ function BuildLinks({ status }: { status: DoctorStatus }) {
             {status.buildUrl && (
                 <>
                     {" · "}
-                    <ExternalLink href={status.buildUrl} ok={isAdoUrl}>
-                        build
-                    </ExternalLink>
+                    <BuildLink href={status.buildUrl} label="build" />
                 </>
             )}
             {status.trigger && (
                 <>
                     {" · "}
-                    <ExternalLink href={status.trigger} ok={isAdoUrl}>
-                        nightly
-                    </ExternalLink>
+                    <BuildLink href={status.trigger} label="nightly" />
                 </>
             )}
         </>

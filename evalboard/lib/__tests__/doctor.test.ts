@@ -157,11 +157,13 @@ describe("parseTriage / parseFixes", () => {
             confidence: "high",
             criterion: "file_contains",
             passedBefore: "2099-01-01_04-20-00 (claude-code)",
-            related: "example-t3 fails the same check",
             envGroup: null,
             doctorPr: null,
         });
-        expect(t1.existingPrs).toHaveLength(3);
+        // Only allowlisted PR URLs survive the parser (javascript: and a
+        // look-alike host are dropped).
+        expect(t1.existingPrs.map((p) => p.url)).toEqual(["https://github.com/UiPath/skills/pull/123"]);
+        expect(t1).not.toHaveProperty("related");
         expect(t1).not.toHaveProperty("relatedSkillPrs");
         // open-pr actions (PRs that merely touch the files) are left out.
         expect(t.actions.map((a) => a.text)).not.toContainEqual(expect.stringMatching(/^Open PR/));
@@ -173,6 +175,29 @@ describe("parseTriage / parseFixes", () => {
         expect(parseTriage(JSON.stringify({ ...JSON.parse(TRIAGE), schema_version: 2 }))).toBeNull();
         expect(parseTriage("{")).toBeNull();
         expect(parseTriage(JSON.stringify({ schema_version: 1 }))).toBeNull();
+    });
+
+    test("doctor_pr is kept only when allowlisted", () => {
+        const doc = JSON.parse(TRIAGE);
+        doc.tasks[1].doctor_pr = "https://github.com/UiPath/skills/pull/9";
+        doc.tasks[2].doctor_pr = "https://github.com.example.invalid/UiPath/skills/pull/9";
+        const t = parseTriage(JSON.stringify(doc))!;
+        expect(t.tasks[1].doctorPr).toBe("https://github.com/UiPath/skills/pull/9");
+        expect(t.tasks[2].doctorPr).toBeNull();
+    });
+
+    test("parseOpened: prototype-named task ids are own keys", () => {
+        const o = parseOpened(
+            JSON.stringify({
+                opened: [
+                    { task_id: "__proto__", pr_url: "https://github.com/UiPath/skills/pull/1" },
+                    { task_id: "constructor", pr_url: "https://github.com/UiPath/skills/pull/2" },
+                ],
+            }),
+        )!;
+        expect(Object.hasOwn(o, "__proto__")).toBe(true);
+        expect(o.constructor).toBe("https://github.com/UiPath/skills/pull/2");
+        expect(Object.getPrototypeOf(o)).toBe(Object.prototype);
     });
 
     test("parseOpened: allowlisted PR URLs map by task; the rest is skipped", () => {

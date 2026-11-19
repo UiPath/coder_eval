@@ -46,6 +46,8 @@ export interface DoctorStatus {
     trigger: string | null;
 }
 
+// Every PR URL the parsers hand out has passed isSkillsPrUrl: views can link
+// them without checking again.
 export interface DoctorPr {
     url: string;
     title: string;
@@ -65,10 +67,10 @@ export interface DoctorTask {
     criterion: string | null;
     evidence: string | null;
     passedBefore: string | null;
-    related: string | null;
     // Only the source of a third-party "Proposed PR" (an open PR the fix names).
     existingPrs: DoctorPr[];
     envGroup: string | null;
+    // The doctor's PR for this task, allowlisted (else null).
     doctorPr: string | null;
 }
 
@@ -166,7 +168,7 @@ export function parseDoctorStatus(raw: string | null | undefined): DoctorStatus 
 function parsePr(v: unknown): DoctorPr | null {
     if (!isObj(v)) return null;
     const url = str(v.url);
-    if (!url) return null;
+    if (!isSkillsPrUrl(url)) return null;
     return { url, title: str(v.title) ?? "", state: str(v.state) ?? "unknown" };
 }
 
@@ -190,10 +192,9 @@ function parseTask(v: unknown): DoctorTask | null {
         criterion: str(v.criterion),
         evidence: str(v.evidence),
         passedBefore: str(v.passed_before),
-        related: str(v.related),
         existingPrs: prList(v.existing_prs),
         envGroup: str(v.env_group),
-        doctorPr: str(v.doctor_pr),
+        doctorPr: isSkillsPrUrl(v.doctor_pr) ? v.doctor_pr : null,
     };
 }
 
@@ -284,14 +285,16 @@ export function patchIds(fixes: DoctorFixes | null): Set<string> {
 export function parseOpened(raw: string | null | undefined): Record<string, string> | null {
     const j = parseJson(raw);
     if (!isObj(j) || !Array.isArray(j.opened)) return null;
-    const out: Record<string, string> = {};
+    // Built through a Map so a task id such as "__proto__" or "constructor"
+    // is an own key, never the prototype; the first entry per task wins.
+    const out = new Map<string, string>();
     for (const e of j.opened) {
         if (!isObj(e)) continue;
         const id = str(e.task_id);
         const url = str(e.pr_url);
-        if (id && isSkillsPrUrl(url) && !(id in out)) out[id] = url;
+        if (id && isSkillsPrUrl(url) && !out.has(id)) out.set(id, url);
     }
-    return out;
+    return Object.fromEntries(out);
 }
 
 /** `<fixes_dir>/<id>.patch` → the id, or null for any other doctor path. */

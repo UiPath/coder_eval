@@ -215,7 +215,6 @@ describe("TaskFailureAnalysis block", () => {
             "Failing check",
             "Evidence",
             "Passed before",
-            "Related",
         ]);
         expect(within(c).getByText("literal").tagName).toBe("CODE");
         // #123 (open on these files) and #125 (related skill PR) are not shown.
@@ -357,6 +356,65 @@ describe("TaskFailureAnalysis block", () => {
     });
 });
 
+describe("untrusted keys", () => {
+    test.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+        "layer / solvable / opened task id %j do not crash and render as text",
+        (k) => {
+            const d = doctor();
+            d.triage!.tasks[1] = { ...d.triage!.tasks[1], layer: k, solvable: k };
+            d.opened = JSON.parse(JSON.stringify({ [k]: OPENED }));
+            renderBlock(d);
+            openBlock();
+            fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+            const c = card("example-t1");
+            expect(within(c).getAllByText(k).length).toBeGreaterThan(0);
+            expect(screen.getByRole("toolbar", { name: "Filter failures" })).toHaveTextContent(k);
+        },
+    );
+});
+
+describe("doctor PR resolution", () => {
+    test("a task covered by an opened candidate gets that PR, not 'Fix prepared'", () => {
+        const d = doctor();
+        // example-grader-fix's primary task is example-t1; it also covers t2.
+        d.fixes!.candidates[0].covers = ["example-t1", "example-t2"];
+        d.opened = { "example-t1": OPENED };
+        renderBlock(d);
+        openBlock();
+        fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+        for (const id of ["example-t1", "example-t2"]) {
+            const c = card(id);
+            expect(within(c).getByRole("link", { name: "PR with fix: #300 ↗" })).toBeInTheDocument();
+            expect(within(c).queryByTestId("fix-prepared")).toBeNull();
+        }
+        // #300 counted once, plus #126 on t2.
+        expect(digest(d)).toBe("5 errors · 2 PRs with fix");
+    });
+
+    test("the doctor's own PR is not also a Proposed PR, and counts once", () => {
+        const d = doctor();
+        const pr126 = "https://github.com/UiPath/skills/pull/126";
+        d.triage!.tasks[2].doctorPr = pr126;
+        renderBlock(d);
+        openBlock();
+        openSkill("uipath-example-two");
+        const c = card("example-t2");
+        expect(within(c).getByRole("link", { name: "PR with fix: #126 ↗" })).toBeInTheDocument();
+        expect(within(c).queryByTestId("proposed-pr")).toBeNull();
+        expect(digest(d)).toBe("5 errors · 1 PR with fix");
+    });
+
+    test("no placeholder row for a fixable task without any PR or candidate", () => {
+        const d = doctor();
+        d.fixes = null;
+        d.triage!.tasks[2].fix = "no PR named";
+        renderBlock(d);
+        openBlock();
+        fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+        expect(block()).not.toHaveTextContent("none yet");
+    });
+});
+
 describe("groupBySkill", () => {
     test("skills: linked PRs first, then prepared fixes, then failed tasks, then name", () => {
         // -two: 1 linked (#126) of 3; uipath-example: 0 linked, 1 prepared, of 2.
@@ -395,7 +453,6 @@ describe("groupBySkill", () => {
             { ...base, taskId: "y-prepared", layer: "grader" },
             { ...base, taskId: "w-opened", layer: "grader" },
             { ...base, taskId: "x-doctor-pr", layer: "grader", doctorPr: "https://github.com/UiPath/skills/pull/7" },
-            { ...base, taskId: "b-bad-pr", layer: "grader", doctorPr: "https://example.invalid/pull/7" },
             { ...base, taskId: "p-proposed", layer: "grader", fix: "see #123" },
             { ...d.triage!.tasks[0], skill: base.skill },
         ];
@@ -415,11 +472,10 @@ describe("groupBySkill", () => {
             // The rest: skill ranks after grader on the doctor page, so first.
             "z-plain-skill",
             "a-plain-grader",
-            "b-bad-pr",
         ]);
         expect(g.envGroups.map((e) => e.tasks.map((t) => t.taskId))).toEqual([["example-e1"]]);
         // Linked: #8, #7, #123. The prepared f1 is not.
-        expect(g.ready).toBe(3);
+        expect(g.fixPrs).toBe(3);
     });
 
     test("the rendered accordions follow the same order", () => {
@@ -433,18 +489,12 @@ describe("groupBySkill", () => {
         expect(order).toEqual(["uipath-example", "uipath-example-two"]);
     });
 
-    test("proposedPrs: named in the fix text, open, allowlisted", () => {
+    test("proposedPrs: named in the fix text and open (URLs are allowlisted by the parser)", () => {
         const t = doctor().triage!.tasks[2];
         expect(proposedPrs(t).map((p) => p.url)).toEqual(["https://github.com/UiPath/skills/pull/126"]);
         expect(proposedPrs({ ...t, fix: "see https://github.com/UiPath/skills/pull/126" })).toHaveLength(1);
         expect(proposedPrs({ ...t, fix: "see #1260 and #12" })).toHaveLength(0);
         expect(proposedPrs({ ...t, fix: null })).toHaveLength(0);
-        expect(
-            proposedPrs({
-                ...t,
-                existingPrs: [{ url: "https://github.com.example.invalid/UiPath/skills/pull/126", title: "", state: "open" }],
-            }),
-        ).toHaveLength(0);
         expect(proposedPrs({ ...t, existingPrs: [{ ...t.existingPrs[0], state: "unknown" }] })).toHaveLength(0);
     });
 

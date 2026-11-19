@@ -151,16 +151,33 @@ describe("readRunDoctor: what it fetches", () => {
         warn.mockRestore();
     });
 
-    test("status.json is refetched after a minute, not within it; the rest never", async () => {
+    test("status.json and opened.json are refetched after a minute, not within it; the rest never", async () => {
         await read();
         state.downloads = [];
         await read();
         expect(state.downloads).toEqual([]);
-        const st = path.join(root, RUN, "skill-doctor", "status.json");
         const old = new Date(Date.now() - 120_000);
-        await fs.utimes(st, old, old);
+        for (const f of ["status.json", "fixes-1000001/opened.json"]) {
+            await fs.utimes(path.join(root, RUN, "skill-doctor", f), old, old);
+        }
         await read();
-        expect(state.downloads).toEqual([`${D}/status.json`]);
+        expect(state.downloads.sort()).toEqual(
+            [`${D}/status.json`, `${D}/fixes-1000001/opened.json`].sort(),
+        );
+    });
+
+    test("an opened.json that changes is picked up after the refresh age", async () => {
+        expect((await read())!.opened).toEqual({});
+        state.blobs[`${D}/fixes-1000001/opened.json`] = JSON.stringify({
+            opened: [{ task_id: "example-t1", pr_url: "https://github.com/UiPath/skills/pull/300" }],
+        });
+        // Within the minute: the cached copy.
+        expect((await read())!.opened).toEqual({});
+        const old = new Date(Date.now() - 120_000);
+        await fs.utimes(path.join(root, RUN, "skill-doctor", "fixes-1000001", "opened.json"), old, old);
+        expect((await read())!.opened).toEqual({
+            "example-t1": "https://github.com/UiPath/skills/pull/300",
+        });
     });
 
     test("patch fan-out is capped and ids are checked", async () => {
