@@ -198,6 +198,13 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
     total_tokens: int | None = None
     iteration_count: int | None = None
     total_assistant_turns: int | None = None
+    models_used: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Distinct `model_used` values across the folded replicates, sorted. Empty when no replicate "
+            "recorded a model. The experiment report reads it to mark a cross-model turn comparison."
+        ),
+    )
     reference_similarity: float | None = None
     replicate_index: int = Field(
         default=0,

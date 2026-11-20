@@ -1,6 +1,7 @@
 """Tests for experiment result models and report generation."""
 
 import json
+from html import escape as html_escape
 
 import pytest
 
@@ -15,6 +16,7 @@ from coder_eval.models import (
     VariantResult,
 )
 from coder_eval.reports import ExperimentReportGenerator, describe_prompt_config
+from coder_eval.reports.helpers import CROSS_MODEL_TURNS_NOTE
 from tests._fixtures.report_snapshots import assert_matches_snapshot
 
 
@@ -1291,6 +1293,170 @@ class TestCollectVariantSeries:
         )
         series = collect_variant_series(result)
         assert set(series) == {"a"}
+
+
+class TestCrossModelTurns:
+    """Turn counts depend on the model, so a cross-model turn comparison is marked (#98)."""
+
+    @staticmethod
+    def _make_result(models: dict[str, list[str]]) -> ExperimentResult:
+        """Two tasks; each variant's turns differ enough that a Welch test reports a p-value."""
+        variant_ids = list(models)
+        turns = {vid: [5 + 20 * i, 6 + 20 * i] for i, vid in enumerate(variant_ids)}
+        return ExperimentResult(
+            experiment_id="exp",
+            description="d",
+            variant_ids=variant_ids,
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id=task_id,
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id=task_id,
+                            weighted_score=1.0,
+                            final_status="SUCCESS",
+                            duration_seconds=10.0,
+                            total_assistant_turns=turns[vid][t],
+                            models_used=models[vid],
+                        )
+                        for vid in variant_ids
+                    ],
+                    best_variant=variant_ids[0],
+                    is_tie=True,
+                    score_spread=0.0,
+                )
+                for t, task_id in enumerate(["t1", "t2"])
+            ],
+            variant_aggregates={
+                vid: VariantAggregate(
+                    variant_id=vid,
+                    tasks_run=2,
+                    tasks_succeeded=2,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=1.0,
+                    average_duration=10.0,
+                )
+                for vid in variant_ids
+            },
+            total_duration_seconds=40.0,
+        )
+
+    @staticmethod
+    def _row(md: str, label: str) -> str:
+        return next(line for line in md.splitlines() if line.startswith(f"| {label} |"))
+
+    def test_same_model_keeps_the_turns_p_value(self):
+        md = ExperimentReportGenerator.generate_experiment_report(
+            self._make_result({"a": ["claude-sonnet-5"], "b": ["claude-sonnet-5"]})
+        )
+        assert self._row(md, "Model") == "| Model | claude-sonnet-5 | claude-sonnet-5 | — |"
+        turns = self._row(md, "Assistant Turns")
+        assert not turns.endswith("| — |")
+        assert "cross-model" not in md
+        assert CROSS_MODEL_TURNS_NOTE not in md
+
+    def test_different_models_mark_turns_and_drop_their_p_value(self):
+        md = ExperimentReportGenerator.generate_experiment_report(
+            self._make_result({"terra": ["gpt-5.6-terra"], "sonnet": ["claude-sonnet-5"]})
+        )
+        assert self._row(md, "Model") == "| Model | gpt-5.6-terra | claude-sonnet-5 | — |"
+        assert (
+            self._row(md, "Assistant Turns (cross-model)")
+            == "| Assistant Turns (cross-model) | 5.5 ± 0.7 | 25.5 ± 0.7 | — |"
+        )
+        assert f"*{CROSS_MODEL_TURNS_NOTE}*" in md
+        # Cost and wall-clock stay comparable across models: only the turns lose their p-value.
+        assert not self._row(md, "Avg Duration (s)").endswith("| — |")
+
+    def test_route_qualified_id_is_the_same_model(self):
+        """An errored row keeps the qualified route id; it is not a second model."""
+        md = ExperimentReportGenerator.generate_experiment_report(
+            self._make_result({"a": ["claude-sonnet-5", "eu.anthropic.claude-sonnet-5"], "b": ["claude-sonnet-5"]})
+        )
+        assert self._row(md, "Model") == "| Model | claude-sonnet-5 | claude-sonnet-5 | — |"
+        assert "cross-model" not in md
+
+    def test_claude_code_synthetic_model_is_not_a_model(self):
+        """A row that ended on a CLI-made error message records `<synthetic>`, not a model."""
+        md = ExperimentReportGenerator.generate_experiment_report(
+            self._make_result({"a": ["<synthetic>", "claude-sonnet-5"], "b": ["claude-sonnet-5"], "c": ["<synthetic>"]})
+        )
+        assert self._row(md, "Model") == "| Model | claude-sonnet-5 | claude-sonnet-5 | n/a |"
+        assert "cross-model" not in md
+
+    def test_mixed_models_inside_one_variant_are_cross_model(self):
+        """A single variant whose rows ran two models pools them into one turn mean."""
+        md = ExperimentReportGenerator.generate_experiment_report(self._make_result({"a": ["gpt-5", "claude-opus-5"]}))
+        assert self._row(md, "Model") == "| Model | claude-opus-5, gpt-5 |"
+        assert "| Assistant Turns (cross-model) |" in md
+        assert CROSS_MODEL_TURNS_NOTE in md
+
+    def test_an_unrecorded_model_is_unknown_not_different(self):
+        md = ExperimentReportGenerator.generate_experiment_report(
+            self._make_result({"a": ["claude-sonnet-5"], "b": []})
+        )
+        assert self._row(md, "Model") == "| Model | claude-sonnet-5 | n/a | — |"
+        assert "cross-model" not in md
+
+    def test_snapshot_id_is_the_same_model_as_its_alias(self):
+        """A crashed row keeps the configured alias; a replied row records the dated snapshot."""
+        models = {"a": ["claude-haiku-4-5", "claude-haiku-4-5-20251001"], "b": ["claude-haiku-4-5-20251001"]}
+        md = ExperimentReportGenerator.generate_experiment_report(self._make_result(models))
+        assert "cross-model" not in md
+        assert self._row(md, "Model") == "| Model | claude-haiku-4-5 | claude-haiku-4-5 | — |"
+
+    def test_missing_models_used_key_loads_as_empty(self):
+        """An experiment.json written before models_used existed loads and renders as before."""
+        result = self._make_result({"a": ["gpt-5"], "b": ["gpt-5"]})
+        for ts in result.task_summaries:
+            ts.variant_results = [
+                VariantResult.model_validate({k: v for k, v in vr.model_dump().items() if k != "models_used"})
+                for vr in ts.variant_results
+            ]
+            assert all(vr.models_used == [] for vr in ts.variant_results)
+        assert "| Model |" not in ExperimentReportGenerator.generate_experiment_report(result)
+
+    def test_no_recorded_model_renders_no_model_row(self):
+        md = ExperimentReportGenerator.generate_experiment_report(self._make_result({"a": [], "b": []}))
+        assert "| Model |" not in md
+        assert "cross-model" not in md
+
+    def test_no_note_without_turn_data(self):
+        result = self._make_result({"a": ["gpt-5"], "b": ["claude-opus-5"]})
+        for ts in result.task_summaries:
+            for vr in ts.variant_results:
+                vr.total_assistant_turns = None
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "| Model | gpt-5 | claude-opus-5 | — |" in md
+        assert "Assistant Turns" not in md
+        assert CROSS_MODEL_TURNS_NOTE not in md
+
+    def test_html_marks_the_same_rows_as_markdown(self):
+        from coder_eval.reports.html import _experiment_aggregate_metrics
+
+        cross = _experiment_aggregate_metrics(self._make_result({"a": ["gpt-5"], "b": ["claude-opus-5"]}))
+        assert "<tr><td>Model</td><td>gpt-5</td><td>claude-opus-5</td><td>—</td></tr>" in cross
+        assert "<tr><td>Assistant Turns (cross-model)</td><td>5.5 ± 0.7</td><td>25.5 ± 0.7</td><td>—</td></tr>" in cross
+        assert html_escape(CROSS_MODEL_TURNS_NOTE) in cross
+
+        same = _experiment_aggregate_metrics(self._make_result({"a": ["gpt-5"], "b": ["gpt-5"]}))
+        assert "<td>Assistant Turns</td>" in same
+        assert "cross-model" not in same
+        assert html_escape(CROSS_MODEL_TURNS_NOTE) not in same
+
+        no_models = _experiment_aggregate_metrics(self._make_result({"a": [], "b": []}))
+        assert "<td>Model</td>" not in no_models
+
+        no_turns = self._make_result({"a": ["gpt-5"], "b": ["claude-opus-5"]})
+        for ts in no_turns.task_summaries:
+            for vr in ts.variant_results:
+                vr.total_assistant_turns = None
+        out = _experiment_aggregate_metrics(no_turns)
+        assert "<td>Model</td>" in out
+        assert "Assistant Turns" not in out
+        assert html_escape(CROSS_MODEL_TURNS_NOTE) not in out
 
 
 class TestPairedComparisonSection:

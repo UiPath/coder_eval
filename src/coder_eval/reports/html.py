@@ -27,6 +27,7 @@ from ..models import FinalStatus, JudgeCriterionResult, eval_result_total_cost, 
 from ..result_metrics import agent_wall_ms, expected_turns_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
+    CROSS_MODEL_TURNS_NOTE,
     collect_variant_series,
     describe_prompt_config,
     fmt_mean_sd,
@@ -35,6 +36,8 @@ from .helpers import (
     is_env_table_key,
     load_variant_eval_results,
     paired_comparison,
+    turns_cross_model,
+    variant_models,
 )
 from .markdown import (
     SLOW_PARAMS_PREVIEW_CHARS,
@@ -1386,6 +1389,12 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
         return "<tr>" + "".join(cells) + "</tr>"
 
     rows: list[str] = []
+    # Turns depend on the model, so the table that shows them also shows what
+    # each variant ran on.
+    models = variant_models(result)
+    cross_model = turns_cross_model(models)
+    if any(models.values()):
+        rows.append(_row("Model", [", ".join(models[vid]) or "n/a" for vid in result.variant_ids], None))
     rows.append(_row("Tasks Run", [str(result.variant_aggregates[vid].tasks_run) for vid in result.variant_ids], None))
     rows.append(
         _row(
@@ -1427,12 +1436,15 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
             fmt_p(welch_t_test(series[vid_a].durations, series[vid_b].durations)) if show_p else None,
         )
     )
-    if any(series[vid].asst_turns for vid in result.variant_ids):
+    has_turns = any(series[vid].asst_turns for vid in result.variant_ids)
+    if has_turns:
         rows.append(
             _row(
-                "Assistant Turns",
+                "Assistant Turns (cross-model)" if cross_model else "Assistant Turns",
                 [fmt_mean_sd(series[vid].asst_turns, ".1f") for vid in result.variant_ids],
-                fmt_p(welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns)) if show_p else None,
+                fmt_p(welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns))
+                if show_p and not cross_model
+                else None,
             )
         )
     if any(series[vid].tokens for vid in result.variant_ids):
@@ -1444,6 +1456,7 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
             )
         )
 
+    note = f'\n<p class="muted">{_esc(CROSS_MODEL_TURNS_NOTE)}</p>' if cross_model and has_turns else ""
     return f"""
 <h2>Aggregate Metrics</h2>
 <div class="card" style="padding:0">
@@ -1451,7 +1464,7 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     <thead>{header_html}</thead>
     <tbody>{"".join(rows)}</tbody>
   </table>
-</div>
+</div>{note}
 """
 
 

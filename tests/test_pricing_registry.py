@@ -20,7 +20,7 @@ def test_registered_rate_resolves_through_calculate_cost():
 
 def test_registered_bare_key_resolves_through_prefixed_lookup():
     """register_pricing stores keys verbatim (bare), but calculate_cost resolves
-    via _normalize_model — so a bare-registered key must still price a
+    via normalize_model — so a bare-registered key must still price a
     Bedrock/vendor-prefixed model id. Guards against the two normalization seams
     (registration vs lookup) drifting apart."""
     register_pricing({"acme-1": ModelPricing(1.0, 2.0, 3.0, 4.0)})
@@ -39,7 +39,7 @@ def test_registered_bare_key_resolves_through_prefixed_lookup():
 )
 def test_bedrock_version_suffix_prices_as_bare_key(model: str, bare: str):
     """Claude Code on Bedrock records the configured id, e.g. ``.env.example``'s ``…-v1:0``, as ``model_used``."""
-    assert pricing._normalize_model(model) == bare
+    assert pricing.normalize_model(model) == bare
     assert calculate_cost(model, 1_000_000, 1_000_000) == calculate_cost(bare, 1_000_000, 1_000_000) > 0
 
 
