@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-doctor/triage_v1.json",
+  "title": "runs/<run_id>/skill-doctor/triage-<build_id|local-<ts>>.json (contract v1)",
+  "description": "One nightly run's failed rows: the $0 triage (class, owners, recurrence), the optional model diagnosis (layer ... passed_before), fix scouting (existing_prs, doctor_pr) and cross-task actions. All text is scrubbed (emails, tenant ids, token shapes). Immutable once written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "summary", "tasks", "actions", "disclaimer"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "disclaimer": {"type": "string"},
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "harness", "model", "skills_git_commit", "cli_version", "tasks_run", "rows_executed", "adhoc",
+                   "history_base_run", "run_json_etag", "build_id", "doctor_version", "generated_at", "mode", "mode_reason"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "harness": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "skills_git_commit": {"type": ["string", "null"]},
+        "cli_version": {"type": ["string", "null"]},
+        "tasks_run": {"type": ["integer", "null"]},
+        "rows_executed": {"type": ["integer", "null"]},
+        "adhoc": {"type": "boolean"},
+        "history_base_run": {"type": ["string", "null"]},
+        "run_json_etag": {"type": ["string", "null"]},
+        "build_id": {"type": ["string", "null"]},
+        "build_url": {"type": ["string", "null"]},
+        "doctor_version": {"type": "string"},
+        "generated_at": {"type": "string"},
+        "mode": {"enum": ["triage-only", "diagnosed"]},
+        "mode_reason": {"type": "string"},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "pr_data": {"type": "string"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows_failed", "rows_diagnosed", "by_class", "by_layer", "vs_history", "env_groups"],
+      "properties": {
+        "rows_failed": {"type": "integer", "minimum": 0},
+        "rows_diagnosed": {"type": "integer", "minimum": 0},
+        "rows_diagnosis_rejected": {"type": "integer", "minimum": 0},
+        "by_class": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "by_layer": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "vs_history": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["new", "persisting", "fixed", "base_run"],
+          "properties": {
+            "new": {"type": "integer", "minimum": 0},
+            "persisting": {"type": "integer", "minimum": 0},
+            "fixed": {"type": "integer", "minimum": 0},
+            "fixed_tasks": {"type": "array", "items": {"type": "string"}},
+            "base_run": {"type": ["string", "null"]}
+          }
+        },
+        "env_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cause", "count", "task_ids"],
+            "properties": {
+              "cause": {"type": "string"},
+              "count": {"type": "integer", "minimum": 1},
+              "task_ids": {"type": "array", "items": {"type": "string"}},
+              "detail": {"type": "string"},
+              "fix": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "tasks": {"type": "array", "items": {"$ref": "#/$defs/task"}},
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "count", "text", "task_ids"],
+        "properties": {
+          "kind": {"enum": ["env", "open-pr", "upstream", "layer"]},
+          "count": {"type": "integer", "minimum": 1},
+          "text": {"type": "string"},
+          "task_ids": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fixed_by_pr": {"type": ["object", "null"], "additionalProperties": false, "required": ["number", "verdict", "basis"], "description": "The diagnosis's judgement of the open PR that best fixes this row (an opinion, from its diff); the Fix stage's replay check of it is fixes.json pr_checks[task_id]", "properties": {"number": {"type": "integer", "minimum": 1}, "verdict": {"enum": ["fixes", "may_help", "unrelated"]}, "basis": {"type": "string", "maxLength": 300}}},
+    "pr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "title", "state"],
+      "properties": {
+        "url": {"type": "string", "pattern": "^https://github\\.com/UiPath/skills/pull/\\d+$"},
+        "title": {"type": "string", "maxLength": 300},
+        "state": {"enum": ["open", "merged", "merged-after-run", "unknown", "closed"]}
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "skill", "class", "family", "state", "nights_seen", "owners", "run_status", "criterion", "error",
+                   "diagnosed", "layer", "confidence", "why", "evidence", "solvable", "fix", "related", "passed_before",
+                   "existing_prs", "doctor_pr"],
+      "properties": {
+        "task_id": {"type": "string"},
+        "skill": {"type": "string"},
+        "class": {"enum": ["env", "harness-error", "turn-cap", "timeout", "failure", "known-upstream", "contested"]},
+        "family": {"type": "string"},
+        "state": {"enum": ["new", "changed", "known"]},
+        "nights_seen": {"type": "integer", "minimum": 1},
+        "owners": {"type": "array", "items": {"type": "string"}},
+        "run_status": {"type": ["string", "null"]},
+        "reps_failed": {"type": "integer", "minimum": 0},
+        "criterion": {"type": ["string", "null"]},
+        "error": {"type": ["string", "null"]},
+        "contested": {"type": ["array", "null"], "items": {"type": "string"}},
+        "known_upstream": {"type": ["string", "null"]},
+        "recurrence": {"type": ["object", "null"]},
+        "previous_nights": {"type": ["object", "null"]},
+        "env_group": {"type": ["string", "null"]},
+        "diagnosed": {"type": "boolean"},
+        "diagnosis_skipped": {"type": ["string", "null"]},
+        "layer": {"enum": ["agent", "skill", "grader", "task", "env", "upstream", "flaky", "undiagnosed"]},
+        "confidence": {"type": ["string", "null"]},
+        "why": {"type": ["string", "null"]},
+        "evidence": {"type": ["string", "null"]},
+        "solvable": {"type": ["string", "null"]},
+        "fix": {"type": ["string", "null"]},
+        "related": {"type": ["string", "null"]},
+        "passed_before": {"type": ["string", "null"]},
+        "existing_prs": {"type": ["array", "null"], "items": {"$ref": "#/$defs/pr"}},
+        "related_skill_prs": {"type": ["array", "null"], "items": {"$ref": "#/$defs/pr"}},
+        "doctor_pr": {"type": ["string", "null"], "pattern": "^https://github\\.com/UiPath/skills/pull/\\d+$"},
+        "fixed_by_pr": {"$ref": "#/$defs/fixed_by_pr"}
+      }
+    }
+  }
+}

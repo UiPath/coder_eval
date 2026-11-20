@@ -61,6 +61,13 @@ describe("digest", () => {
         expect(digest(doctor())).toBe("5 errors · 1 PR with fix");
         expect(digest(withOpened())).toBe("5 errors · 2 PRs with fix");
     });
+    test("done without a triage: a fetch error is not blamed on the contract", () => {
+        const d = { ...doctor(), triage: null };
+        expect(digest(d)).toBe("report done, but its triage file is missing or did not parse");
+        expect(digest({ ...d, fetchFailed: true })).toBe(
+            "report done, but its triage file could not be fetched",
+        );
+    });
     test("no linked PR: the errors only", () => {
         const d = doctor();
         d.triage!.tasks[2].fixedByPr = null;

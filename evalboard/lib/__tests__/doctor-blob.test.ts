@@ -133,6 +133,61 @@ describe("readRunDoctor: what it fetches", () => {
         expect(state.downloads).toEqual([`${D}/status.json`]);
     });
 
+    test.each(["queued", "running", "failed", "skipped", "retracted"])(
+        "%s with fixes_dir kept: only status.json is fetched, no patch is served",
+        async (st) => {
+            seedBlobs(statusWith({ state: st }));
+            const doctor = await read();
+            expect(doctor?.status.state).toBe(st);
+            expect(doctor?.triage ?? null).toBeNull();
+            expect(doctor?.fixes ?? null).toBeNull();
+            const { resolveSafePath } = await import("../runs");
+            expect(
+                await resolveSafePath(RUN, "skill-doctor/fixes-1000001/example-grader-fix.patch"),
+            ).toBeNull();
+            expect([...new Set(state.downloads)]).toEqual([`${D}/status.json`]);
+        },
+    );
+
+    test("a storage error on the triage: the page still loads, flagged fetchFailed", async () => {
+        state.failWith = { statusCode: 500 };
+        state.failOn = `${D}/triage-1000001.json`;
+        const err = vi.spyOn(console, "error").mockImplementation(() => {});
+        const doctor = await read();
+        expect(doctor?.triage).toBeNull();
+        expect(doctor?.fetchFailed).toBe(true);
+        expect(err).toHaveBeenCalled();
+        err.mockRestore();
+    });
+
+    test("a triage that names another run is ignored", async () => {
+        const t = JSON.parse(fixture("triage-1000001.json"));
+        t.run.run_id = "2099-01-02_04-23-30";
+        state.blobs[`${D}/triage-1000001.json`] = JSON.stringify(t);
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const doctor = await read();
+        expect(doctor?.triage).toBeNull();
+        expect(doctor?.fetchFailed).toBe(false);
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/names run/));
+        warn.mockRestore();
+    });
+
+    test("a fixes.json that names another run lists no patch", async () => {
+        const f = JSON.parse(fixture("fixes-1000001/fixes.json"));
+        f.run_id = "2099-01-02_04-23-30";
+        state.blobs[`${D}/fixes-1000001/fixes.json`] = JSON.stringify(f);
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const doctor = await read();
+        expect(doctor?.fixes).toBeNull();
+        expect(doctor?.triage).not.toBeNull();
+        const { resolveSafePath } = await import("../runs");
+        expect(
+            await resolveSafePath(RUN, "skill-doctor/fixes-1000001/example-grader-fix.patch"),
+        ).toBeNull();
+        expect(state.downloads.some((n) => n.endsWith(".patch"))).toBe(false);
+        warn.mockRestore();
+    });
+
     test("a bad triage_file name is never fetched", async () => {
         seedBlobs(statusWith({ triage_file: "../run.json", fixes_dir: null }));
         expect((await read())?.triage).toBeNull();
@@ -302,20 +357,52 @@ describe("readRunDoctor", () => {
         expect(state.downloads).toEqual([]);
     });
 
-    test("a storage error on the patch: no throw, nothing on disk", async () => {
+    test.each([
+        ["the patch", `${D}/fixes-1000001/example-grader-fix.patch`],
+        ["fixes.json", `${D}/fixes-1000001/fixes.json`],
+        ["status.json", `${D}/status.json`],
+    ])("a storage error on %s propagates (the route answers 5xx, not 403/404)", async (_, name) => {
         state.failWith = { statusCode: 500 };
-        state.failOn = `${D}/fixes-1000001/example-grader-fix.patch`;
-        const err = vi.spyOn(console, "error").mockImplementation(() => {});
+        state.failOn = name;
+        const { resolveSafePath } = await import("../runs");
+        await expect(
+            resolveSafePath(RUN, "skill-doctor/fixes-1000001/example-grader-fix.patch"),
+        ).rejects.toThrow(/blob failed/);
+    });
+
+    test("a patch link fetches only that patch: a storage error elsewhere does not break it", async () => {
+        state.failWith = { statusCode: 500 };
+        state.failOn = `${D}/fixes-1000001/opened.json`;
         const { resolveSafePath } = await import("../runs");
         const abs = await resolveSafePath(
             RUN,
             "skill-doctor/fixes-1000001/example-grader-fix.patch",
         );
-        // /api/file then answers 404 for the missing file.
-        expect(abs).not.toBeNull();
-        await expect(fs.access(abs!)).rejects.toThrow();
-        expect(err).toHaveBeenCalled();
-        err.mockRestore();
+        expect(abs).toMatch(/example-grader-fix\.patch$/);
+        await expect(fs.access(abs!)).resolves.toBeUndefined();
+        expect(state.downloads).not.toContain(`${D}/fixes-1000001/opened.json`);
+    });
+
+    test("normalized before the dispatch: ./ and ../ cannot skip the gate", async () => {
+        vi.stubEnv("EVALBOARD_EDITION", "");
+        const { resolveSafePath } = await import("../runs");
+        for (const bad of [
+            "./skill-doctor/fixes-1000001/example-grader-fix.patch",
+            "activation/../skill-doctor/fixes-1000001/example-grader-fix.patch",
+            "./skill-doctor/status.json",
+            "../x",
+            "..",
+        ]) {
+            expect(await resolveSafePath(RUN, bad)).toBeNull();
+        }
+        expect(state.downloads).toEqual([]);
+    });
+
+    test.each(["..", "."])("a run id of %j is refused", async (id) => {
+        const { resolveSafePath } = await import("../runs");
+        expect(await resolveSafePath(id, ".env")).toBeNull();
+        expect(await resolveSafePath(id, "run.json")).toBeNull();
+        expect(state.downloads).toEqual([]);
     });
 
     test("only patch paths are served from skill-doctor/", async () => {

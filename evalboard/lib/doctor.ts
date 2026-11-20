@@ -23,7 +23,7 @@ const PATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // At most this many patches per run are fetched, linked and served.
 const MAX_PATCHES = 10;
 
-const DOCTOR_STATES = [
+export const DOCTOR_STATES = [
     "queued",
     "running",
     "done",
@@ -102,6 +102,9 @@ export interface DoctorAction {
 }
 
 export interface DoctorTriage {
+    // The run the triage describes (run.run_id); readRunDoctor drops a triage
+    // that names another run.
+    runId: string | null;
     // Rows the nightly executed (null when the run did not say).
     rowsRun: number | null;
     rowsFailed: number;
@@ -127,6 +130,9 @@ export interface DoctorFix {
 }
 
 export interface DoctorFixes {
+    // The run fixes.json describes (run_id); readRunDoctor drops one that
+    // names another run.
+    runId: string | null;
     fixMode: string | null;
     // By task id (own keys; read with own()). null: an entry that did not
     // validate.
@@ -142,6 +148,9 @@ export interface RunDoctor {
     // PRs the doctor opened (`<fixes_dir>/opened.json`): task id → PR URL,
     // allowlisted URLs only.
     opened?: Record<string, string>;
+    // A doctor file could not be fetched (a storage error, not a 404): the
+    // parts that are missing may exist.
+    fetchFailed?: boolean;
 }
 
 // ---------- coercion helpers ----------
@@ -154,8 +163,11 @@ function isObj(v: unknown): v is Obj {
 function str(v: unknown): string | null {
     return typeof v === "string" ? v : null;
 }
+function isCount(v: unknown): v is number {
+    return typeof v === "number" && Number.isInteger(v) && v >= 0;
+}
 function int(v: unknown, dflt = 0): number {
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : dflt;
+    return isCount(v) ? v : dflt;
 }
 function strList(v: unknown): string[] {
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
@@ -268,16 +280,16 @@ export function parseTriage(raw: string | null | undefined): DoctorTriage | null
     if (!isObj(j) || j.schema_version !== 1) return null;
     if (!isObj(j.summary) || !Array.isArray(j.tasks)) return null;
     const s = j.summary;
+    // The header shows these counts: a missing or malformed one is contract
+    // drift, so the triage does not parse (and readRunDoctor logs it) rather
+    // than reading as a real 0.
+    if (!isCount(s.rows_failed) || !isCount(s.rows_diagnosed)) return null;
     const run = isObj(j.run) ? j.run : {};
     return {
-        rowsRun:
-            typeof run.rows_executed === "number" &&
-            Number.isInteger(run.rows_executed) &&
-            run.rows_executed >= 0
-                ? run.rows_executed
-                : null,
-        rowsFailed: int(s.rows_failed),
-        rowsDiagnosed: int(s.rows_diagnosed),
+        runId: str(run.run_id),
+        rowsRun: isCount(run.rows_executed) ? run.rows_executed : null,
+        rowsFailed: s.rows_failed,
+        rowsDiagnosed: s.rows_diagnosed,
         tasks: j.tasks.map(parseTask).filter((t): t is DoctorTask => t !== null),
         actions: Array.isArray(j.actions)
             ? j.actions.flatMap((a): DoctorAction[] =>
@@ -296,9 +308,7 @@ function parseGates(v: unknown): DoctorGates {
     const replay = isObj(v.replay) ? str(v.replay.status) : null;
     const m = isObj(v.mutants) ? v.mutants : null;
     const mutants =
-        m && typeof m.n === "number" && typeof m.killed === "number"
-            ? { n: int(m.n), killed: int(m.killed) }
-            : null;
+        m && isCount(m.n) && isCount(m.killed) ? { n: m.n, killed: m.killed } : null;
     return { replay, mutants, review: str(v.review) };
 }
 
@@ -306,6 +316,7 @@ export function parseFixes(raw: string | null | undefined): DoctorFixes | null {
     const j = parseJson(raw);
     if (!isObj(j) || j.schema_version !== 1 || !Array.isArray(j.candidates)) return null;
     return {
+        runId: str(j.run_id),
         fixMode: str(j.fix_mode),
         prChecks: parsePrChecks(j.pr_checks),
         candidates: j.candidates.flatMap((c): DoctorFix[] => {

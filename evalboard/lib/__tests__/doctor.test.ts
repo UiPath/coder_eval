@@ -133,6 +133,32 @@ describe("parseDoctorStatus", () => {
 });
 
 describe("parseTriage / parseFixes", () => {
+    test.each([
+        ["no counts", {}],
+        ["a string count", { rows_failed: "5", rows_diagnosed: 3 }],
+        ["a negative count", { rows_failed: -1, rows_diagnosed: 3 }],
+        ["a fractional count", { rows_failed: 5, rows_diagnosed: 2.5 }],
+    ])("a triage with %s does not parse (never a false 0)", (_, summary) => {
+        const t = JSON.parse(TRIAGE);
+        t.summary = { ...t.summary, rows_failed: undefined, rows_diagnosed: undefined, ...summary };
+        expect(parseTriage(JSON.stringify(t))).toBeNull();
+    });
+
+    test("the run ids are kept, for readRunDoctor's check", () => {
+        expect(parseTriage(TRIAGE)!.runId).toBe("2099-01-03_04-23-30");
+        expect(parseFixes(FIXES)!.runId).toBe("2099-01-03_04-23-30");
+    });
+
+    test.each([
+        [{ n: 3.5, killed: 1 }],
+        [{ n: 3, killed: -1 }],
+        [{ n: "3", killed: 1 }],
+    ])("mutants %j are not shown as counts", (mutants) => {
+        const doc = JSON.parse(FIXES);
+        doc.candidates[0].gates = { ...doc.candidates[0].gates, mutants };
+        expect(parseFixes(JSON.stringify(doc))!.candidates[0].gates.mutants).toBeNull();
+    });
+
     test("reads the fixture: the card fields", () => {
         const t = parseTriage(TRIAGE)!;
         expect(t.tasks.map((x) => x.taskId)).toEqual([

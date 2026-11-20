@@ -37,12 +37,12 @@ const LAYERS = new Map<string, { label: string; color: string }>([
     ["flaky", { label: "Flaky", color: "#7d8794" }],
     ["undiagnosed", { label: "Not diagnosed", color: "#9aa5b3" }],
 ]);
-const ORDER = [...LAYERS.keys()];
+export const LAYER_ORDER = [...LAYERS.keys()];
 const OTHER_COLOR = "#9aa5b3";
 const layerOf = (k: string) => LAYERS.get(k) ?? { label: k, color: OTHER_COLOR };
 const rank = (k: string) => {
-    const i = ORDER.indexOf(k);
-    return i === -1 ? ORDER.length : i;
+    const i = LAYER_ORDER.indexOf(k);
+    return i === -1 ? LAYER_ORDER.length : i;
 };
 
 const SOLVABLE = new Map<string, string>([
@@ -140,7 +140,10 @@ export function digest(doctor: RunDoctor): string {
         case "retracted":
             return "the report for this run was retracted";
         case "done": {
-            if (!triage) return "report done, but its triage file is missing or did not parse";
+            if (!triage)
+                return doctor.fetchFailed
+                    ? "report done, but its triage file could not be fetched"
+                    : "report done, but its triage file is missing or did not parse";
             const n = countFixPrs(doctor, triage.tasks);
             const errors = `${triage.rowsFailed} error${triage.rowsFailed === 1 ? "" : "s"}`;
             return n ? `${errors} · ${prsWithFix(n)}` : errors;
