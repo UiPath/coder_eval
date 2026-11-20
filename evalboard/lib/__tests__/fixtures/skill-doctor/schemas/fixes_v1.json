@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-doctor/fixes_v1.json",
+  "title": "runs/<run_id>/skill-doctor/fixes-<build>/fixes.json (nightly-fix emit; contract v1, partial)",
+  "description": "The Fix stage's outcome per candidate, the skipped rows, and pr_checks: the replay check of the open PR each row's diagnosis names as its fix (fixed_by_pr). Only the keys below are pinned; candidates carry more fields (gates, patch lines).",
+  "type": "object",
+  "required": ["schema_version", "run_id", "fix_mode", "candidates", "skipped", "cost_usd"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string"},
+    "fix_mode": {"enum": ["off", "dryrun", "open"]},
+    "base_sha": {"type": ["string", "null"]},
+    "cost_usd": {"type": "number", "minimum": 0},
+    "max_prs": {"type": ["integer", "null"], "description": "the cap on PRs OPENED by this run (rank order); not a selection cut"},
+    "history_runs": {"type": "array", "items": {"type": "string"}, "description": "the earlier nights the memory read (newest first)"},
+    "candidates": {"type": "array", "items": {"type": "object", "required": ["id", "task_id", "outcome"],
+                                             "properties": {"outcome": {"type": "string", "description": "pr-ready, needs-live-run, needs-windows-run (a deciding criterion runs Windows-only tooling on a windows-tagged task), held-overlap, body-lint-failed, no-budget (not tried: the run's spend cap was used up; it rolls to the next night), ..."},
+                                                            "rank": {"type": "integer", "minimum": 1, "description": "select's order: rows covered, confidence, pr-ready on an earlier night, stable diagnosis, task id"},
+                                                            "reused_from": {"$ref": "#/$defs/record", "description": "present when the patch of an earlier night was reused (rebased, model-free gates passed; no session, $0)"},
+                                                            "memory_note": {"type": "string", "description": "what the earlier nights said about this candidate"},
+                                                            "inputs": {"type": "object", "additionalProperties": {"type": ["string", "null"]}, "description": "git blob id per input file at the base (task yaml, its check files, the skill files the diagnosis names)"},
+                                                            "inputs_hash": {"type": "string"},
+                                                            "contested": {"type": "array", "items": {"type": "string"}, "description": "the workflow's collision list (\"#N open (author)\", \"<sha> merged <date> (author)\", \"contested by #N\")"},
+                                                            "session_cap_usd": {"type": "number", "description": "the cap the candidate's session started with"},
+                                                            "diagnosis_flip": {"type": ["object", "null"], "description": "{night, from, to}: the layer/solvable changed since the previous night"}}}},
+    "skipped": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["task_id", "reason"],
+                                           "properties": {"task_id": {"type": "string"}, "reason": {"type": "string"},
+                                                          "pr_url": {"type": "string", "pattern": "^https://github\\.com/UiPath/skills/pull/\\d+$", "description": "pr-open: the open doctor PR"},
+                                                          "skip_reason": {"enum": ["pr-open", "rejected-unchanged"], "description": "a memory skip ($0): a doctor PR with the fix is still open, or an earlier night rejected the fix and its inputs are unchanged"},
+                                                          "reused_from": {"$ref": "#/$defs/record"}}}},
+    "pr_checks": {"type": "object", "additionalProperties": {"$ref": "#/$defs/pr_check"}}
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "fixes_dir", "id", "outcome"],
+      "description": "the earlier night's fixes.json candidate a memory decision used: runs/<run_id>/skill-doctor/<fixes_dir>/",
+      "properties": {"run_id": {"type": "string"}, "fixes_dir": {"type": "string", "pattern": "^fixes(-[0-9]+)?$"},
+                     "id": {"type": ["string", "null"]}, "outcome": {"type": ["string", "null"]}}
+    },
+    "pr_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "url", "verdict", "evidence"],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1},
+        "url": {"type": "string", "pattern": "^https://github\\.com/UiPath/skills/pull/\\d+$"},
+        "head_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$", "description": "the PR head the check applied (refs/pull/<n>/head as fetched)"},
+        "verdict": {"enum": ["verified", "not_verified", "untested"]},
+        "evidence": {"type": "string", "maxLength": 600},
+        "claim": {"enum": ["fixes", "may_help"]},
+        "reason": {"enum": ["needs-windows-run"], "description": "why an untested check could not be replayed, when the board should say so"}
+      }
+    }
+  }
+}

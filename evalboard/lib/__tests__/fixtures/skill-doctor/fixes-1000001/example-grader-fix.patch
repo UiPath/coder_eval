@@ -1,0 +1,9 @@
+diff --git a/tests/tasks/example/example.yaml b/tests/tasks/example/example.yaml
+--- a/tests/tasks/example/example.yaml
++++ b/tests/tasks/example/example.yaml
+@@ -1,2 +1,4 @@
+-expected: literal
++expected: documented
++# example
++# example
+ other: value

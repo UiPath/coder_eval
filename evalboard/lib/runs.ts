@@ -6,6 +6,7 @@ import {
     LOCAL_RUNS_DIR,
     ensureActivationSummary,
     ensureRunAnalysis,
+    ensureRunDoctorFile,
     ensureRunExperiment,
     ensureRunMeta,
     ensureRunSummary,
@@ -19,6 +20,18 @@ import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
 import { messageCostUsd, normalizeModel } from "./pricing";
+import {
+    DOCTOR_DIR,
+    parseDoctorStatus,
+    parseFixes,
+    parseOpened,
+    parseTriage,
+    patchIdFromPath,
+    patchIds,
+    taskAnalysisEnabled,
+    type RunDoctor,
+} from "./doctor";
+import { isInternal } from "./edition";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -2680,6 +2693,102 @@ export async function readRunAnalysis(
         .catch(() => null);
 }
 
+// ---------- skill-doctor report (skill-doctor/ sidecars) ----------
+
+// status.json changes while the doctor runs: a cached copy older than this is
+// fetched again. Everything it points at is immutable.
+const DOCTOR_STATUS_REFRESH_MS = 60_000;
+
+// The run's skill-doctor report, or null when there is none, it does not parse,
+// or its schema_version is not 1. This is the one place that decides which
+// files a status implies: a done status.json → the triage file it names, and
+// <fixes_dir>/fixes.json → the patches fixes.json lists (any other state,
+// retracted included, implies no other file). By default it never throws: a
+// doctor file problem must not take the run page down, so a fetch error
+// degrades to "no report" (or to the parts that did load) and sets
+// fetchFailed. `strict` (for /api/file) lets a storage error other than a 404
+// propagate instead, so a click on a patch link can tell "storage down" from
+// "not listed"; it then fetches only the one patch `strict` names (no
+// opened.json, no other patch).
+export async function readRunDoctor(
+    runId: string,
+    source: Source = DEFAULT_SOURCE,
+    { strict }: { strict?: { patch: string } } = {},
+): Promise<RunDoctor | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    const base = path.join(dir, runId, DOCTOR_DIR);
+    let fetchFailed = false;
+    // ensureRunDoctorFile already swallows a 404 (an absent file).
+    const get = async (rel: string, refreshAfterMs?: number) => {
+        try {
+            await ensureRunDoctorFile(source.container, runId, rel, dir, refreshAfterMs);
+        } catch (err) {
+            if (strict) throw err;
+            fetchFailed = true;
+            console.error(`skill-doctor: fetching ${rel} failed for run ${runId}:`, err);
+        }
+    };
+    // Read + parse once. A file that exists but does not parse is logged by
+    // name only (never its contents), so contract drift is visible.
+    const load = async <T>(rel: string, parse: (raw: string) => T | null) => {
+        const raw = await fs.readFile(path.join(base, rel), "utf-8").catch(() => null);
+        if (raw === null) return null;
+        const parsed = parse(raw);
+        if (parsed === null) {
+            console.warn(
+                `skill-doctor: ${rel} for run ${runId} did not parse as contract v1; ignored`,
+            );
+        }
+        return parsed;
+    };
+    try {
+        await get("status.json", DOCTOR_STATUS_REFRESH_MS);
+        const status = await load("status.json", parseDoctorStatus);
+        if (!status) return null;
+        const done = status.state === "done";
+        const fdir = done ? status.fixesDir : null;
+        const triageRel = done && status.triageFile ? status.triageFile : null;
+        const fixesRel = fdir ? `${fdir}/fixes.json` : null;
+        await Promise.all([
+            triageRel && get(triageRel),
+            fixesRel && get(fixesRel),
+        ]);
+        const [parsedTriage, parsedFixes] = await Promise.all([
+            triageRel ? load(triageRel, parseTriage) : null,
+            fixesRel ? load(fixesRel, parseFixes) : null,
+        ]);
+        // A triage or fixes.json that names another run (a copy under the
+        // wrong prefix) must not replace this run's Findings or list patches.
+        const ofThisRun = <T extends { runId: string | null }>(v: T | null, rel: string | null) => {
+            if (!v || v.runId === runId) return v;
+            console.warn(
+                `skill-doctor: ${rel} names run ${JSON.stringify(v.runId)}, not ${runId}; ignored`,
+            );
+            return null;
+        };
+        const triage = ofThisRun(parsedTriage, triageRel);
+        const fixes = ofThisRun(parsedFixes, fixesRel);
+        // Cached patches are not fetched again (downloadBlob skips them).
+        // opened.json is written by the doctor's open step after the fixes, so
+        // it may appear or change later: it is refetched like status.json.
+        let opened: Record<string, string> = {};
+        if (fdir && strict) {
+            if (patchIds(fixes).has(strict.patch)) await get(`${fdir}/${strict.patch}.patch`);
+        } else if (fdir) {
+            await Promise.all([
+                ...[...patchIds(fixes)].map((id) => get(`${fdir}/${id}.patch`)),
+                get(`${fdir}/opened.json`, DOCTOR_STATUS_REFRESH_MS),
+            ]);
+            opened = (await load(`${fdir}/opened.json`, parseOpened)) ?? {};
+        }
+        return { status, triage, fixes, opened, fetchFailed };
+    } catch (err) {
+        if (strict) throw err;
+        console.error(`readRunDoctor failed for run ${runId}:`, err);
+        return null;
+    }
+}
+
 // ---------- run metadata (meta.json sidecar) ----------
 
 // Optional, user-supplied at upload time. Null on pipeline runs and any run
@@ -2944,6 +3053,11 @@ export async function resolveSafePath(
     source: Source = DEFAULT_SOURCE,
 ): Promise<string | null> {
     if (!isValidId(runId)) return null;
+    // Dispatch on the normalized path, so "./skill-doctor/…" or
+    // "activation/../skill-doctor/…" cannot skip the skill-doctor gate below.
+    relPath = path.posix.normalize(relPath);
+    if (relPath === ".." || relPath.startsWith("../") || path.posix.isAbsolute(relPath))
+        return null;
     const dir = runsDirFor(RUNS_DIR, source);
     // Artifact URLs embed the variant + task subdirs in relPath
     // (`<variant-id>/<task-id>/artifacts/...`) — extract them so the narrow
@@ -2952,7 +3066,34 @@ export async function resolveSafePath(
     // (`activation/default/<task-id>/…`), so parts[0..1] are not (variant, task)
     // there; that case falls through to the run-summary fetch as it always did.
     const parts = relPath.split("/");
-    if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
+    if (parts[0] === DOCTOR_DIR) {
+        // skill-doctor/ belongs to the doctor contract, so no experiment arm can
+        // live there: a variant of that name would share the blob prefix with
+        // the report. Only a fix patch is served from it, and only one that
+        // this run's status + fixes.json list (patchIds). readRunDoctor is the
+        // one fetch path: it loads status and fixes.json when they are not
+        // cached and fetches exactly those patches, so a cold cache or a direct
+        // link works and a made-up name costs no blob call. Off with the panel.
+        // Strict: a storage error propagates (the route answers 5xx), so it
+        // does not read as "forbidden" or "not found".
+        if (
+            !taskAnalysisEnabled(
+                isInternal,
+                source.id,
+                process.env.EVALBOARD_TASK_ANALYSIS,
+            )
+        )
+            return null;
+        const patch = patchIdFromPath(parts.slice(1).join("/"));
+        if (!patch) return null;
+        const doctor = await readRunDoctor(runId, source, { strict: { patch: patch.id } });
+        if (
+            !doctor ||
+            doctor.status.fixesDir !== patch.fixesDir ||
+            !patchIds(doctor.fixes).has(patch.id)
+        )
+            return null;
+    } else if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
         if (!isValidId(parts[1])) return null;
         await ensureTaskDir(source.container, runId, parts[1], dir, parts[0]);
     } else {
@@ -2984,10 +3125,10 @@ export async function resolveSafePath(
 
 // Delete a run's locally-cached blob copy under `root` so the next view
 // re-downloads it from storage. `force: true` makes a never-cached run a
-// harmless no-op. Returns false (deleting nothing) for an unsafe id — note
-// isValidId still admits "." and ".." (dots are word-ish), so require the
-// resolved target to be a strict child of `root` before rm can run, or a "."
-// id would nuke the cache root and ".." its parent.
+// harmless no-op. Returns false (deleting nothing) for an unsafe id. isValidId
+// rejects "." and "..", and the resolved target must still be a strict child
+// of `root` before rm can run (a "." id would nuke the cache root, ".." its
+// parent), as a second guard.
 export async function clearRunCacheDir(
     root: string,
     id: string,
