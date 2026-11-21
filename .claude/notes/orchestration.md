@@ -933,17 +933,17 @@ Ungraded replicates — and ONLY those — drop out of a mean entirely: `or 0.0`
 a clean `execute` run down to a real-looking zero, while dropping an ERRORED one would pay
 it a bonus.
 
-The rule lives once, in `result_metrics.measured_scores`, read by `VariantAggregate.average_score`
-and run.md's Avg Reliability Score. run.md also hides that score whenever `nothing_was_measured`
-holds, as the pass rate beside it does. Two known gaps remain. Closing either one changes a
-serialized field that downstream consumers read, so each is a separate change:
+The rule lives once: `result_metrics.measured_scores` picks the rows, and `measured_mean` takes
+the headline mean, `None` when `nothing_was_measured` holds, as the pass rate beside it is.
+run.md's Avg Reliability Score and suite.json's `average_weighted_score` read `measured_mean`;
+`VariantAggregate.average_score` reads `measured_scores` only. One known gap remains. Closing it
+changes a serialized field that downstream consumers read, so it is a separate change:
 
-- `SuiteRollup.average_weighted_score` (suite.json) still averages scored rows only, so an
-  errored row leaves it.
 - `aggregate_results` counts `VariantAggregate.tasks_measured` after `_fold_replicates` has
   turned an errored replicate's missing score into 0.0, so an `execute` run with a crash
-  reports `pass_rate` 0.0 and `average_score` 0.0 in experiment.json where run.json reports
-  `None`.
+  reports `pass_rate` 0.0 and `average_score` 0.0 in experiment.json where run.json has no
+  `pass_rate` and run.md shows no score. Pinned by the strict xfail
+  `tests/test_ungraded_reporting.py::test_every_surface_has_no_mean_when_nothing_was_measured`.
 
 Only graded variants can win or set a spread; including ungraded ones at 0.0 would name an
 arbitrary "best" among scores that do not exist. When NOTHING was scored there is no

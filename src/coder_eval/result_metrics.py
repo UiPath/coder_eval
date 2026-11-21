@@ -17,7 +17,7 @@ import math
 from collections.abc import Iterable
 from typing import NamedTuple
 
-from coder_eval.models import AssistantMessage, EvaluationResult, FinalStatus, TurnRecord
+from coder_eval.models import AssistantMessage, EvaluationResult, FinalStatus, TurnRecord, nothing_was_measured
 from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
@@ -132,6 +132,21 @@ def measured_scores(rows: Iterable[tuple[str, float | None]]) -> list[float]:
     return [
         score if score is not None else 0.0 for status, score in rows if FinalStatus.category_of(status) != "ungraded"
     ]
+
+
+def measured_mean(rows: Iterable[tuple[str, float | None]], *, not_graded: int, measured: int) -> float | None:
+    """The headline mean of ``measured_scores(rows)``, or ``None`` when there is none to report.
+
+    ``None`` when no row counts toward the mean, and when ``nothing_was_measured``
+    holds for the caller's counts, so an otherwise ungraded run with a crash shows
+    no score rather than ``0.000``, as its pass rate shows none.
+
+    Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
+    """
+    if nothing_was_measured(not_graded=not_graded, measured=measured):
+        return None
+    scores = measured_scores(rows)
+    return sum(scores) / len(scores) if scores else None
 
 
 def _sum_measured(values: Iterable[float | None]) -> float | None:
