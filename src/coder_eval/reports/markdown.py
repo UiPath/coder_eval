@@ -27,7 +27,7 @@ from ..models import (
     sum_costs,
 )
 from ..path_utils import TASK_JSON_FILENAME, build_task_run_dir
-from ..result_metrics import measured_scores
+from ..result_metrics import measured_mean
 
 
 if TYPE_CHECKING:
@@ -471,15 +471,18 @@ class ReportGenerator:
         ]
 
         # Aggregate P0 metrics
-        scores = measured_scores((t["status"], t.get("weighted_score")) for t in summary.task_results)
+        avg_score = measured_mean(
+            ((t["status"], t.get("weighted_score")) for t in summary.task_results),
+            not_graded=summary.tasks_not_graded,
+            measured=summary.tasks_measured,
+        )
         durations = [t["duration"] for t in summary.task_results if t["duration"] > 0]
         similarities = [
             t["reference_similarity"] for t in summary.task_results if t.get("reference_similarity") is not None
         ]
 
-        # Gated like the pass rate: a 0.000 beside "Pass Rate: n/a" would read as "scored zero".
-        if scores and not nothing_was_measured(not_graded=summary.tasks_not_graded, measured=summary.tasks_measured):
-            lines.append(f"- **Avg Reliability Score**: {sum(scores) / len(scores):.3f}")
+        if avg_score is not None:
+            lines.append(f"- **Avg Reliability Score**: {avg_score:.3f}")
         if durations:
             # `duration` is END-TO-END (setup + agent + grading), so the label says so.
             # The agent's own share and the checker's share are averaged separately,

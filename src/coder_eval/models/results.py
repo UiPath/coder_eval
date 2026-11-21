@@ -1175,14 +1175,14 @@ class RunSummary(BaseModel):
         ),
     )
 
-    # Verdict evidence, NOT a bucket and NOT part of the invariant. Symmetric with
-    # VariantAggregate.tasks_measured so the three published rates read one input.
+    # Verdict evidence, NOT a bucket and NOT part of the invariant. The same gate input as
+    # VariantAggregate.tasks_measured, in a different unit: replicate rows here, tasks there.
     # Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
     tasks_measured: int = Field(
         default=0,
         ge=0,
         description=(
-            "Rows carrying a criteria verdict (weighted_score is not None). "
+            "Replicate rows carrying a criteria verdict (weighted_score is not None). "
             "Gates pass_rate / error_share: nothing measured means no rate, not a 0% one."
         ),
     )

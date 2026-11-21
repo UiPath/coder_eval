@@ -193,6 +193,13 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
     # None when nothing was graded. A plain float would launder that into 0.000.
     # Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
     weighted_score: float | None = None
+    measured: bool = Field(
+        default_factory=lambda data: data.get("weighted_score") is not None,
+        description=(
+            "At least one replicate carries a criteria verdict. An errored replicate's 0.0 is not one. "
+            "Defaults to `weighted_score is not None`."
+        ),
+    )
     final_status: FinalStatus
     duration_seconds: float
     total_tokens: int | None = None
@@ -232,9 +239,13 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Tasks executed without grading (`coder-eval execute`). Excluded from pass_rate entirely.",
     )
-    # None when nothing in this variant was graded: a 0.0 is indistinguishable from
-    # "measured and scored zero".
-    average_score: float | None
+    average_score: float | None = Field(
+        description=(
+            "Mean over measured rows: an errored row counts as 0.0, an ungraded one leaves. None when no "
+            "row counts, or when nothing_was_measured holds (aggregate_results applies it through "
+            "result_metrics.measured_mean)."
+        ),
+    )
     average_duration: float
     total_tokens: int | None = None
     replicate_count: int = Field(
@@ -258,7 +269,10 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     tasks_measured: int = Field(
         default=0,
         ge=0,
-        description="Tasks with at least one replicate carrying a criteria verdict. Gates pass_rate and average_score.",
+        description=(
+            "Tasks with at least one replicate carrying a criteria verdict (VariantResult.measured). "
+            "Gates pass_rate here, and average_score in aggregate_results."
+        ),
     )
 
     @model_validator(mode="after")
