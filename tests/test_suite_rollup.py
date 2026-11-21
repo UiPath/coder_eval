@@ -148,6 +148,7 @@ class TestComputeSuiteRollup:
             pytest.param([*_GRADED_ROWS, ("ERROR", None)], 1 / 3, id="error-counts-as-zero"),
             pytest.param([*_GRADED_ROWS, ("BUILD_FAILED", None)], 1 / 3, id="build-failed-counts-as-zero"),
             pytest.param([*_GRADED_ROWS, ("TIMEOUT", None)], 1 / 3, id="unscored-timeout-counts-as-zero"),
+            pytest.param([*_GRADED_ROWS, ("TIMEOUT", 0.5)], 0.5, id="scored-timeout-keeps-its-score"),
             pytest.param([*_GRADED_ROWS, ("NOT_GRADED", None)], 0.5, id="not-graded-leaves-the-mean"),
             pytest.param([("ERROR", None), ("ERROR", None)], 0.0, id="all-error-suite-scores-zero"),
             pytest.param([("NOT_GRADED", None), ("NOT_GRADED", None)], None, id="all-not-graded-suite-has-no-score"),
@@ -483,6 +484,14 @@ class TestRenderSuiteMarkdown:
         # Rendering must succeed; link should be best-effort (full relpath).
         assert "[task.json]" in md
         assert "/abs/path/s/r1/00/task.json" in md
+
+    def test_shows_a_zero_avg_score_for_an_all_errored_suite(self, tmp_path: Path) -> None:
+        rows = [
+            _make_row(suite_id="s", row_id=f"r{i}", final_status=FinalStatus.ERROR, weighted_score=None, criteria=[])
+            for i in range(2)
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+        assert "**Average weighted score**: 0.000" in _render_suite_markdown(rollup)
 
     def test_omits_avg_score_when_none(self, tmp_path: Path) -> None:
         rows = [
