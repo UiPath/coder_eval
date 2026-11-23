@@ -12,6 +12,7 @@ import {
     parseTriage,
     patchIds,
     planAnalysis,
+    sectionHeadings,
     splitAnalysis,
     taskAnalysisEnabled,
     type RunDoctor,
@@ -424,43 +425,56 @@ describe("taskAnalysisEnabled (gating + kill switch)", () => {
 
 describe("planAnalysis (states)", () => {
     test("absent: today's view, no block", () => {
-        expect(planAnalysis(MD, null)).toEqual({ summary: MD, doctor: null });
-        expect(planAnalysis(null, null)).toEqual({ summary: null, doctor: null });
+        expect(planAnalysis(MD, null)).toEqual({ summary: MD, rest: null, doctor: null });
+        expect(planAnalysis(null, null)).toEqual({ summary: null, rest: null, doctor: null });
     });
 
-    test("done with a split: summary keeps the top, the block replaces the rest", () => {
+    test("done with a split: the top is the summary, Findings down is kept as the rest", () => {
         const d = doctor();
         const p = planAnalysis(MD, d);
         expect(p.summary).toBe("# Analysis\n\n## TL;DR\nTop part.\n\n");
+        expect(p.rest).toBe("## Findings\nBottom part.\n\n## Quick Wins\nMore.\n");
+        expect(p.summary! + p.rest!).toBe(MD);
         expect(p.doctor).toBe(d);
     });
 
-    test("done without a split: the full analysis, then the block", () => {
+    test("done without a split: the full analysis, no rest", () => {
         const md = "# A\n\n## TL;DR\nonly\n";
         const d = doctor();
-        expect(planAnalysis(md, d)).toEqual({ summary: md, doctor: d });
+        expect(planAnalysis(md, d)).toEqual({ summary: md, rest: null, doctor: d });
     });
 
     test("done without analysis.md: the block alone", () => {
         const d = doctor();
-        expect(planAnalysis(null, d)).toEqual({ summary: null, doctor: d });
+        expect(planAnalysis(null, d)).toEqual({ summary: null, rest: null, doctor: d });
     });
 
-    test("an analysis.md that starts with Findings: no summary", () => {
+    test("an analysis.md that starts with Findings: no summary, all rest", () => {
         const d = doctor();
-        expect(planAnalysis("## Findings\nx\n", d)).toEqual({ summary: null, doctor: d });
+        expect(planAnalysis("## Findings\nx\n", d)).toEqual({
+            summary: null,
+            rest: "## Findings\nx\n",
+            doctor: d,
+        });
     });
 
-    test("done but the triage did not load: the full analysis", () => {
+    test("done but the triage did not load: the full analysis, no rest", () => {
         const d = { ...doctor(), triage: null };
-        expect(planAnalysis(MD, d)).toEqual({ summary: MD, doctor: d });
+        expect(planAnalysis(MD, d)).toEqual({ summary: MD, rest: null, doctor: d });
     });
 
     test.each(["queued", "running", "failed", "skipped", "retracted"])(
-        "%s: the full analysis (Findings included) and the block",
+        "%s: the whole analysis as the summary (Findings included) and the block",
         (state) => {
             const d = doctor({ state, reason: "why" });
-            expect(planAnalysis(MD, d)).toEqual({ summary: MD, doctor: d });
+            expect(planAnalysis(MD, d)).toEqual({ summary: MD, rest: null, doctor: d });
         },
     );
+});
+
+describe("sectionHeadings", () => {
+    test("lists ## headings, not ### or fenced ones", () => {
+        const md = "## Findings\nx\n### Sub\n```\n## Fake\n```\n## Quick Wins\n## Efficiency Ranking\n";
+        expect(sectionHeadings(md)).toEqual(["Findings", "Quick Wins", "Efficiency Ranking"]);
+    });
 });

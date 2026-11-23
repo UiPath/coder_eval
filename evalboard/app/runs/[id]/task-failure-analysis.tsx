@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
 import { withSource } from "@/app/_lib/source-param";
 import { fmtTimestamp } from "@/lib/format";
+import { SummaryMarkdown } from "./analysis-panel";
 import {
     DOCTOR_DIR,
     isAdoUrl,
@@ -11,6 +12,7 @@ import {
     isSkillsPrUrl,
     own,
     patchIds,
+    sectionHeadings,
     type DoctorFix,
     type DoctorPr,
     type DoctorStatus,
@@ -145,8 +147,8 @@ export function digest(doctor: RunDoctor): string {
                     ? "report done, but its triage file could not be fetched"
                     : "report done, but its triage file is missing or did not parse";
             const n = countFixPrs(doctor, triage.tasks);
-            const errors = `${triage.rowsFailed} error${triage.rowsFailed === 1 ? "" : "s"}`;
-            return n ? `${errors} · ${prsWithFix(n)}` : errors;
+            const failed = `${triage.rowsFailed} failed`;
+            return n ? `${failed} · ${prsWithFix(n)}` : failed;
         }
     }
 }
@@ -909,21 +911,29 @@ function BuildLinks({ status }: { status: DoctorStatus }) {
 }
 
 /**
- * The Task Failure Analysis block: shaped like the AI summary panel (bordered
- * section, header button, collapsed by default), right under it. The header
- * carries a one-line digest; only a done report with a triage has a body.
+ * The Task failure analysis panel: one bordered section, collapsed by default.
+ * Open, it shows the AI summary's top, the doctor's report, then the rest of
+ * the AI summary (Findings down) under a collapsed disclosure that lists its
+ * section headings. Only a done report with a triage has a report body; any
+ * other state shows the whole AI summary and the doctor's state.
  */
 export function TaskFailureAnalysis({
     doctor,
     runId,
     sourceId,
+    summary = null,
+    rest = null,
 }: {
     doctor: RunDoctor;
     runId: string;
     sourceId: string;
+    summary?: string | null;
+    rest?: string | null;
 }) {
     const [open, setOpen] = useState(false);
+    const [restOpen, setRestOpen] = useState(false);
     const hasBody = doctor.status.state === "done" && doctor.triage !== null;
+    const expandable = hasBody || !!summary;
     const ctx: FixCtx = {
         runId,
         sourceId,
@@ -940,12 +950,13 @@ export function TaskFailureAnalysis({
             {digest(doctor)}
         </span>
     );
+    const headings = rest ? sectionHeadings(rest) : [];
     return (
         <section
             className="border border-studio-blue/30 bg-studio-blue/5 rounded-lg"
             aria-label="Task failure analysis"
         >
-            {hasBody ? (
+            {expandable ? (
                 <button
                     type="button"
                     onClick={() => setOpen((v) => !v)}
@@ -969,14 +980,46 @@ export function TaskFailureAnalysis({
                     </span>
                 </div>
             )}
-            {hasBody && open && (
+            {expandable && open && (
                 <>
-                    <div className="border-t border-studio-blue/20 bg-white px-5 pt-3 text-xs text-gray-500">
-                        skill-doctor
-                        {doctor.fixes?.fixMode && ` · fix mode ${doctor.fixes.fixMode}`}
-                        <BuildLinks status={doctor.status} />
-                    </div>
-                    <Body doctor={doctor} ctx={ctx} />
+                    {summary && (
+                        <div className="border-t border-studio-blue/20 bg-white px-5 py-4">
+                            <SummaryMarkdown markdown={summary} />
+                        </div>
+                    )}
+                    {hasBody ? (
+                        <>
+                            <div className="border-t border-studio-blue/20 bg-white px-5 pt-3 text-xs text-gray-500">
+                                skill-doctor
+                                {doctor.fixes?.fixMode && ` · fix mode ${doctor.fixes.fixMode}`}
+                                <BuildLinks status={doctor.status} />
+                            </div>
+                            <Body doctor={doctor} ctx={ctx} />
+                        </>
+                    ) : (
+                        <div className="border-t border-studio-blue/20 bg-white px-5 py-3 text-xs text-gray-600">
+                            skill-doctor: {digest(doctor)}
+                            <BuildLinks status={doctor.status} />
+                        </div>
+                    )}
+                    {rest && (
+                        <div className="border-t border-studio-blue/20 bg-white px-5 py-3 rounded-b-lg">
+                            <button
+                                type="button"
+                                onClick={() => setRestOpen((v) => !v)}
+                                aria-expanded={restOpen}
+                                className="w-full text-left text-xs text-studio-blue"
+                            >
+                                {restOpen ? "▾" : "▸"} More from the AI summary
+                                {headings.length > 0 && ` · ${headings.join(" · ")}`}
+                            </button>
+                            {restOpen && (
+                                <div className="pt-3">
+                                    <SummaryMarkdown markdown={rest} />
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </>
             )}
         </section>

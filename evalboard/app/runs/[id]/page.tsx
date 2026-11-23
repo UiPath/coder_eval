@@ -96,8 +96,9 @@ export default async function RunPage({
     const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
     const human = fmtRunTime(id);
-    // A done report replaces analysis.md's Findings and everything below it;
-    // otherwise the AI summary is unchanged. The doctor block sits under it.
+    // With the doctor block, the AI summary, the block and the rest of
+    // analysis.md (Findings down) are one panel; without it, the AI summary
+    // panel alone, unchanged.
     const plan = planAnalysis(analysis, doctor);
     const series = isInternal
         ? seriesForRun(source.id, {
@@ -170,13 +171,16 @@ export default async function RunPage({
                 )}
             </div>
 
-            {plan.summary && <AnalysisPanel markdown={plan.summary} />}
-            {plan.doctor && (
+            {plan.doctor ? (
                 <TaskFailureAnalysis
                     doctor={plan.doctor}
                     runId={id}
                     sourceId={source.id}
+                    summary={plan.summary}
+                    rest={plan.rest}
                 />
+            ) : (
+                plan.summary && <AnalysisPanel markdown={plan.summary} />
             )}
 
             {/* The header above streams as soon as run.json is parsed, but the

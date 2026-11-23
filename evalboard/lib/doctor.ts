@@ -453,18 +453,43 @@ export function taskAnalysisEnabled(
 }
 
 export interface AnalysisPlan {
-    // Markdown for the AI summary panel (null: no panel).
+    // Markdown for the AI summary (null: none). With a done report this is the
+    // top of analysis.md, up to its `## Findings` line.
     summary: string | null;
-    // The Task Failure Analysis block, right under the summary (null: none).
+    // analysis.md from `## Findings` down, shown under the doctor block as
+    // "More from the AI summary" (null: nothing to show).
+    rest: string | null;
+    // The Task Failure Analysis block; with it the summary, the block and
+    // `rest` form one panel (null: the AI summary panel alone).
     doctor: RunDoctor | null;
 }
 
+/** The `## ` section headings of a markdown text, outside fenced code. */
+export function sectionHeadings(md: string): string[] {
+    const out: string[] = [];
+    let fence: string | null = null;
+    for (const raw of md.split("\n")) {
+        const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+        const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+        if (f) {
+            const mark = f[1];
+            if (fence === null) fence = mark;
+            else if (mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark)
+                fence = null;
+        } else if (fence === null && line.startsWith("## ")) {
+            const h = line.slice(3).trim();
+            if (h) out.push(h);
+        }
+    }
+    return out;
+}
+
 /**
- * What the run page shows. With a done report whose triage parsed, the
- * summary stops at analysis.md's `## Findings` line (the block replaces the
- * rest), or keeps the whole file when there is no such line. In every other
- * state the summary is unchanged (Findings included) and the block shows only
- * the doctor's state.
+ * What the run page shows. With a done report whose triage parsed, analysis.md
+ * is cut at its `## Findings` line: the top is the summary, the rest (Findings
+ * and below) is kept for the disclosure under the block. A file with no such
+ * line is all summary. In every other state the summary is the whole file and
+ * the block shows only the doctor's state.
  */
 export function planAnalysis(
     analysis: string | null,
@@ -473,7 +498,8 @@ export function planAnalysis(
     if (doctor && doctor.status.state === "done" && doctor.triage) {
         const split = analysis ? splitAnalysis(analysis) : null;
         const summary = split ? split.top : analysis;
-        return { summary: summary && summary.trim() ? summary : null, doctor };
+        const rest = split && split.findings.trim() ? split.findings : null;
+        return { summary: summary && summary.trim() ? summary : null, rest, doctor };
     }
-    return { summary: analysis, doctor };
+    return { summary: analysis, rest: null, doctor };
 }

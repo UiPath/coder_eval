@@ -56,10 +56,10 @@ const card = (taskId: string) =>
     screen.getAllByTestId("task-card").find((c) => c.textContent!.includes(taskId))!;
 
 describe("digest", () => {
-    test("done: errors and linked PRs with fix; a prepared fix does not count", () => {
+    test("done: failed count and linked PRs with fix; a prepared fix does not count", () => {
         // Only #126 (proposed) is linked; example-t1's fix is not opened yet.
-        expect(digest(doctor())).toBe("5 errors · 1 PR with fix");
-        expect(digest(withOpened())).toBe("5 errors · 2 PRs with fix");
+        expect(digest(doctor())).toBe("5 failed · 1 PR with fix");
+        expect(digest(withOpened())).toBe("5 failed · 2 PRs with fix");
     });
     test("done without a triage: a fetch error is not blamed on the contract", () => {
         const d = { ...doctor(), triage: null };
@@ -71,7 +71,7 @@ describe("digest", () => {
     test("no linked PR: the errors only", () => {
         const d = doctor();
         d.triage!.tasks[2].fixedByPr = null;
-        expect(digest(d)).toBe("5 errors");
+        expect(digest(d)).toBe("5 failed");
     });
     test("not done: the state", () => {
         expect(digest(doctor({ state: "running" }))).toMatch(/^running since /);
@@ -90,7 +90,7 @@ describe("TaskFailureAnalysis block", () => {
         renderBlock();
         expect(header()).toHaveAttribute("aria-expanded", "false");
         expect(header()).toHaveTextContent("Task failure analysis");
-        expect(header()).toHaveTextContent("5 errors · 1 PR with fix");
+        expect(header()).toHaveTextContent("5 failed · 1 PR with fix");
         expect(screen.queryByText("Fix first")).toBeNull();
         expect(screen.queryByText("Skill failures")).toBeNull();
     });
@@ -266,7 +266,7 @@ describe("TaskFailureAnalysis block", () => {
     test("a doctor PR from the triage counts the same way", () => {
         const d = doctor();
         d.triage!.tasks[1].doctorPr = "https://github.com/UiPath/skills/pull/200";
-        expect(digest(d)).toBe("5 errors · 2 PRs with fix");
+        expect(digest(d)).toBe("5 failed · 2 PRs with fix");
         renderBlock(d);
         openBlock();
         openSkill("uipath-example");
@@ -306,7 +306,7 @@ describe("TaskFailureAnalysis block", () => {
                 evidence: "no stored run could replay it",
                 reason: reason ? "needs-windows-run" : null,
             };
-        expect(digest(d)).toBe("5 errors");
+        expect(digest(d)).toBe("5 failed");
         renderBlock(d);
         openBlock();
         openSkill("uipath-example-two");
@@ -335,7 +335,7 @@ describe("TaskFailureAnalysis block", () => {
     ])("%s: no PR row", (_name, mutate) => {
         const d = doctor();
         mutate(d);
-        expect(digest(d)).toBe("5 errors");
+        expect(digest(d)).toBe("5 failed");
         renderBlock(d);
         openBlock();
         openSkill("uipath-example-two");
@@ -538,7 +538,7 @@ describe("prototype-named task ids", () => {
             expect(within(c2).getByTestId("proposed-pr")).toHaveTextContent("#126");
             expect(within(c2).queryByTestId("pr-with-fix")).toBeNull();
             // #300 (own) + #126 (verified on the second task).
-            expect(digest(d)).toBe("5 errors · 2 PRs with fix");
+            expect(digest(d)).toBe("5 failed · 2 PRs with fix");
         },
     );
 });
@@ -558,7 +558,7 @@ describe("doctor PR resolution", () => {
             expect(within(c).queryByTestId("fix-prepared")).toBeNull();
         }
         // #300 counted once, plus #126 on t2.
-        expect(digest(d)).toBe("5 errors · 2 PRs with fix");
+        expect(digest(d)).toBe("5 failed · 2 PRs with fix");
     });
 
     test("the doctor's own PR is not also a Proposed PR, and counts once", () => {
@@ -571,7 +571,7 @@ describe("doctor PR resolution", () => {
         const c = card("example-t2");
         expect(within(c).getByRole("link", { name: "PR with fix: #126 ↗" })).toBeInTheDocument();
         expect(within(c).queryByTestId("proposed-pr")).toBeNull();
-        expect(digest(d)).toBe("5 errors · 1 PR with fix");
+        expect(digest(d)).toBe("5 failed · 1 PR with fix");
     });
 
     test("no placeholder row for a fixable task without any PR or candidate", () => {
@@ -671,5 +671,63 @@ describe("groupBySkill", () => {
         d.fixes!.prChecks["example-t1"] = d.fixes!.prChecks["example-t2"];
         // t1 and t2 both verified against #126: one PR.
         expect(countFixPrs(d, d.triage!.tasks)).toBe(1);
+    });
+});
+
+describe("one Task failure analysis panel", () => {
+    const SUMMARY = "# Analysis\n\n## TL;DR\nTop line here.\n\n";
+    const REST =
+        "## Findings\nF body.\n\n## False Negatives\nFN body.\n\n## Efficiency Ranking\nER body.\n";
+
+    test("done: one panel with the summary top, the report, then the collapsed rest", () => {
+        render(
+            <TaskFailureAnalysis doctor={doctor()} runId={RUN} sourceId="skills" summary={SUMMARY} rest={REST} />,
+        );
+        expect(screen.getAllByRole("region", { name: "Task failure analysis" })).toHaveLength(1);
+        openBlock();
+        const b = block();
+        expect(within(b).getByText("Top line here.")).toBeInTheDocument();
+        expect(within(b).getByText(/skill-doctor/)).toBeInTheDocument();
+        const more = within(b).getByRole("button", { name: /More from the AI summary/ });
+        expect(more).toHaveAttribute("aria-expanded", "false");
+        expect(more).toHaveTextContent("Findings · False Negatives · Efficiency Ranking");
+        expect(within(b).queryByText("FN body.")).toBeNull();
+        // order: summary, report, disclosure
+        const text = b.textContent!;
+        expect(text.indexOf("Top line here.")).toBeLessThan(text.indexOf("skill-doctor"));
+        expect(text.indexOf("skill-doctor")).toBeLessThan(text.indexOf("More from the AI summary"));
+        fireEvent.click(more);
+        expect(within(b).getByText("False Negatives")).toBeInTheDocument();
+        expect(within(b).getByText("Efficiency Ranking", { selector: "h2" })).toBeInTheDocument();
+        expect(within(b).getByText("FN body.")).toBeInTheDocument();
+    });
+
+    test("no rest: no disclosure", () => {
+        render(<TaskFailureAnalysis doctor={doctor()} runId={RUN} sourceId="skills" summary={SUMMARY} />);
+        openBlock();
+        expect(within(block()).queryByText(/More from the AI summary/)).toBeNull();
+    });
+
+    test("not done: the whole summary then the doctor state, one panel", () => {
+        const whole = SUMMARY + REST;
+        render(
+            <TaskFailureAnalysis
+                doctor={doctor({ state: "running" })}
+                runId={RUN}
+                sourceId="skills"
+                summary={whole}
+            />,
+        );
+        expect(screen.getAllByRole("region", { name: "Task failure analysis" })).toHaveLength(1);
+        openBlock();
+        const b = block();
+        expect(within(b).getByText("FN body.")).toBeInTheDocument();
+        expect(within(b).queryByText(/More from the AI summary/)).toBeNull();
+        expect(b.textContent!.indexOf("FN body.")).toBeLessThan(b.textContent!.indexOf("skill-doctor: running"));
+    });
+
+    test("not done and no summary: the state alone, as before", () => {
+        renderBlock(doctor({ state: "running" }));
+        expect(within(block()).queryAllByRole("button")).toHaveLength(0);
     });
 });
