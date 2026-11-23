@@ -409,16 +409,13 @@ export const isLinkableTaskId = isValidTaskId;
 // ---------- analysis.md split ----------
 
 /**
- * Cut analysis.md at its first line that is exactly `## Findings`, outside a
- * fenced code block. Null when there is no such line.
+ * The lines of a markdown text that sit outside fenced code blocks, each with
+ * its offset in the text (a trailing CR is dropped from the line).
  */
-export function splitAnalysis(
-    md: string,
-): { top: string; findings: string } | null {
-    const lines = md.split("\n");
+function* linesOutsideFences(md: string): Generator<{ line: string; offset: number }> {
     let fence: string | null = null;
     let offset = 0;
-    for (const raw of lines) {
+    for (const raw of md.split("\n")) {
         const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
         const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
         if (f) {
@@ -426,10 +423,23 @@ export function splitAnalysis(
             if (fence === null) fence = mark;
             else if (mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark)
                 fence = null;
-        } else if (fence === null && line === "## Findings") {
-            return { top: md.slice(0, offset), findings: md.slice(offset) };
+        } else if (fence === null) {
+            yield { line, offset };
         }
         offset += raw.length + 1;
+    }
+}
+
+/**
+ * Cut analysis.md at its first line that is exactly `## Findings`, outside a
+ * fenced code block. Null when there is no such line.
+ */
+export function splitAnalysis(
+    md: string,
+): { top: string; findings: string } | null {
+    for (const { line, offset } of linesOutsideFences(md)) {
+        if (line === "## Findings")
+            return { top: md.slice(0, offset), findings: md.slice(offset) };
     }
     return null;
 }
@@ -467,19 +477,10 @@ export interface AnalysisPlan {
 /** The `## ` section headings of a markdown text, outside fenced code. */
 export function sectionHeadings(md: string): string[] {
     const out: string[] = [];
-    let fence: string | null = null;
-    for (const raw of md.split("\n")) {
-        const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-        const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-        if (f) {
-            const mark = f[1];
-            if (fence === null) fence = mark;
-            else if (mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark)
-                fence = null;
-        } else if (fence === null && line.startsWith("## ")) {
-            const h = line.slice(3).trim();
-            if (h) out.push(h);
-        }
+    for (const { line } of linesOutsideFences(md)) {
+        if (!line.startsWith("## ")) continue;
+        const h = line.slice(3).trim();
+        if (h) out.push(h);
     }
     return out;
 }

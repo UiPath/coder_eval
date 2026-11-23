@@ -472,6 +472,31 @@ describe("planAnalysis (states)", () => {
     );
 });
 
+describe("fence handling (splitAnalysis, sectionHeadings)", () => {
+    test("~~~ fence hides a Findings line and a heading", () => {
+        const md = "# A\n~~~\n## Findings\n## Hid\n~~~\n## Findings\nx\n";
+        expect(splitAnalysis(md)!.top).toBe("# A\n~~~\n## Findings\n## Hid\n~~~\n");
+        expect(sectionHeadings(md)).toEqual(["Findings"]);
+    });
+    test("a shorter or other-kind closing fence does not close", () => {
+        const md = "````\n```\n## Findings\n~~~~\n## Hid\n````\n## Real\n";
+        expect(splitAnalysis(md)).toBeNull();
+        expect(sectionHeadings(md)).toEqual(["Real"]);
+    });
+    test("a fence with an info string opens; only a bare mark closes", () => {
+        const md = "```ts\n## Hid\n```ts\n## Hid2\n```\n## Out\n";
+        expect(sectionHeadings(md)).toEqual(["Out"]);
+    });
+    test("CRLF lines match and keep offsets", () => {
+        const md = "# A\r\n## Findings\r\nx\r\n## Q\r\n";
+        expect(splitAnalysis(md)).toEqual({ top: "# A\r\n", findings: "## Findings\r\nx\r\n## Q\r\n" });
+        expect(sectionHeadings(md)).toEqual(["Findings", "Q"]);
+    });
+    test("an empty heading is dropped", () => {
+        expect(sectionHeadings("## \n##\n## A \n")).toEqual(["A"]);
+    });
+});
+
 describe("sectionHeadings", () => {
     test("lists ## headings, not ### or fenced ones", () => {
         const md = "## Findings\nx\n### Sub\n```\n## Fake\n```\n## Quick Wins\n## Efficiency Ranking\n";

@@ -68,7 +68,7 @@ describe("digest", () => {
             "report done, but its triage file could not be fetched",
         );
     });
-    test("no linked PR: the errors only", () => {
+    test("no linked PR: the failed count only", () => {
         const d = doctor();
         d.triage!.tasks[2].fixedByPr = null;
         expect(digest(d)).toBe("5 failed");
@@ -131,7 +131,7 @@ describe("TaskFailureAnalysis block", () => {
         openBlock();
         const stats = screen.getByTestId("doctor-stats");
         expect(stats).toHaveTextContent("10rows run");
-        expect(stats).toHaveTextContent("5failed rows");
+        expect(stats).toHaveTextContent("5rows listed");
         expect(stats).toHaveTextContent("3environment");
         expect(stats).toHaveTextContent("2fixable in the repo");
         expect(stats).toHaveTextContent("0agent mistakes");
@@ -729,5 +729,41 @@ describe("one Task failure analysis panel", () => {
     test("not done and no summary: the state alone, as before", () => {
         renderBlock(doctor({ state: "running" }));
         expect(within(block()).queryAllByRole("button")).toHaveLength(0);
+    });
+});
+
+describe("the two counts in one panel", () => {
+    test("header failed = triage.rowsFailed; the Stats tile counts the rows listed", () => {
+        const d = doctor();
+        d.triage = { ...d.triage!, rowsFailed: 9 };
+        expect(digest(d)).toBe("9 failed · 1 PR with fix");
+        renderBlock(d);
+        openBlock();
+        expect(screen.getByTestId("doctor-digest")).toHaveTextContent("9 failed");
+        expect(block()).toHaveTextContent(`${d.triage.tasks.length}rows listed`);
+    });
+
+    test("done without a triage: the whole summary and the state line", () => {
+        const d = { ...doctor(), triage: null };
+        render(<TaskFailureAnalysis doctor={d} runId={RUN} sourceId="skills" summary={"## TL;DR\nWhole.\n"} />);
+        openBlock();
+        expect(within(block()).getByText("Whole.")).toBeInTheDocument();
+        expect(block()).toHaveTextContent("skill-doctor: report done, but its triage file is missing");
+    });
+
+    test("summary null with a rest: the rest alone, under the report", () => {
+        render(
+            <TaskFailureAnalysis
+                doctor={doctor()}
+                runId={RUN}
+                sourceId="skills"
+                summary={null}
+                rest={"## Findings\nF body.\n"}
+            />,
+        );
+        openBlock();
+        const more = within(block()).getByRole("button", { name: /More from the AI summary · Findings/ });
+        fireEvent.click(more);
+        expect(within(block()).getByText("F body.")).toBeInTheDocument();
     });
 });

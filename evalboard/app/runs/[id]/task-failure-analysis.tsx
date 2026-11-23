@@ -692,7 +692,7 @@ function Stats({ triage, counts }: { triage: DoctorTriage; counts: [string, numb
     const count = (k: string) => counts.find(([l]) => l === k)?.[1] ?? 0;
     const stats: [number | null, string][] = [
         [triage.rowsRun, "rows run"],
-        [triage.tasks.length, "failed rows"],
+        [triage.tasks.length, "rows listed"],
         [count("env"), "environment"],
         [triage.tasks.filter(isFixable).length, "fixable in the repo"],
         [count("agent"), "agent mistakes"],

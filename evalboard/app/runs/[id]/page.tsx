@@ -24,8 +24,7 @@ import { seriesForRun } from "@/lib/series";
 import { sourceById } from "@/lib/sources";
 import { scalarParam } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
-import { AnalysisPanel } from "./analysis-panel";
-import { TaskFailureAnalysis } from "./task-failure-analysis";
+import { RunAnalysis } from "./run-analysis";
 import { planAnalysis, taskAnalysisEnabled } from "@/lib/doctor";
 import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
@@ -171,17 +170,7 @@ export default async function RunPage({
                 )}
             </div>
 
-            {plan.doctor ? (
-                <TaskFailureAnalysis
-                    doctor={plan.doctor}
-                    runId={id}
-                    sourceId={source.id}
-                    summary={plan.summary}
-                    rest={plan.rest}
-                />
-            ) : (
-                plan.summary && <AnalysisPanel markdown={plan.summary} />
-            )}
+            <RunAnalysis plan={plan} runId={id} sourceId={source.id} />
 
             {/* The header above streams as soon as run.json is parsed, but the
                 grid waits on the review index and the mature-source scan. With

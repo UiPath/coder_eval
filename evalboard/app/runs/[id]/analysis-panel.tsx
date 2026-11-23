@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 // Tame heading sizes so the analysis nests visually under the panel header
 // instead of dwarfing the page-level "Run" h1 above it. Pure CSS — no
 // assumption about the markdown's structure.
-export const PROSE_CLASSES = [
+const PROSE_CLASSES = [
     "prose",
     "prose-sm",
     "max-w-none",
@@ -28,7 +28,7 @@ export const PROSE_CLASSES = [
 // The AI summary's markdown renderer, shared with the Task failure analysis panel.
 export function SummaryMarkdown({ markdown }: { markdown: string }) {
     return (
-        <div className={`${PROSE_CLASSES}`}>
+        <div className={PROSE_CLASSES}>
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
         </div>
     );
@@ -53,12 +53,8 @@ export function AnalysisPanel({ markdown }: { markdown: string }) {
                 </span>
             </button>
             {open && (
-                <div
-                    className={`border-t border-studio-blue/20 bg-white px-5 py-4 ${PROSE_CLASSES}`}
-                >
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {markdown}
-                    </ReactMarkdown>
+                <div className="border-t border-studio-blue/20 bg-white px-5 py-4">
+                    <SummaryMarkdown markdown={markdown} />
                 </div>
             )}
         </section>

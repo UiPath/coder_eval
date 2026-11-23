@@ -218,6 +218,6 @@ belongs to it.
   first, per-skill failure cards), then `analysis.md` from its `## Findings`
   line down under a collapsed "More from the AI summary" disclosure that lists
   its section headings. Other states show the whole AI summary and the doctor's
-  state in the same panel. Without a report the AI summary panel is unchanged. `EVALBOARD_TASK_ANALYSIS=off` turns it off.
+  state in the same panel. The cut is at the literal `## Findings` line of `analysis.md` (the nightly AI summary step writes it); the disclosure label lists the file's `## ` headings from there down. Without that line the whole summary shows and there is no disclosure. Without a report the AI summary panel is unchanged. `EVALBOARD_TASK_ANALYSIS=off` turns it off.
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.
