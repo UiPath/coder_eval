@@ -207,5 +207,17 @@ belongs to it.
   and then every 4 minutes (`lib/warm.ts`, started from `instrumentation.ts`), so
   the per-run cache is rebuilt by those requests rather than by a visitor.
   `EVALBOARD_WARM_INTERVAL_SECONDS` sets the interval; `0` turns it off.
+- Task Failure Analysis (internal edition, skills source): the run page reads
+  the skill-doctor report under `<run>/skill-doctor/` (`lib/doctor.ts`,
+  `readRunDoctor`). `status.json` is refetched after 60 s; the triage file it
+  names, `<fixes_dir>/fixes.json` and up to 10 patches are cached for good.
+  `/api/file` serves only the patches fixes.json lists, loading them through
+  the same reader on a cold cache. With a report, the AI summary and the doctor
+  are one collapsed "Task failure analysis" panel: the AI summary's top, then
+  the report laid out like the doctor's own page (stats, failures by layer, Fix
+  first, per-skill failure cards), then `analysis.md` from its `## Findings`
+  line down under a collapsed "More from the AI summary" disclosure that lists
+  its section headings. Other states show the whole AI summary and the doctor's
+  state in the same panel. The cut is at the literal `## Findings` line of `analysis.md` (the nightly AI summary step writes it); the disclosure label lists the file's `## ` headings from there down. Without that line the whole summary shows and there is no disclosure. Without a report the AI summary panel is unchanged. `EVALBOARD_TASK_ANALYSIS=off` turns it off.
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

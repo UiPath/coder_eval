@@ -3,6 +3,8 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
+import { isValidId, isValidTaskId } from "./ids";
+import { DOCTOR_DIR } from "./doctor";
 
 const ACCOUNT = "coderevaltests";
 
@@ -12,32 +14,7 @@ const ACCOUNT = "coderevaltests";
 // directly.
 export const LOCAL_RUNS_DIR = process.env.EVALBOARD_LOCAL_RUNS_DIR || null;
 
-// Run / task IDs get reflected into filesystem paths and blob prefixes, so
-// reject anything outside a narrow whitelist before any side effect.
-const ID_RE = /^[\w.-]+$/;
-// Task IDs from dataset-expanded tasks look like "sentiment-classification/r3"
-// (suite/row). Each segment must still pass the narrow ID_RE — only the slash
-// separator between segments is additionally allowed.
-const TASK_ID_RE = /^[\w.-]+(\/[\w.-]+)*$/;
-
-export function isValidId(id: unknown): id is string {
-    return (
-        typeof id === "string" &&
-        id.length > 0 &&
-        id.length < 128 &&
-        ID_RE.test(id)
-    );
-}
-
-export function isValidTaskId(id: unknown): id is string {
-    return (
-        typeof id === "string" &&
-        id.length > 0 &&
-        id.length < 256 &&
-        TASK_ID_RE.test(id) &&
-        !id.split("/").some((s) => s === "." || s === "..")
-    );
-}
+export { isValidId, isValidTaskId };
 
 function assertValidId(id: string, label: string): void {
     if (!isValidId(id)) {
@@ -336,6 +313,40 @@ export async function ensureRunReviewIndex(
     return dedupe(`review-index:${container}:${runId}`, async () => {
         try {
             await downloadBlob(container, `${runId}/review_index.json`, destRoot);
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
+// skill-doctor report sidecars under `<runId>/skill-doctor/` (see lib/doctor.ts
+// and readRunDoctor, which decides which files a status implies). Download
+// only, like the siblings above: status.json is mutable and passes a refresh
+// age; the triage file, fixes.json and the patches are immutable and are never
+// fetched again once cached. `relPath` comes from a parsed, pattern-checked
+// field, and is checked here again before it becomes a blob name. 404s are
+// swallowed as for analysis.md.
+export async function ensureRunDoctorFile(
+    container: string,
+    runId: string,
+    relPath: string,
+    destRoot: string,
+    refreshAfterMs?: number,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    // One file directly under skill-doctor/, or one level down (the fixes dir).
+    if (!isValidTaskId(relPath) || relPath.split("/").length > 2) {
+        throw new Error(`Invalid skill-doctor path: ${JSON.stringify(relPath)}`);
+    }
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`doctor:${container}:${runId}/${relPath}`, async () => {
+        try {
+            await downloadBlob(
+                container,
+                `${runId}/${DOCTOR_DIR}/${relPath}`,
+                destRoot,
+                refreshAfterMs,
+            );
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
