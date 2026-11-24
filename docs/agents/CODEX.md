@@ -220,11 +220,10 @@ The value overrides a `tool_output_token_limit` in `$CODEX_HOME/config.toml`. Se
 `null` to let that host value, or else the Codex default for the model, apply. Override it
 per run with `-D agent.tool_output_token_limit=5000`.
 
-Codex runs from before this option existed ran with the Codex default, so for a model outside
-the catalog each command output grew from 10,000 bytes to about 40 KB: those runs are not
-comparable with later ones. Their rows have no `tool_output_token_limit` key in
-`agent_config`, and a re-load (`evaluate`, resume, reports) fills in the default `10000`,
-which those runs did not have.
+Records written before this change reload with `tool_output_token_limit` `10000` (the field
+default). Before this change Codex applied its own default (10000 tokens for catalog models,
+10,000 bytes for models outside its bundled catalog such as `gpt-6.1-sol`), so compare trend
+lines across this commit with that in mind.
 
 ### Skills Discovery
 
