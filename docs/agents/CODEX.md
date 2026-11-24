@@ -214,7 +214,7 @@ Command output has a second cap. The exec tool cuts it to the `max_output_tokens
 may pass in each call, 10000 tokens when the model passes none, and no Codex config key
 raises that default. Command output is therefore capped at the smaller of the two, so a value
 above `10000` widens it only in calls where the model asks for more; it applies in full to MCP
-and other tool outputs. Such a value logs a warning when the config loads.
+and other tool outputs. Such a value logs a warning when the agent starts.
 
 The value overrides a `tool_output_token_limit` in `$CODEX_HOME/config.toml`. Set it to
 `null` to let that host value, or else the Codex default for the model, apply. Override it

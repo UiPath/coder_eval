@@ -88,6 +88,10 @@ _CODEX_APPROVAL_MODE = "deny_all"
 # routes to a custom endpoint.
 _CUSTOM_PROVIDER_ID = "custom"
 
+# Codex's exec tool caps each command output at the per-call max_output_tokens the model may
+# pass, 10000 tokens when it passes none; no Codex config key raises that default.
+_EXEC_OUTPUT_TOKEN_CEILING = 10_000
+
 # apply_patch statuses meaning the patch did not apply. Used ONLY to classify the
 # Write telemetry honestly, never to fail or retry the turn: "declined" needs an
 # approval reviewer, which no permission mode configures, and "failed" (a diff
@@ -1808,6 +1812,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
 
         self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
+        limit = self.config.tool_output_token_limit
+        if limit is not None and limit > _EXEC_OUTPUT_TOKEN_CEILING:
+            self._log.warning(
+                f"tool_output_token_limit {limit} is above {_EXEC_OUTPUT_TOKEN_CEILING}: Codex still caps "
+                + f"command output at {_EXEC_OUTPUT_TOKEN_CEILING} tokens unless the model asks for more in "
+                + "the call; the value applies in full to MCP and other tool outputs."
+            )
         # Fires for EVERY mode, not just bypassPermissions, so operators are not
         # misled that plan/acceptEdits/default confine Codex — none of them do.
         self._log.warning(
