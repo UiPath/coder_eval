@@ -377,6 +377,17 @@ class CodexAgentConfig(BaseAgentConfig):
     # `yes` that loads as 1.
     _context_window_range: ClassVar[tuple[int, int | None] | None] = (32_768, None)
 
+    tool_output_token_limit: int | None = Field(
+        default=10_000,
+        gt=0,
+        description=(
+            "Cap, in tokens, on each tool output Codex shows the model, passed as Codex's "
+            "tool_output_token_limit. The default is the cap Codex gives the models in its own "
+            "catalog; without it, a model the catalog does not know gets a much smaller fallback "
+            "cap (10,000 bytes). None leaves Codex's own per-model default."
+        ),
+    )
+
     def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.
 

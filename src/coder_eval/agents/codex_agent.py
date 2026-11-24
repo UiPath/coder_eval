@@ -1791,6 +1791,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # Codex then auto-compacts at 90% of this window.
             tool_config["model_context_window"] = self.config.context_window
 
+        if self.config.tool_output_token_limit is not None:
+            tool_config["tool_output_token_limit"] = self.config.tool_output_token_limit
+
         if tool_config:
             options["config"] = tool_config
 

@@ -201,6 +201,17 @@ uses it as the model's context window, capped to the model's catalog maximum, an
 auto-compacts at 90% of it. See
 [Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness).
 
+### Tool Output Cap
+
+`agent.tool_output_token_limit` (Codex only, default `10000`) is passed as
+`tool_output_token_limit` in the thread `config`. Codex cuts each tool output it shows the
+model to this many tokens, keeping the head and the tail. The default is the cap that Codex
+gives the models in its own catalog. Without it, a model that the catalog does not know gets
+a fallback cap of 10,000 bytes, about a quarter of the size, so a newer model would see less
+of each command output than an older one. The value is recorded in the run's `agent_config`.
+Set it to `null` to use the Codex default for the model, or override it per run with
+`-D agent.tool_output_token_limit=20000`.
+
 ### Skills Discovery
 
 The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:
