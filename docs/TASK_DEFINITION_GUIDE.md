@@ -207,6 +207,10 @@ types accept it, in what range, what each does with it and what an unset value m
 [Run-Limit Parity](agents/HARNESS_PARITY.md#the-context-window-cap-per-harness). An agent
 type that cannot apply it rejects it at load.
 
+**`tool_output_token_limit`** (codex only, default `10000`) caps, in tokens, each tool
+output Codex shows the model. Override via CLI with `-D agent.tool_output_token_limit=5000`.
+See [Codex](agents/CODEX.md#tool-output-cap).
+
 **Permission Modes:**
 - `default` — Default permission handling
 - `acceptEdits` — Auto-accept file edits (recommended for evaluations)

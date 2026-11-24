@@ -201,6 +201,30 @@ uses it as the model's context window, capped to the model's catalog maximum, an
 auto-compacts at 90% of it. See
 [Harness parity](HARNESS_PARITY.md#the-context-window-cap-per-harness).
 
+### Tool Output Cap
+
+`agent.tool_output_token_limit` (Codex only, default `10000`, range 1024-1000000) is passed
+as `tool_output_token_limit` in the thread `config`. Codex cuts each tool output it shows the
+model to this many tokens, keeping the head and the tail. The default is the cap that Codex
+gives the models in its own catalog. Without it, a model that the catalog does not know gets
+a fallback cap of 10,000 bytes, about a quarter of the size, so a newer model would see less
+of each command output than an older one. The value is recorded in the run's `agent_config`.
+
+Command output has a second cap. The exec tool cuts it to the `max_output_tokens` the model
+may pass in each call, 10000 tokens when the model passes none, and no Codex config key
+raises that default. Command output is therefore capped at the smaller of the two, so a value
+above `10000` widens it only in calls where the model asks for more; it applies in full to MCP
+and other tool outputs. Such a value logs a warning when the agent starts.
+
+The value overrides a `tool_output_token_limit` in `$CODEX_HOME/config.toml`. Set it to
+`null` to let that host value, or else the Codex default for the model, apply. Override it
+per run with `-D agent.tool_output_token_limit=5000`.
+
+Records written before this change reload with `tool_output_token_limit` `10000` (the field
+default). Before this change Codex applied its own default (10000 tokens for catalog models,
+10,000 bytes for models outside its bundled catalog such as `gpt-6.1-sol`), so compare trend
+lines across this commit with that in mind.
+
 ### Skills Discovery
 
 The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:
