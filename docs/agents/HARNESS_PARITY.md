@@ -681,6 +681,13 @@ uncapped under a "capped" label is a wrong measurement.
 - Neither harness reports when the model's own window has lowered the cap. A cap
   above the model's window runs at the model's window.
 
+`agent.tool_output_token_limit` is a related Codex-only knob and is not shared: it caps,
+in tokens, each tool output Codex shows the model (default `10000`, passed in the thread
+config). Unlike `context_window`, it is set by default, so a `tool_output_token_limit` in
+`$CODEX_HOME/config.toml` is overridden; set it to `null` to let the host value apply.
+Claude Code caps Bash output with its own mechanism, so the same number does not mean the
+same cap there. See [Codex](CODEX.md#tool-output-cap).
+
 ## `agent.plugins[].path` accepts different depths per harness
 
 Not a run limit, but the same promise: one task file, three harnesses, same meaning.

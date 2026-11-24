@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal, Self, TypedDict
 
@@ -22,6 +23,8 @@ from coder_eval.models.enums import AgentKind, PermissionMode
 from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.sandbox import url_egress_target
 
+
+logger = logging.getLogger(__name__)
 
 type SettingSource = Literal["user", "project", "local"]
 """Vendor-neutral mirror of claude_agent_sdk.SettingSource (no SDK dependency)."""
@@ -379,14 +382,44 @@ class CodexAgentConfig(BaseAgentConfig):
 
     tool_output_token_limit: int | None = Field(
         default=10_000,
-        gt=0,
+        ge=1_024,
+        le=1_000_000,
         description=(
             "Cap, in tokens, on each tool output Codex shows the model, passed as Codex's "
             "tool_output_token_limit. The default is the cap Codex gives the models in its own "
             "catalog; without it, a model the catalog does not know gets a much smaller fallback "
-            "cap (10,000 bytes). None leaves Codex's own per-model default."
+            "cap (10,000 bytes). Command output is also capped by the exec tool's own per-call "
+            "limit (10000 tokens unless the model asks for more), so a higher value applies in "
+            "full only to MCP and other tool outputs. None leaves Codex's own per-model default."
         ),
     )
+
+    # Codex's exec tool caps each command output at the per-call max_output_tokens the model may
+    # pass, 10000 tokens when it passes none; no Codex config key raises that default.
+    _exec_output_token_ceiling: ClassVar[int] = 10_000
+
+    @field_validator("tool_output_token_limit", mode="before")
+    @classmethod
+    def _reject_bool_tool_output_token_limit(cls, value: object) -> object:
+        """Reject a bool, which would otherwise load as 0 or 1 (a YAML ``yes``)."""
+        if isinstance(value, bool):
+            raise ValueError("tool_output_token_limit must be a number of tokens or null, not a boolean")
+        return value
+
+    @model_validator(mode="after")
+    def warn_tool_output_token_limit_above_exec_ceiling(self) -> Self:
+        """Warn that a cap above the exec ceiling does not widen command output on its own."""
+        ceiling = type(self)._exec_output_token_ceiling
+        if self.tool_output_token_limit is not None and self.tool_output_token_limit > ceiling:
+            logger.warning(
+                "tool_output_token_limit %d is above %d: Codex still caps command output at %d tokens "
+                + "unless the model asks for more in the call; the value applies in full to MCP and "
+                + "other tool outputs.",
+                self.tool_output_token_limit,
+                ceiling,
+                ceiling,
+            )
+        return self
 
     def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.

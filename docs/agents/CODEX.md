@@ -203,14 +203,28 @@ auto-compacts at 90% of it. See
 
 ### Tool Output Cap
 
-`agent.tool_output_token_limit` (Codex only, default `10000`) is passed as
-`tool_output_token_limit` in the thread `config`. Codex cuts each tool output it shows the
+`agent.tool_output_token_limit` (Codex only, default `10000`, range 1024-1000000) is passed
+as `tool_output_token_limit` in the thread `config`. Codex cuts each tool output it shows the
 model to this many tokens, keeping the head and the tail. The default is the cap that Codex
 gives the models in its own catalog. Without it, a model that the catalog does not know gets
 a fallback cap of 10,000 bytes, about a quarter of the size, so a newer model would see less
 of each command output than an older one. The value is recorded in the run's `agent_config`.
-Set it to `null` to use the Codex default for the model, or override it per run with
-`-D agent.tool_output_token_limit=20000`.
+
+Command output has a second cap. The exec tool cuts it to the `max_output_tokens` the model
+may pass in each call, 10000 tokens when the model passes none, and no Codex config key
+raises that default. Command output is therefore capped at the smaller of the two, so a value
+above `10000` widens it only in calls where the model asks for more; it applies in full to MCP
+and other tool outputs. Such a value logs a warning when the config loads.
+
+The value overrides a `tool_output_token_limit` in `$CODEX_HOME/config.toml`. Set it to
+`null` to let that host value, or else the Codex default for the model, apply. Override it
+per run with `-D agent.tool_output_token_limit=5000`.
+
+Codex runs from before this option existed ran with the Codex default, so for a model outside
+the catalog each command output grew from 10,000 bytes to about 40 KB: those runs are not
+comparable with later ones. Their rows have no `tool_output_token_limit` key in
+`agent_config`, and a re-load (`evaluate`, resume, reports) fills in the default `10000`,
+which those runs did not have.
 
 ### Skills Discovery
 
