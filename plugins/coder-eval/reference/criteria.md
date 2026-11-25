@@ -70,7 +70,7 @@ Match a single label written by the agent to a file against ground truth.
 | --- | --- |
 | `path` | Path to the file (relative to sandbox) containing the agent's predicted label; may be a glob matching exactly one file |
 | `expected_label` | Ground-truth label for this row |
-| `allowed_labels` | Canonical label set. File content not in this set is treated as '(other)'. |
+| `allowed_labels` | Canonical label set. File content not in this set, or a file that cannot be read, is treated as '(other)'. |
 
 Optional:
 
@@ -105,12 +105,13 @@ Optional:
 
 | Field | What it is |
 | --- | --- |
-| `tool_name` | Tool name filter (e.g., 'Bash'). None = any tool. |
-| `command_pattern` | Regex to match command parameters. None = any command. For a Bash command the pattern is matched against the raw command text OR its shell-normalized form — `shlex`-resolved quoting with a `bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not hand-encode shell quoting/escaping (`'single'`, `"double"`, bare). |
+| `tool_name` | Tool name filter (e.g., 'Bash'). None = any tool. A pattern searches only the `command` param of a shell call: a Bash call, or any call with a `command` param, such as a shell tool under another name. A named tool without a `command` param is searched on its JSON params. With None, a call without a `command` param is not searched: a mention in a Write, Edit or TodoWrite body does not count, and a `max_count: 0` guard (also the legacy `command_not_executed` without a tool_name) does not see it. Name the tool to search its params. |
+| `command_pattern` | Regex to match command parameters. None = any command. For a shell command (see tool_name) the pattern is matched against the raw command text OR its shell-normalized form — `shlex`-resolved quoting with a `bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not hand-encode shell quoting/escaping (`'single'`, `"double"`, bare). |
 | `min_count` | Minimum matching commands required. ``0`` allows the criterion to pass when no commands match (combine with ``max_count: 0`` to express ``must NOT match``). |
 | `max_count` | Optional maximum matching commands allowed (inclusive). ``None`` means no upper bound — the current default. When set, the criterion passes iff ``min_count <= match_count <= max_count``. |
-| `require_success` | If True, only count successful commands. |
-| `exclude_pattern` | Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so it also excludes quote-obfuscated variants of the same call. |
+| `require_success` | If True, only count successful commands. This is the reported success of the whole tool call, so `cmd \| tail` and `cmd; true` can pass when cmd fails. |
+| `exclude_pattern` | Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. Like command_pattern, this is matched against the raw shell command OR its shell-normalized form, so it also excludes quote-obfuscated variants of the same call. |
+| `match_on` | What a pattern matches in a shell call. `command_text` (default): the command text and its shell-normalized form, once per call. `simple_commands`: each simple command the shell runs, as its argv with quotes resolved, joined by single spaces -- heredoc bodies, comments and echo strings are not commands, `$(...)` and `bash -c` strings are, and leading timeout/sudo/nohup/nice/exec/command/xargs/stdbuf/time wrappers are stripped (assignments and `env` stay). Each matching simple command counts towards min_count/max_count. A PowerShell/cmd call or text that cannot be split is matched as `command_text`, which the details say. Other tools' JSON params are matched as before. |
 
 ### `commands_efficiency`
 

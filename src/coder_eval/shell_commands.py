@@ -24,9 +24,10 @@ NON_POSIX_SHELLS = frozenset({"pwsh", "powershell", "cmd"})
 
 _MAX_DEPTH = 6
 _SEP_CHARS = ";&|()\n"
-# A quoted or escaped operator character is a word character. The scan swaps it for a
-# private-use stand-in, so shlex cannot split on it, and the split swaps it back.
-_PROTECTED = {ch: chr(0xE000 + k) for k, ch in enumerate(_SEP_CHARS)}
+# A quoted or escaped operator or redirection character is a word character. The scan swaps
+# it for a private-use stand-in, so shlex cannot split on it and it is not read as a
+# redirection; the stand-in is swapped back once redirections are stripped.
+_PROTECTED = {ch: chr(0xE000 + k) for k, ch in enumerate(_SEP_CHARS + "<>")}
 _PROTECT = str.maketrans(_PROTECTED)
 _UNPROTECT = str.maketrans({v: k for k, v in _PROTECTED.items()})
 _HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([A-Za-z0-9_.\-]+))")
@@ -73,24 +74,35 @@ def _commands(text: str, depth: int) -> list[list[str]]:
         raise ShellSplitError("nested deeper than the limit")
     top, substitutions, heredocs = _scan(text)
     result: list[list[str]] = []
-    for argv in _split(top):
-        heredoc_ids = [int(m.group(1)) for t in argv if (m := _HEREDOC_MARK.match(t))]
-        argv = _strip_redirections([t for t in argv if not _HEREDOC_MARK.match(t)])
-        argv, scripts, extra = _unwrap(argv)
-        for k in heredoc_ids:
-            quoted, body = heredocs[k]
-            if argv and _is_posix_shell(argv[0]) and _command_flag_index(argv) is None:
-                result.extend(_commands(body, depth + 1))  # a heredoc fed to a shell is a script
-            elif not quoted:
-                for sub in _body_substitutions(body):
-                    result.extend(_commands(sub, depth + 1))
-        for script in scripts:
-            result.extend(_commands(script, depth + 1))
-        result.extend(e for e in extra if e)
-        if argv:
-            result.append(argv)
+    for index, argv in enumerate(_split(top)):
+        fed = [heredocs[int(m.group(1))] for t in argv if (m := _HEREDOC_MARK.match(t))]
+        words = _strip_redirections([t for t in argv if not _HEREDOC_MARK.match(t)])
+        argv = [t.translate(_UNPROTECT) for t in words]
+        result.extend(_argv_commands(argv, fed, depth, joined=depth == 0 and index == 0))
     for sub in substitutions:
         result.extend(_commands(sub, depth + 1))
+    return result
+
+
+def _argv_commands(argv: list[str], fed: list[tuple[bool, str]], depth: int, *, joined: bool) -> list[list[str]]:
+    """The commands one split-out argv runs: itself unwrapped, its scripts, ``find -exec`` actions and fed heredocs.
+
+    ``joined``: the argv starts the recorded text, so a shell ``-c`` may be in the argv-joined form.
+    """
+    argv, scripts, actions = _unwrap(argv, joined=joined)
+    result: list[list[str]] = []
+    for quoted, body in fed:
+        if argv and _is_posix_shell(argv[0]) and _command_flag_index(argv) is None:
+            result.extend(_commands(body, depth + 1))  # a heredoc fed to a shell is a script
+        elif not quoted:
+            for sub in _body_substitutions(body):
+                result.extend(_commands(sub, depth + 1))
+    for script in scripts:
+        result.extend(_commands(script, depth + 1))
+    for action in actions:
+        result.extend(_argv_commands(action, [], depth, joined=False))
+    if argv:
+        result.append(argv)
     return result
 
 
@@ -116,7 +128,7 @@ def _scan(text: str) -> tuple[str, list[str], list[tuple[bool, str]]]:
         elif c == "\\" and i + 1 < n:
             nxt = text[i + 1]
             out.append(
-                " " if nxt == "\n" else _PROTECTED[nxt] if quote is None and nxt in _SEP_CHARS else text[i : i + 2]
+                " " if nxt == "\n" else _PROTECTED[nxt] if quote is None and nxt in _PROTECTED else text[i : i + 2]
             )
             i += 2
         elif (c == "'" and quote is None) or c == '"':
@@ -275,7 +287,7 @@ def _split(top: str) -> list[list[str]]:
                 commands.append(current)
             current = []
         else:
-            current.append(tok.translate(_UNPROTECT))
+            current.append(tok)
     if current:
         commands.append(current)
     return commands
@@ -315,8 +327,13 @@ def _skip_options(argv: list[str], with_argument: frozenset[str]) -> list[str]:
     return argv
 
 
-def _unwrap(argv: list[str]) -> tuple[list[str], list[str], list[list[str]]]:
-    """Strip keywords and wrappers. Returns (argv, scripts to parse, extra commands)."""
+def _unwrap(argv: list[str], *, joined: bool) -> tuple[list[str], list[str], list[list[str]]]:
+    """Strip keywords and wrappers. Returns (argv, scripts to parse, ``find -exec`` actions).
+
+    With ``joined``, every word after a leading shell's ``-c`` is the script: Codex rollout
+    recovery records argv joined without re-quoting (``bash -lc uip flow debug``). Anywhere
+    else only the next word is the script, as in the shell (``sh -c 'cmd "$1"' _ {}``).
+    """
     scripts: list[str] = []
     extra: list[list[str]] = []
     while argv:
@@ -335,17 +352,37 @@ def _unwrap(argv: list[str]) -> tuple[list[str], list[str], list[list[str]]]:
             scripts.append(" ".join(argv[1:]))
             return [], scripts, extra
         elif _is_posix_shell(argv[0]) and (k := _command_flag_index(argv)) is not None:
-            rest = argv[k + 1 :]
-            # A recorded argv-joined form (`bash -lc uip flow debug`) arrives unquoted,
-            # so more than one word after the flag is read as the script.
+            rest = argv[k + 1 :] if joined else argv[k + 1 : k + 2]
             if rest:
                 scripts.append(" ".join(rest))
             return [], scripts, extra
         else:
             break
-    if argv and program_name(argv[0]) == "find":
-        argv, extra = _split_find_exec(argv)
+    prefix = _assignment_prefix_len(argv)
+    program = argv[prefix:]
+    if program and _is_posix_shell(program[0]) and (k := _command_flag_index(program)) is not None:
+        # `X=1 bash -c '...'`: the assignments stay, the script is parsed.
+        scripts.extend(program[k + 1 : k + 2])
+        argv = [*argv[: prefix + k + 1], SUBST]
+    elif program and program_name(program[0]) == "find":
+        kept, extra = _split_find_exec(program)
+        argv = argv[:prefix] + kept
     return argv, scripts, extra
+
+
+def _assignment_prefix_len(argv: list[str]) -> int:
+    """How many leading words are assignments or ``env`` with its options and assignments."""
+    i = 0
+    while i < len(argv):
+        if _ASSIGNMENT.match(argv[i]):
+            i += 1
+        elif program_name(argv[i]) == "env":
+            i += 1
+            while i < len(argv) and (argv[i].startswith("-") or _ASSIGNMENT.match(argv[i])):
+                i += 2 if argv[i] in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string") else 1
+        else:
+            break
+    return i
 
 
 def _split_find_exec(argv: list[str]) -> tuple[list[str], list[list[str]]]:
@@ -358,7 +395,7 @@ def _split_find_exec(argv: list[str]) -> tuple[list[str], list[list[str]]]:
             j = i + 1
             while j < len(argv) and argv[j] not in (";", "+"):
                 j += 1
-            commands.append(_unwrap(argv[i + 1 : j])[0])
+            commands.append(argv[i + 1 : j])
             i = j + 1
         else:
             kept.append(argv[i])

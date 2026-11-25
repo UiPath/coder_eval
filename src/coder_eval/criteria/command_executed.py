@@ -35,6 +35,10 @@ _NON_POSIX_WORD = "|".join(
     )
 )
 _NON_POSIX_PREFIX = re.compile(rf"\s*(?:{_NON_POSIX_WORD})(?:\s|$)", re.IGNORECASE)
+# PowerShell text without its wrapper (Codex on Windows records the script alone): an
+# `$env:NAME` reference, or a `Verb-Noun` cmdlet as a command's program.
+_POWERSHELL_ENV = re.compile(r"\$env:\w")
+_POWERSHELL_CMDLET = re.compile(r"[A-Z][a-z]+-[A-Z][A-Za-z]+")
 _NOT_POSIX = "not POSIX shell"
 _UNPARSEABLE = "not splittable into simple commands"
 
@@ -181,13 +185,13 @@ def _simple_command_texts(cmd_text: str) -> tuple[str, ...] | str:
 
     Rationale: .claude/notes/contracts.md § Matching on simple commands
     """
-    if _NON_POSIX_PREFIX.match(cmd_text):
+    if _NON_POSIX_PREFIX.match(cmd_text) or _POWERSHELL_ENV.search(cmd_text):
         return _NOT_POSIX
     try:
         argvs = simple_commands(cmd_text)
     except (ShellSplitError, RecursionError):
         return _UNPARSEABLE
-    if any(program_name(argv[0]) in NON_POSIX_SHELLS for argv in argvs):
+    if any(program_name(argv[0]) in NON_POSIX_SHELLS or _POWERSHELL_CMDLET.fullmatch(argv[0]) for argv in argvs):
         return _NOT_POSIX
     return tuple(" ".join(argv) for argv in argvs)
 

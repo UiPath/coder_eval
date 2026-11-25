@@ -1,5 +1,6 @@
 """Tests for ``match_on: simple_commands`` on CommandExecutedCriterion and its shell splitter."""
 
+import gc
 import time
 from datetime import datetime
 
@@ -129,6 +130,18 @@ class TestWrappers:
         }
         assert _texts("find . -exec rm {} + ; find . -execdir uip a ';'") == {"find .", "rm {}", "uip a"}
 
+    def test_find_exec_shell_script_is_parsed(self):
+        assert _texts("find . -name '*.flow' -exec sh -c 'uip flow validate \"$1\"' _ {} \\;") == {
+            "find . -name *.flow",
+            "uip flow validate $1",
+        }
+
+    def test_assignment_before_a_shell_keeps_the_assignment_and_parses_the_script(self):
+        assert _texts("X=1 env -u Y bash -lc 'uip a && uip b'") == {f"X=1 env -u Y bash -lc {SUBST}", "uip a", "uip b"}
+
+    def test_assignment_before_find_exec(self):
+        assert _texts("X=1 find . -exec uip a {} +") == {"X=1 find .", "uip a {}"}
+
     def test_assignments_and_env_stay_visible(self):
         assert _texts("env -u UIPATH_STUDIO_PID uip rpa build; X=1 Y=2 uip x") == {
             "env -u UIPATH_STUDIO_PID uip rpa build",
@@ -175,6 +188,9 @@ class TestQuotingAndComments:
     def test_quoted_operators_are_words(self):
         assert _texts("echo ';' 'a|b' \"x && y\" a\\;b; uip z") == {"echo ; a|b x && y a;b", "uip z"}
 
+    def test_quoted_redirection_characters_are_words(self):
+        assert _texts("grep '>' file.txt; uip a \\< b \"<x>\"") == {"grep > file.txt", "uip a < b <x>"}
+
     def test_echo_string_is_an_argument(self):
         assert _texts('echo "uip flow debug x"') == {"echo uip flow debug x"}
 
@@ -205,10 +221,14 @@ class TestLinearTime:
         def cost(chars: int) -> float:
             text = unit * (chars // len(unit) + 1)
             best = float("inf")
-            for _ in range(3):
-                start = time.perf_counter()
-                simple_commands(text)
-                best = min(best, time.perf_counter() - start)
+            gc.disable()  # a collection pause is not the splitter's cost
+            try:
+                for _ in range(5):
+                    start = time.process_time()
+                    simple_commands(text)
+                    best = min(best, time.process_time() - start)
+            finally:
+                gc.enable()
             return best
 
         assert cost(2000) < 0.1
@@ -263,6 +283,8 @@ class TestChecker:
             "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'echo uip flow debug'",
             "pwsh -Command \"Write-Output 'x'; uip flow debug\"",
             "cd x; powershell.exe -c 'uip flow debug'",
+            "$env:UIPATH_STUDIO_PID = $null; uip flow debug x",
+            "Get-Content a.txt; uip flow debug x",
         ],
     )
     def test_powershell_falls_back_to_raw(self, command):
