@@ -367,10 +367,27 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
         return self
 
 
+_CODEX_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})
+# openai_codex.api.ReasoningEffort at the pinned SDK, listed here because base installs load this
+# module without the SDK. A model may accept fewer tiers than Codex knows.
+_CODEX_EFFORT_TIERS: frozenset[str] = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
 class CodexAgentConfig(BaseAgentConfig):
     """Codex agent configuration."""
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
+
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Pass-through options coder_eval forwards to Codex. Allowed keys: "
+            f"{sorted(_CODEX_SDK_OPTION_FIELDS)}. 'effort' is the reasoning-effort tier, passed as "
+            f"model_reasoning_effort in the thread config; one of {sorted(_CODEX_EFFORT_TIERS)}, of "
+            "which a model may accept fewer. Unset leaves the model_reasoning_effort in the host "
+            "$CODEX_HOME/config.toml, or else the model's default."
+        ),
+    )
 
     # Codex clamps the value to the model's catalog maximum itself and compacts at 90% of it.
     # The floor rejects a window too small to work in, such as a dropped "000" or a YAML
@@ -391,6 +408,19 @@ class CodexAgentConfig(BaseAgentConfig):
             "host $CODEX_HOME/config.toml, or else Codex's own per-model default."
         ),
     )
+
+    @field_validator("sdk_options")
+    @classmethod
+    def _validate_sdk_options_keys(cls, v: dict[str, Any]) -> dict[str, Any]:
+        unknown = sorted(set(v) - _CODEX_SDK_OPTION_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"sdk_options keys {unknown} are not Codex options coder_eval forwards "
+                + f"(valid keys: {sorted(_CODEX_SDK_OPTION_FIELDS)})"
+            )
+        if "effort" in v and v["effort"] not in _CODEX_EFFORT_TIERS:
+            raise ValueError(f"sdk_options.effort must be one of {sorted(_CODEX_EFFORT_TIERS)}, got {v['effort']!r}")
+        return v
 
     def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.

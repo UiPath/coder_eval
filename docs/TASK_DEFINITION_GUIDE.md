@@ -195,6 +195,8 @@ validates its own keys at YAML load:
   dataclass; framework-managed keys (`model`, `allowed_tools`,
   `permission_mode`, `hooks`, `mcp_servers`, …) are rejected. See the
   [Claude Code guide](agents/CLAUDE_CODE.md).
+- `codex` — only `effort`, passed as `model_reasoning_effort`. See the
+  [Codex guide](agents/CODEX.md#reasoning-effort).
 - `delegate` — only `effort`. See the [Delegate guide](agents/DELEGATE.md).
 
 Deep-merged across the 5-layer config chain. Override via CLI with the

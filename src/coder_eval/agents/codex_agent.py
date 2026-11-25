@@ -1798,6 +1798,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if self.config.tool_output_token_limit is not None:
             tool_config["tool_output_token_limit"] = self.config.tool_output_token_limit
 
+        effort = self.config.sdk_options.get("effort")
+        if effort is not None:
+            tool_config["model_reasoning_effort"] = effort
+
         if tool_config:
             options["config"] = tool_config
 

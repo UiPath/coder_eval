@@ -142,10 +142,15 @@ class TestApplyOverrides:
         apply_overrides(task, {}, agent_type="codex")
         assert isinstance(task.agent, CodexAgentConfig)
 
-    def test_sdk_options_on_codex_raises(self):
+    def test_sdk_options_effort_on_codex_applies(self):
         task = _make_task(agent=parse_agent_config(type="codex"))
-        with pytest.raises(OverrideError, match=r"agent type codex\. This option is only supported for "):
-            apply_overrides(task, {"agent.sdk_options.effort": "high"})
+        apply_overrides(task, {"agent.sdk_options.effort": "high"})
+        assert task.agent.sdk_options == {"effort": "high"}
+
+    def test_sdk_options_other_key_on_codex_raises(self):
+        task = _make_task(agent=parse_agent_config(type="codex"))
+        with pytest.raises(OverrideError, match="sdk_options"):
+            apply_overrides(task, {"agent.sdk_options.max_thinking_tokens": 1024})
 
     def test_sdk_options_effort_on_delegate_applies(self):
         task = _make_task(agent=parse_agent_config(type="delegate"))
@@ -177,10 +182,10 @@ class TestApplyOverrides:
         finally:
             AgentRegistry._registry.pop("sdk-options-plugin", None)
 
-    def test_sdk_options_with_agent_type_codex_raises(self):
+    def test_sdk_options_effort_with_agent_type_codex_applies(self):
         task = _make_task(agent=parse_agent_config(type="claude-code"))
-        with pytest.raises(OverrideError, match=r"agent type codex\. This option is only supported for "):
-            apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
+        apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
+        assert task.agent.sdk_options == {"effort": "high"}
 
     def test_unknown_root_raises(self):
         task = _make_task()

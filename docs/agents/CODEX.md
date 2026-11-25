@@ -225,6 +225,15 @@ default). Before this change Codex applied its own default (10000 tokens for cat
 10,000 bytes for models outside its bundled catalog such as `gpt-6.1-sol`), so compare trend
 lines across this commit with that in mind.
 
+### Reasoning Effort
+
+`agent.sdk_options.effort` is passed as `model_reasoning_effort` in the thread `config`,
+the same key a `$CODEX_HOME/config.toml` takes, which it overrides. It is one of Codex's
+tiers: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; a model may accept
+fewer, and another key or tier is a validation error at load. Unset, the host's
+`config.toml` value applies, or else the model's default. It is the same `sdk_options.effort`
+key Claude Code and Delegate take, so `-D agent.sdk_options.effort=high` drives all three.
+
 ### Skills Discovery
 
 The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:
