@@ -903,7 +903,8 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
             "command (see tool_name) the pattern is matched against the raw command text OR its "
             "shell-normalized form — `shlex`-resolved quoting with a "
             "`bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not "
-            "hand-encode shell quoting/escaping (`'single'`, `\"double\"`, bare)."
+            "hand-encode shell quoting/escaping (`'single'`, `\"double\"`, bare). With "
+            "`match_on: simple_commands` it is matched against each simple command instead (see match_on)."
         ),
     )
     min_count: int = Field(
@@ -936,7 +937,24 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
         description=(
             "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. "
             "Like command_pattern, this is matched against the raw shell command OR its shell-normalized form, so "
-            "it also excludes quote-obfuscated variants of the same call."
+            "it also excludes quote-obfuscated variants of the same call. With `match_on: simple_commands` it "
+            "is matched per simple command: it skips that simple command, not the whole call."
+        ),
+    )
+
+    match_on: Literal["command_text", "simple_commands"] = Field(
+        default="command_text",
+        description=(
+            "What a pattern matches in a shell call. `command_text` (default): the command text and its "
+            "shell-normalized form, once per call. `simple_commands`: each simple command the shell runs, "
+            "as its argv with quotes resolved, joined by single spaces -- heredoc bodies, comments and "
+            "echo strings are not commands, `$(...)`, `bash -c` strings and heredocs fed to a shell are, "
+            "and leading shell keywords (`if`, `then`, `do`, `!`, ...) and "
+            "timeout/sudo/nohup/nice/exec/command/builtin/xargs/stdbuf/time wrappers are stripped "
+            "(assignments and `env` stay). Stdin piped into a shell (`cat <<EOF | bash`) is not parsed. "
+            "Each matching simple command counts towards min_count/max_count. A "
+            "PowerShell/cmd call or text that cannot be split is matched as `command_text`, which the "
+            "details say. Other tools' JSON params are matched as before."
         ),
     )
 
