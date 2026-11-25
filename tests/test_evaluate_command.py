@@ -166,6 +166,35 @@ def test_evaluate_command_informational_criterion_does_not_fail_exit(tmp_path):
         assert exc_info.value.exit_code == 0
 
 
+def test_evaluate_command_report_only_criterion_is_excluded_from_gate_and_score(tmp_path):
+    """A failing report_only criterion keeps its declared weight but neither gates nor scores."""
+    from coder_eval.cli.evaluate_command import run_evaluation
+    from coder_eval.models import EvaluationResult
+
+    task_file = FIXTURES_DIR / "tasks" / "test_task_report_only_criterion.yaml"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "app.py").write_text("print('hello')")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with (
+        patch("coder_eval.cli.console.console.print"),
+        patch("coder_eval.logging_config.setup_logging"),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
+
+    assert exc_info.value.exit_code == 0
+    (row,) = _row_dirs(run_dir)
+    record = EvaluationResult.model_validate_json((row / "task.json").read_text(encoding="utf-8"))
+    assert record.final_status == "SUCCESS"
+    assert record.weighted_score == 1.0  # not 8/9: the report_only miss is out of both terms
+    gating, report_only = record.success_criteria_results
+    assert (gating.score, gating.gating) == (1.0, True)
+    assert (report_only.score, report_only.gating) == (0.0, False)
+
+
 def test_evaluate_command_invalid_task_file(tmp_path):
     """Test evaluate command with invalid task file."""
     # Use non-existent task file

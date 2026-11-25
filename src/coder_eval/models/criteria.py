@@ -118,7 +118,20 @@ class BaseSuccessCriterion(BaseModel, ABC):
             "below its pass_threshold no longer flips the task to FAILURE. The result is still "
             "computed, stored, and rendered in reports. A weight=0 criterion may not set a stop_early "
             "block or suite_thresholds (arming a non-gating criterion for a pass/fail gate is "
-            "incoherent)."
+            "incoherent). To keep a non-zero declared weight on an informational criterion, set "
+            "report_only: true instead."
+        ),
+    )
+
+    report_only: bool = Field(
+        default=False,
+        description=(
+            "Make the criterion INFORMATIONAL without rewriting its declared weight (default: false). "
+            "A report_only criterion still runs, and its raw score, weight and pass_threshold are "
+            "stored and rendered, but it is excluded from the weighted score AND from the pass/fail "
+            "gate, exactly like weight=0. Use it when the declared weight must stay for "
+            "provenance or parity with another evaluation contract. Like weight=0, it may not set a "
+            "stop_early block or suite_thresholds."
         ),
     )
 
@@ -174,43 +187,48 @@ class BaseSuccessCriterion(BaseModel, ABC):
         self.__pydantic_fields_set__.add("type")
 
     @model_validator(mode="after")
-    def check_weight_zero_is_not_gating(self) -> Self:
-        """Reject ``weight: 0`` combined with any gate-arming field.
+    def check_informational_is_not_armed(self) -> Self:
+        """Reject an informational criterion combined with any gate-arming field.
 
-        ``weight: 0`` makes a criterion informational — excluded from the score
-        and from the pass/fail gate (see ``is_gating``). Both the early-stop
-        triggers (``is_stop_armed``: arms the per-row early-stop gate) and
-        ``suite_thresholds`` (arms the across-row suite gate, which drives the
-        run's exit code) would let an "informational" criterion flip a run to
-        failure — directly contradicting the field's contract. So both
-        combinations are authoring errors, caught at load time rather than
-        surfacing as a confusing exit code later.
+        ``weight: 0`` and ``report_only: true`` make a criterion informational —
+        excluded from the score and from the pass/fail gate (see ``is_gating``).
+        Both the early-stop triggers (``is_stop_armed``: arms the per-row
+        early-stop gate) and ``suite_thresholds`` (arms the across-row suite
+        gate, which drives the run's exit code) would let an "informational"
+        criterion flip a run to failure — directly contradicting the field's
+        contract. So both combinations are authoring errors, caught at load time
+        rather than surfacing as a confusing exit code later.
         """
-        if self.weight == 0.0:
-            if self.is_stop_armed:
-                raise ValueError(
-                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
-                    + "so it cannot also set a stop_early block, which arms it for a pass/fail gate. "
-                    + "Give it a non-zero weight, or drop the block."
-                )
-            if self.suite_thresholds is not None:
-                raise ValueError(
-                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
-                    + "so it cannot also set suite_thresholds (which arms it for a pass/fail gate). "
-                    + "Give it a non-zero weight, or drop suite_thresholds."
-                )
+        if self.is_gating:
+            return self
+        if self.report_only:
+            cause, remedy = "report_only: true", "Drop report_only"
+        else:
+            cause, remedy = "weight=0", "Give it a non-zero weight"
+        if self.is_stop_armed:
+            raise ValueError(
+                f"criterion {self.type!r}: {cause} makes the criterion informational (non-gating), "
+                + "so it cannot also set a stop_early block, which arms it for a pass/fail gate. "
+                + f"{remedy}, or drop the block."
+            )
+        if self.suite_thresholds is not None:
+            raise ValueError(
+                f"criterion {self.type!r}: {cause} makes the criterion informational (non-gating), "
+                + "so it cannot also set suite_thresholds (which arms it for a pass/fail gate). "
+                + f"{remedy}, or drop suite_thresholds."
+            )
         return self
 
     @property
     def is_gating(self) -> bool:
         """True when this criterion participates in the task's pass/fail gate.
 
-        Single source of truth for "does a low score here fail the task". A
-        ``weight: 0`` criterion is informational: it is excluded from the
-        weighted score (it contributes 0 to both numerator and denominator) and,
-        by the same token, from the gate — so the two never disagree.
+        Single source of truth for "does a low score here fail the task", read by
+        both the gate and ``calculate_weighted_score`` so the two never disagree.
+        A ``weight: 0`` or ``report_only: true`` criterion is informational: it
+        is excluded from the weighted score and from the gate.
         """
-        return self.weight > 0.0
+        return self.weight > 0.0 and not self.report_only
 
     # Business logic (check operations) moved to SuccessChecker in evaluator.py
 

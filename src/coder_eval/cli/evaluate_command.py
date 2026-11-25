@@ -555,7 +555,7 @@ def _report_and_exit(
 
     for criterion, cr in zip(task.success_criteria, criteria_results, strict=True):
         if not criterion.is_gating:
-            # weight=0 is informational: it cannot pass/fail the task, so don't
+            # An informational criterion cannot pass/fail the task, so don't
             # render it as ✓/✗ (that would contradict the gate and the exit code).
             status = "[dim]○[/dim]"
         else:
@@ -569,7 +569,7 @@ def _report_and_exit(
             console.print(f"  [red]Error: {cr.error}[/red]")
         console.print()
 
-    # Gate over gating criteria only (weight=0 is informational and cannot fail
+    # Gate over gating criteria only (an informational one cannot fail
     # the task) so this summary + the exit code below match final_status.
     gating = [(cr, c) for cr, c in zip(criteria_results, task.success_criteria, strict=True) if c.is_gating]
     passed = sum(1 for cr, c in gating if cr.score >= c.pass_threshold)
@@ -581,7 +581,7 @@ def _report_and_exit(
     console.print(f"  Passed: {passed}/{total}")
     console.print(f"  Failed: {failed}/{total}")
     if informational:
-        console.print(f"  [dim]Informational (weight=0, not gated): {informational}[/dim]")
+        console.print(f"  [dim]Informational (not gated): {informational}[/dim]")
     console.print(f"\n[dim]Run directory: {prepared_run_dir}[/dim]")
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")

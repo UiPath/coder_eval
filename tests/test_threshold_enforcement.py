@@ -155,6 +155,62 @@ class TestThresholdEnforcement:
                 suite_thresholds={"mean": 0.8},
             )
 
+    def test_report_only_criterion_keeps_its_weight_but_neither_scores_nor_gates(self):
+        """report_only excludes a non-zero-weight criterion from the score and the gate (#101)."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=8.0, pass_threshold=1.0),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=1.0, pass_threshold=0.9, report_only=True),
+        ]
+        result = _make_result([1.0, 0.0])
+
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 1.0  # not 8/9
+        assert result.all_criteria_passed(criteria)
+        assert criteria[1].weight == 1.0
+        assert not criteria[1].is_gating
+
+    def test_report_only_does_not_rescue_a_failing_gating_criterion(self):
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=1.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=5.0, pass_threshold=0.9, report_only=True),
+        ]
+        result = _make_result([0.5, 1.0])
+
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 0.5  # the report_only pass does not lift the score
+        assert not result.all_criteria_passed(criteria)
+
+    def test_all_report_only_criteria_score_zero_and_leave_an_empty_gate(self):
+        """Same outcome as an all-weight-0 task: nothing to score, nothing to fail on."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", report_only=True),
+            FileExistsCriterion(path="f2.txt", description="crit-1", report_only=True),
+        ]
+        result = _make_result([1.0, 0.0])
+
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 0.0
+        assert result.all_criteria_passed(criteria)
+
+    def test_report_only_cannot_be_armed_for_early_stop(self):
+        with pytest.raises(ValidationError, match="report_only: true makes the criterion informational"):
+            CommandExecutedCriterion(
+                description="report-only + armed",
+                report_only=True,
+                stop_early=StopEarlyPolicy(on_pass="stop"),
+                tool_name="Bash",
+                command_pattern="pytest",
+            )
+
+    def test_report_only_cannot_declare_suite_thresholds(self):
+        with pytest.raises(ValidationError, match="report_only: true makes the criterion informational"):
+            FileExistsCriterion(
+                path="f1.txt",
+                description="report-only + suite-gated",
+                report_only=True,
+                suite_thresholds={"mean": 0.8},
+            )
+
     def test_empty_inputs_score_zero_without_raising(self):
         """Empty results/criteria still yield 0.0 (not a raise) and an empty gate passes."""
         result = _make_result([])
@@ -183,12 +239,17 @@ class TestInformationalDisplayParity:
 
         gating = checker.check(FileExistsCriterion(path="missing.txt", description="gating", weight=1.0))
         informational = checker.check(FileExistsCriterion(path="missing.txt", description="informational", weight=0.0))
+        report_only = checker.check(
+            FileExistsCriterion(path="missing.txt", description="report-only", weight=1.0, report_only=True)
+        )
 
         assert gating.gating is True
         assert informational.gating is False
-        # Both genuinely scored zero — un-gating changes the label, never the measurement.
+        assert report_only.gating is False
+        # All genuinely scored zero — un-gating changes the label, never the measurement.
         assert gating.score == 0.0
         assert informational.score == 0.0
+        assert report_only.score == 0.0
 
     def test_criterion_result_defaults_to_gating(self):
         """Results persisted before the field existed must read back as gating."""
@@ -210,5 +271,5 @@ class TestInformationalDisplayParity:
         )
 
         assert "(1/1 passed" in html  # NOT 1/2 — the informational miss isn't a failure
-        assert "informational — not gated (weight: 0)" in html
+        assert "informational — not gated" in html
         assert "1 informational" in html
