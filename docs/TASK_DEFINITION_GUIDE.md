@@ -1037,6 +1037,7 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 | `max_count` | `null` | Optional inclusive upper bound. When set, the criterion passes iff `min_count <= matches <= max_count`. |
 | `require_success` | `false` | Only count commands that completed successfully. This is the reported success of the whole tool call, so `cmd \| tail` and `cmd; true` can pass when `cmd` fails. |
 | `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. It searches the same text as `command_pattern`, whether or not a `command_pattern` is set. |
+| `match_on` | `command_text` | `command_text` matches the text of each call. `simple_commands` matches each command the shell runs, one at a time (see **Matching simple commands**). Set it per criterion. |
 
 **Which text is searched.** The shape of a call decides the text that `command_pattern` and `exclude_pattern` search:
 
@@ -1065,6 +1066,35 @@ So with `tool_name: null`, a `max_count: 0` guard or an `exclude_pattern` does n
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
 With a pattern, `tool_name: null` searches the command of a shell call, not the parameters of every tool (see **Which text is searched**).
+
+**Matching simple commands (`match_on: simple_commands`).** With the default `match_on: command_text`, a pattern searches the text of a shell call, so it cannot tell a command that runs from a mention of it. `match_on: simple_commands` splits each shell call into the simple commands the shell runs, and matches the pattern against each of them. A simple command is its argv with quotes resolved, joined by single spaces.
+
+```yaml
+- type: "command_executed"
+  description: "Agent did not run flow debug"
+  command_pattern: "^(\\S*/)?uip (maestro )?flow debug\\b"
+  match_on: simple_commands
+  min_count: 0
+  max_count: 0
+```
+
+How the call is split:
+
+- **Not commands:** heredoc bodies, comments, and the words of a `for`/`select`/`case` header. A `<<'EOF'` body (quoted delimiter) is dropped whole. Of a `<<EOF` body (unquoted), only the `$(...)` and backtick contents are kept, because the shell runs them. A heredoc fed to `sh`/`bash` (`bash -s <<EOF`) is a script, and its commands count. An `echo`/`printf` string is an argument of `echo`, so an anchored pattern (`^uip ...`) does not match it.
+- **Commands:** each part between `;` `&&` `||` `|` `&` `(` `)` and line breaks; the contents of `$(...)`, backticks and `<(...)`; `sh -c`/`bash -lc` strings and `eval` arguments; the `CMD` of `find ... -exec CMD ;`. In the outer command, a substitution shows as `__SUBST__`. Redirections are removed.
+- **Wrappers that are stripped:** `timeout [flags] N`, `sudo [flags]`, `nohup`, `nice [-n N]`, `exec`, `command`, `builtin`, `stdbuf [flags]`, `time [-p]`, `xargs [flags]`, and shell keywords (`if`, `then`, `do`, `!`, ...). So `timeout 60 uip flow debug x` matches `^uip flow debug`.
+- **Kept:** leading assignments and `env` with its options, because a guard can need them (`env -u UIPATH_STUDIO_PID uip rpa build`, `X=1 uip codedapp deploy`). Wrapper stripping stops at the first assignment or `env`, so write `^(env \\S+ )*` or `^(\\w+=\\S* )*` before the program if those forms must also match.
+
+What a pattern must take into account:
+
+- **Quotes are resolved.** `uip 'flow' "debug"` is `uip flow debug`; do not put `["']` in the pattern.
+- **A pattern cannot span two commands.** `X=1; uip a` is the two commands `X=1` and `uip a`. Use two criteria.
+- **Not a shell.** Loop variables and other parameters are not expanded (`for c in "flow debug"; do uip $c; done` gives `uip $c`), and aliases and shell functions are not resolved. The body of a heredoc fed to python/node is dropped, so a pattern cannot match the script that body holds.
+- **Counting is per simple command.** Each matching simple command counts once towards `min_count` and `max_count`, so `uip a && uip a` counts 2. With `command_text` the same call counts 1.
+- **`exclude_pattern`** is matched against the same simple command, so it skips a command, not the whole call.
+- **Fallback to `command_text`.** A call that runs PowerShell or cmd.exe anywhere (a `pwsh`/`powershell`/`cmd` program, as in the Windows Codex route `"C:\...\pwsh.exe" -Command '...'`, or a tool whose name contains `powershell`), and text that cannot be split (an unterminated quote, `$(` or backtick), is matched with `command_text` for that call. The criterion details give the number of these calls and the reason.
+- **Other tools.** The JSON params of a named non-shell tool (Write, Edit, ...) are matched as with `command_text`. An argv-list `command` is re-quoted and split like a string.
+- It reads the recorded command text only, so it works the same on every agent and driver (Claude Code, Codex `bash -lc` records, studio-web).
 
 ### `cli_called`
 

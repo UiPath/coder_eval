@@ -940,6 +940,20 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
         ),
     )
 
+    match_on: Literal["command_text", "simple_commands"] = Field(
+        default="command_text",
+        description=(
+            "What a pattern matches in a shell call. `command_text` (default): the command text and its "
+            "shell-normalized form, once per call. `simple_commands`: each simple command the shell runs, "
+            "as its argv with quotes resolved, joined by single spaces -- heredoc bodies, comments and "
+            "echo strings are not commands, `$(...)` and `bash -c` strings are, and leading "
+            "timeout/sudo/nohup/nice/exec/command/xargs/stdbuf/time wrappers are stripped (assignments "
+            "and `env` stay). Each matching simple command counts towards min_count/max_count. A "
+            "PowerShell/cmd call or text that cannot be split is matched as `command_text`, which the "
+            "details say. Other tools' JSON params are matched as before."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_count_bounds(self) -> CommandExecutedCriterion:
         """Reject impossible ranges where ``max_count < min_count``."""

@@ -125,6 +125,35 @@ The cost: with a null `tool_name`, a `max_count: 0` guard (and the legacy
 `command_not_executed` without a `tool_name`) no longer sees a command written into a Write
 or TodoWrite body. A guard on those bodies names the tool, one criterion per tool.
 
+### Matching on simple commands
+
+`match_on: simple_commands` exists because graders could not tell a command that ran from a
+mention of it. A `max_count: 0` guard tripped on a README heredoc that named the command, and
+suites grew ever longer prefix lists and heredoc-skipping regexes to compensate (UiPath/skills
+#5069). `coder_eval/shell_commands.py` splits the recorded text into simple commands once,
+so a one-line anchored pattern replaces those regexes.
+
+The shape follows a blast-radius replay of 16,936 stored criterion evaluations (18 nightlies,
+lab ticket 526):
+
+- It is opt-in per criterion, never global. With the patterns unchanged, 98 evaluations got
+  worse against 23 that got better: patterns that match quote characters, span two commands,
+  or target a python heredoc stop matching.
+- Leading assignments and `env` options stay in the command. Stripping them lost the
+  `env -u UIPATH_STUDIO_PID` guards (43 evaluations).
+- PowerShell / cmd.exe calls fall back to raw text. Parsing the Windows Codex
+  `pwsh -Command '...'` record as POSIX broke 9 evaluations.
+- Matches are counted per simple command, not per call. Per call, a `min_count: 2` "passed"
+  on one real run plus a mention in a report.
+
+Text that cannot be split falls back to raw matching for that call, and the details say so.
+So a parse failure never turns a match into a miss without notice.
+
+The splitter is linear: each nesting level re-scans only its own substring, and nesting is
+capped. Each simple command is then windowed like a long command, so the ReDoS bound still
+holds. Quoted and escaped operator characters are swapped for private-use stand-ins before
+`shlex` runs, because `shlex` with `punctuation_chars` splits `';'` and `\;` like a bare `;`.
+
 ## Recording a CLI invocation
 
 ### Evidence, not attestation

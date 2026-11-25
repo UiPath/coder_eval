@@ -5,10 +5,11 @@ import logging
 import re
 import shlex
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, LiveVerdict, register_criterion
 from coder_eval.models import CommandExecutedCriterion, CriterionResult
+from coder_eval.shell_commands import NON_POSIX_SHELLS, ShellSplitError, program_name, simple_commands
 
 
 if TYPE_CHECKING:
@@ -23,6 +24,19 @@ logger = logging.getLogger(__name__)
 _MAX_PATTERN_SEARCH_LEN = 2000
 _WINDOW_OVERLAP = 256
 _LOGICAL_LINE_END = re.compile(r"(?<!\\)\n")
+# A command whose first word is a PowerShell or cmd.exe program: bare, with a path, or quoted
+# with a path that holds spaces (`"C:\Program Files\PowerShell\7\pwsh.exe" -Command ...`).
+_NON_POSIX_NAME = r"(?:pwsh|powershell|cmd)(?:\.exe)?"
+_NON_POSIX_WORD = "|".join(
+    (
+        rf'"(?:[^"\n]{{0,260}}[\\/])?{_NON_POSIX_NAME}"',
+        rf"'(?:[^'\n]{{0,260}}[\\/])?{_NON_POSIX_NAME}'",
+        rf"(?:\S{{0,260}}[\\/])?{_NON_POSIX_NAME}",
+    )
+)
+_NON_POSIX_PREFIX = re.compile(rf"\s*(?:{_NON_POSIX_WORD})(?:\s|$)", re.IGNORECASE)
+_NOT_POSIX = "not POSIX shell"
+_UNPARSEABLE = "not splittable into simple commands"
 
 
 def _is_shell_program(arg0: str) -> bool:
@@ -156,6 +170,46 @@ def _match_haystacks(cmd_text: str, *, is_shell: bool) -> list[str]:
     return haystacks
 
 
+@lru_cache(maxsize=1024)
+def _simple_command_texts(cmd_text: str) -> tuple[str, ...] | str:
+    """Each simple command ``cmd_text`` runs, as its argv joined by single spaces.
+
+    A ``str`` instead is the reason the text is matched raw: it is PowerShell / cmd.exe,
+    or it cannot be split (see :mod:`coder_eval.shell_commands`).
+
+    Memoized -- a pure function of ``cmd_text``, re-asked on every early-stop event.
+
+    Rationale: .claude/notes/contracts.md § Matching on simple commands
+    """
+    if _NON_POSIX_PREFIX.match(cmd_text):
+        return _NOT_POSIX
+    try:
+        argvs = simple_commands(cmd_text)
+    except (ShellSplitError, RecursionError):
+        return _UNPARSEABLE
+    if any(program_name(argv[0]) in NON_POSIX_SHELLS for argv in argvs):
+        return _NOT_POSIX
+    return tuple(" ".join(argv) for argv in argvs)
+
+
+def _simple_commands_of(cmd: "CommandTelemetry") -> tuple[str, ...] | str | None:
+    """The simple commands of a shell call (see :func:`_simple_command_texts`), or None for another call.
+
+    An argv list is re-quoted with ``shlex.join`` and split like a string. A call from a
+    PowerShell tool is not POSIX shell, whatever its text.
+    """
+    if not _is_shell_call(cmd):
+        return None
+    raw_command = cmd.parameters.get("command")
+    if isinstance(raw_command, list) and raw_command and all(isinstance(a, str) for a in raw_command):
+        raw_command = shlex.join(raw_command)
+    if not isinstance(raw_command, str) or not raw_command:
+        return None
+    if "powershell" in (cmd.tool_name or "").lower():
+        return _NOT_POSIX
+    return _simple_command_texts(raw_command)
+
+
 def _is_shell_call(cmd: "CommandTelemetry") -> bool:
     """True for a ``Bash`` call or any call with a ``command`` param (a shell tool under another name)."""
     return cmd.tool_name == "Bash" or "command" in cmd.parameters
@@ -208,6 +262,24 @@ def _unsearched_note(
     return f"\n{len(unsearched)} call(s) without a command were not searched.{hint}"
 
 
+def _raw_fallback_note(raw_fallbacks: dict[str, int]) -> str:
+    """A details line that says which shell calls ``match_on: simple_commands`` matched on raw text, or ``""``."""
+    if not raw_fallbacks:
+        return ""
+    reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(raw_fallbacks.items()))
+    return f"\nmatch_on=simple_commands: {sum(raw_fallbacks.values())} call(s) matched on raw text ({reasons})."
+
+
+class _Matches(NamedTuple):
+    """What :meth:`CommandExecutedChecker._matching_commands` found."""
+
+    labels: list[str]
+    """One per match: a call, or with ``match_on: simple_commands`` a simple command."""
+    unsearched: list["CommandTelemetry"]
+    raw_fallbacks: dict[str, int]
+    """Reason -> number of shell calls that ``match_on: simple_commands`` matched on raw text."""
+
+
 @register_criterion
 class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
     """Checker for CommandExecutedCriterion.
@@ -224,7 +296,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
         all_commands: list["CommandTelemetry"],
         pattern: re.Pattern[str] | None,
         exclude_re: re.Pattern[str] | None,
-    ) -> tuple[list[str], list["CommandTelemetry"]]:
+    ) -> _Matches:
         """Filter + label the commands matching this criterion.
 
         Shared by ``_check_impl`` and ``live_verdict`` so a command can never
@@ -232,17 +304,36 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
         score always agree on WHICH commands match). Callers compile the
         patterns and own error handling.
 
-        Returns the labels of the matching commands, and the calls a
-        ``command_pattern`` did not search because they gave no text (see
-        :func:`_search_text`).
+        Returns the labels of the matches, the calls a ``command_pattern`` did not
+        search because they gave no text (see :func:`_search_text`), and the shell
+        calls ``match_on: simple_commands`` matched on raw text.
+
+        With ``match_on: simple_commands`` each simple command of a shell call is
+        matched on its own (both patterns, windowed like a long command), and each
+        matching one counts.
         """
         matching: list[str] = []
         unsearched: list[CommandTelemetry] = []
+        raw_fallbacks: dict[str, int] = {}
         for cmd in all_commands:
             if criterion.tool_name is not None and cmd.tool_name != criterion.tool_name:
                 continue
             if criterion.require_success and cmd.result_status != "success":
                 continue
+
+            if criterion.match_on == "simple_commands":
+                units = _simple_commands_of(cmd)
+                if isinstance(units, tuple):
+                    for unit in units:
+                        windows = _search_windows(unit)
+                        if pattern is not None and not any(pattern.search(w) for w in windows):
+                            continue
+                        if exclude_re is not None and any(exclude_re.search(w) for w in windows):
+                            continue
+                        matching.append(unit)
+                    continue
+                if isinstance(units, str):
+                    raw_fallbacks[units] = raw_fallbacks.get(units, 0) + 1
 
             searched = _search_text(cmd, tool_named=criterion.tool_name is not None)
             # Raw text AND, for a shell command, its quote-resolved form, so neither
@@ -259,7 +350,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                 matching.append(searched[0])
             else:
                 matching.append(f"{cmd.tool_name}({json.dumps(cmd.parameters)[:80]})")
-        return matching, unsearched
+        return _Matches(matching, unsearched, raw_fallbacks)
 
     def live_verdict(
         self,
@@ -291,7 +382,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
         except re.error:
             return "undecided"
 
-        match_count = len(self._matching_commands(criterion, all_commands, pattern, exclude_re)[0])
+        match_count = len(self._matching_commands(criterion, all_commands, pattern, exclude_re).labels)
         if criterion.max_count is not None and match_count > criterion.max_count:
             return "fail"
         if criterion.max_count is None and criterion.min_count > 0 and match_count >= criterion.min_count:
@@ -363,7 +454,9 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
 
         # Filter and count matching commands (shared with live_verdict so the
         # live trigger and the authoritative score never disagree on matches).
-        matching_commands, unsearched = self._matching_commands(criterion, all_commands, pattern, exclude_re)
+        matching_commands, unsearched, raw_fallbacks = self._matching_commands(
+            criterion, all_commands, pattern, exclude_re
+        )
 
         match_count = len(matching_commands)
 
@@ -385,6 +478,8 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             filters.append("require_success=True")
         if criterion.exclude_pattern is not None:
             filters.append(f"exclude=/{criterion.exclude_pattern}/")
+        if criterion.match_on == "simple_commands":
+            filters.append("match_on=simple_commands")
         filter_text = ", ".join(filters) if filters else "none"
 
         if criterion.max_count is None:
@@ -393,6 +488,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             range_text = f"{match_count} matches (allowed range {criterion.min_count}..{criterion.max_count})"
         details = f"Matched {range_text} commands (filters: {filter_text})"
         details += _unsearched_note(criterion, unsearched, match_count)
+        details += _raw_fallback_note(raw_fallbacks)
         if matching_commands:
             # Show up to 3 example matches
             examples = matching_commands[:3]
