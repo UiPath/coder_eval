@@ -26,7 +26,7 @@ from coder_eval.models import (
 )
 from coder_eval.models.enums import ApiBackend
 from coder_eval.models.routing import ROUTE_NAMES, resolve_evaluation_route, resolve_route
-from coder_eval.pricing import _normalize_model, calculate_cost
+from coder_eval.pricing import calculate_cost, normalize_model
 
 
 def _make_agent(route, *, config_model: str | None = None) -> ClaudeCodeAgent:
@@ -631,12 +631,12 @@ class TestOpenWeightPricing:
         assert calculate_cost("converse/moonshotai.kimi-k2.5", 1_000_000, 1_000_000) == pytest.approx(0.72 + 3.6)
 
     def test_normalize_strips_converse_prefix(self):
-        assert _normalize_model("converse/zai.glm-5") == "zai.glm-5"
-        assert _normalize_model("bedrock/converse/deepseek.v3.2") == "deepseek.v3.2"
+        assert normalize_model("converse/zai.glm-5") == "zai.glm-5"
+        assert normalize_model("bedrock/converse/deepseek.v3.2") == "deepseek.v3.2"
 
     def test_normalize_identity_on_bare_ids(self):
-        assert _normalize_model("zai.glm-5") == "zai.glm-5"
-        assert _normalize_model("deepseek.v3.2") == "deepseek.v3.2"
+        assert normalize_model("zai.glm-5") == "zai.glm-5"
+        assert normalize_model("deepseek.v3.2") == "deepseek.v3.2"
 
     def test_converse_prefixed_id_prices_same(self):
         """The SDK reports model_used as e.g. 'converse/zai.glm-5' — must still price."""

@@ -845,6 +845,7 @@ def _fold_replicates(task_id: str, variant_id: str, reps: list[TaskResult]) -> V
         total_tokens=sum(token_vals) if token_vals else None,
         iteration_count=round(sum(iter_counts) / len(iter_counts)) if iter_counts else None,
         total_assistant_turns=round(sum(asst_turns) / len(asst_turns)) if asst_turns else None,
+        models_used=sorted({r.result.model_used for r in reps if r.result.model_used}),
         reference_similarity=_mean_reference_similarity(reps),
         replicate_index=0,  # aggregate — points at first replicate for link rendering
         replicate_count=len(reps),
