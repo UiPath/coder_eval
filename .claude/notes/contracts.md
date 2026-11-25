@@ -307,6 +307,14 @@ task attaches SPECIFIC grading assets instead of the whole tree, and it is reada
 because judges run outside the agent's turn — the directory sits at mode 000 for the whole of
 `agent.communicate`.
 
+### Agent output is delimited
+
+Both judge envelopes wrap the agent's output in `<agent_output>` … `</agent_output>` and put
+the scope note and the `submit_verdict` instruction after the closing tag. Without the tags the
+harness's closing instruction read as the agent's last line: a rubric that grades "nothing after
+the final option" docked a correct reply for text the agent never wrote. A literal closing tag in
+the agent's text is neutralized so the agent cannot end the block early.
+
 ### Scrub before truncate
 
 `scrub_reference` redacts by exact substring, so ordering is load-bearing everywhere it is
