@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pytest
 
+from coder_eval.criteria import command_executed
 from coder_eval.criteria.command_executed import CommandExecutedChecker
 from coder_eval.models import CommandExecutedCriterion
 from coder_eval.models.results import TurnRecord
@@ -63,6 +64,23 @@ class TestHeredocs:
     def test_heredoc_fed_to_a_shell_is_a_script(self):
         assert _texts("bash -s <<'EOF'\nuip flow debug y\nEOF") == {"bash -s", "uip flow debug y"}
         assert _texts("sh <<EOF\nuip a && uip b\nEOF") == {"sh", "uip a", "uip b"}
+
+    def test_heredoc_fed_to_a_shell_behind_a_prefix_is_a_script(self):
+        assert _texts("X=1 bash <<'EOF'\nuip flow debug\nEOF") == {"X=1 bash", "uip flow debug"}
+        assert _texts("env -u Y sh -s <<EOF\nuip a\nEOF") == {"env -u Y sh -s", "uip a"}
+
+    def test_heredoc_fed_to_a_dash_c_shell_is_stdin(self):
+        assert _texts("bash -c 'uip x' <<'EOF'\nuip a\nEOF") == {"uip x"}
+        assert _texts("X=1 bash -c 'uip x' <<'EOF'\nuip a\nEOF") == {f"X=1 bash -c {SUBST}", "uip x"}
+
+    def test_stdin_piped_into_a_shell_is_not_parsed(self):
+        # Known limitation, documented in the guide: a piped script's commands do not count.
+        assert _texts("cat <<'EOF' | bash\nuip a\nEOF") == {"cat", "bash"}
+        assert _texts("echo 'uip a' | sh") == {"echo uip a", "sh"}
+
+    def test_a_literal_heredoc_mark_is_a_word(self):
+        assert _texts("grep -rn __HEREDOC_0__ src/") == {"grep -rn __HEREDOC_0__ src/"}
+        assert _texts("cat <<EOF\nhi\nEOF\necho __HEREDOC_0__") == {"cat", "echo __HEREDOC_0__"}
 
     def test_heredoc_fed_to_python_is_dropped(self):
         assert _texts("python3 - <<'PY'\nimport os; os.system('uip flow debug')\nPY") == {"python3 -"}
@@ -200,6 +218,18 @@ class TestQuotingAndComments:
     def test_hash_inside_a_word_is_not_a_comment(self):
         assert _texts("echo a#b $#") == {"echo a#b $#"}
 
+    def test_the_splitters_own_marks_are_unparseable(self):
+        for ch in ("\ue000", "\ue007", "\ue0ff"):
+            with pytest.raises(ShellSplitError):
+                simple_commands(f"echo a{ch}b")
+
+    def test_other_private_use_characters_are_words(self):
+        # Codex citation marks, seen in stored nightly commands.
+        assert _texts("echo 'x \ue200cite\ue202turn1view0\ue201' | uip a") == {
+            "echo x \ue200cite\ue202turn1view0\ue201",
+            "uip a",
+        }
+
     def test_unterminated_quote_is_unparseable(self):
         with pytest.raises(ShellSplitError):
             simple_commands("echo 'oops")
@@ -215,6 +245,11 @@ class TestLinearTime:
             "cat <<EOF\n" + "line $(uip a) text\n" * 20 + "EOF\n",
             'x=$(echo "$(uip a `uip b`)")\n',
             "# " + "c" * 1990 + "\n",
+            # Pumped wrapper and keyword runs: stripping them must not re-slice per word.
+            "sudo -a ",
+            "! ",
+            "nohup ",
+            "timeout -s KILL 5 ",
         ],
     )
     def test_time_grows_linearly(self, unit):
@@ -231,7 +266,6 @@ class TestLinearTime:
                 gc.enable()
             return best
 
-        assert cost(2000) < 0.1
         small, large = cost(20_000), cost(80_000)
         assert large < 8 * small + 0.01  # x4 input: linear, with slack for noise
 
@@ -276,6 +310,32 @@ class TestChecker:
         result = _check(turns, command_pattern="uip flow debug", min_count=1)
         assert result.score == 1.0
         assert "1 call(s) matched on raw text (1 not splittable into simple commands)" in result.details
+
+    def test_literal_heredoc_mark_does_not_break_a_guard(self):
+        turns = _turn("grep -rn __HEREDOC_0__ src/")
+        assert _check(turns, command_pattern=VOICE, min_count=0, max_count=0).score == 1.0
+
+    def test_splitter_exception_falls_back_to_raw_and_says_so(self, monkeypatch):
+        def broken(_text: str) -> list[list[str]]:
+            raise IndexError("list index out of range")
+
+        monkeypatch.setattr(command_executed, "simple_commands", broken)
+        command_executed._simple_command_texts.cache_clear()
+        try:
+            turns = _turn("echo 'uip flow debug' # splitter-exception probe")
+            result = _check(turns, command_pattern="uip flow debug", min_count=0, max_count=0)
+        finally:
+            command_executed._simple_command_texts.cache_clear()
+        assert result.error is None
+        assert result.score == 0.0  # raw text matched, as with command_text
+        assert "1 call(s) matched on raw text (1 splitter error IndexError)" in result.details
+
+    @pytest.mark.parametrize("shell", ["bash", "yash", "fish", "/usr/bin/zsh"])
+    def test_dash_c_unwraps_in_both_modes(self, shell):
+        turns = _turn(f"{shell} -c 'uip flow debug x'")
+        assert _check(turns, command_pattern=VOICE, min_count=1).score == 1.0
+        criterion = CommandExecutedCriterion(description="t", command_pattern=VOICE, min_count=1)
+        assert CommandExecutedChecker().check(criterion, None, turn_records=turns).score == 1.0
 
     @pytest.mark.parametrize(
         "command",

@@ -75,6 +75,7 @@ def _cmd_crit(
     max_count: int | None = None,
     require_success: bool = False,
     tool_name: str | None = "Bash",
+    match_on: Literal["command_text", "simple_commands"] = "command_text",
 ) -> CommandExecutedCriterion:
     return CommandExecutedCriterion(
         type="command_executed",
@@ -84,6 +85,7 @@ def _cmd_crit(
         min_count=min_count,
         max_count=max_count,
         require_success=require_success,
+        match_on=match_on,
     )
 
 
@@ -292,6 +294,25 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
                 cmd("Write", {"file_path": "clean.sh", "content": "rm -rf /tmp/scratch"}, sequence_number=0),
                 _bash("echo done", sequence_number=1),
                 cmd("shell", {"command": "rm -rf /tmp/scratch"}, sequence_number=2),
+            ),
+            reaches="fail",
+        ),
+        ContractCase(
+            label="simple_commands: one call adds two matches and reaches min_count in one event",
+            criterion=_cmd_crit(pattern="^curl ", min_count=2, max_count=None, match_on="simple_commands"),
+            commands=(
+                _bash("echo 'curl a' && echo 'curl b'", sequence_number=0),
+                _bash("curl https://example.com && curl https://example.org", sequence_number=1),
+                _bash("echo done", sequence_number=2),
+            ),
+            reaches="pass",
+        ),
+        ContractCase(
+            label="simple_commands must-NOT-run guard: a heredoc mention does not trip it; running it fails",
+            criterion=_cmd_crit(pattern="^rm -rf", min_count=0, max_count=0, match_on="simple_commands"),
+            commands=(
+                _bash("cat > notes.md <<'EOF'\nrm -rf /tmp/scratch\nEOF", sequence_number=0),
+                _bash("cd /tmp && rm -rf scratch", sequence_number=1),
             ),
             reaches="fail",
         ),

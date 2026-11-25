@@ -147,7 +147,17 @@ lab ticket 526):
   on one real run plus a mention in a report.
 
 Text that cannot be split falls back to raw matching for that call, and the details say so.
-So a parse failure never turns a match into a miss without notice.
+So a parse failure never turns a match into a miss without notice. Any other exception from
+the splitter falls back the same way (logged, reason `splitter error <type>`): a splitter
+bug must not score a guard 0.0, nor disarm early stop for every criterion of the task.
+
+The splitter's own marks (operator stand-ins, heredoc positions) are private-use code points,
+and a text that holds one of those is not split. Only those: Codex commands do hold other
+private-use code points (citation marks; 3 calls in 18 nightlies). A mark written as ASCII (`__HEREDOC_0__`) was agent
+text too: a literal one raised IndexError or fed a real heredoc body to the wrong command.
+
+Stdin piped into a shell (`cat <<EOF | bash`) is not parsed, a known false pass for a
+`max_count: 0` guard; the guide lists it.
 
 The splitter is linear: each nesting level re-scans only its own substring, and nesting is
 capped. Each simple command is then windowed like a long command, so the ReDoS bound still

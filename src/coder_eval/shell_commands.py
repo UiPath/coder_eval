@@ -10,6 +10,9 @@ parsed as commands. Not a shell: nothing is expanded or resolved.
 STDLIB-ONLY and pure. Linear in the length of the text: each nesting level re-scans only
 its own substring, and nesting is capped at ``_MAX_DEPTH``.
 
+Also owns shell identification for ``match_on: command_text`` (:func:`looks_like_shell`,
+:func:`command_flag_index`), so the two match modes share one ``-c`` detector.
+
 Rationale: .claude/notes/contracts.md § Matching on simple commands
 """
 
@@ -28,15 +31,20 @@ _SEP_CHARS = ";&|()\n"
 # it for a private-use stand-in, so shlex cannot split on it and it is not read as a
 # redirection; the stand-in is swapped back once redirections are stripped.
 _PROTECTED = {ch: chr(0xE000 + k) for k, ch in enumerate(_SEP_CHARS + "<>")}
+_MARK = "\ue0ff"
+# The stand-ins and the heredoc mark must not come from the text, so a text that holds one
+# is not split (see :func:`simple_commands`). Only these: agents do write other private-use
+# code points (``\ue200cite\ue202turn1view0\ue201`` citation marks).
+_OWN_MARKS = re.compile(f"[{''.join(_PROTECTED.values())}{_MARK}]")
 _PROTECT = str.maketrans(_PROTECTED)
 _UNPROTECT = str.maketrans({v: k for k, v in _PROTECTED.items()})
 _HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([A-Za-z0-9_.\-]+))")
-_HEREDOC_MARK = re.compile(r"^__HEREDOC_(\d+)__$")
+_HEREDOC_MARK = re.compile(f"^{_MARK}(\\d+){_MARK}$")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
 # A redirection operator alone (target in the next token) or with its target attached.
 _REDIRECT_OP = re.compile(r"^\d*(>>?|<<<|<>|<|>\|)$")
 _REDIRECT_WITH_TARGET = re.compile(r"^\d*(>>?|<<<|<>|<|>\|)(?=.)")
-_POSIX_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh"})
+_POSIX_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "yash", "fish"})
 _KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}", "esac"})
 _HEADER_KEYWORDS = frozenset({"for", "select", "case"})
 _PLAIN_WRAPPERS = frozenset({"nohup", "exec", "command", "builtin"})
@@ -66,6 +74,8 @@ def simple_commands(text: str) -> list[list[str]]:
 
     Raises :class:`ShellSplitError` when the text cannot be split.
     """
+    if _OWN_MARKS.search(text):
+        raise ShellSplitError("holds a private-use code point the splitter uses as a mark")
     return _commands(text, 0)
 
 
@@ -92,7 +102,7 @@ def _argv_commands(argv: list[str], fed: list[tuple[bool, str]], depth: int, *, 
     argv, scripts, actions = _unwrap(argv, joined=joined)
     result: list[list[str]] = []
     for quoted, body in fed:
-        if argv and _is_posix_shell(argv[0]) and _command_flag_index(argv) is None:
+        if _feeds_a_script(argv):
             result.extend(_commands(body, depth + 1))  # a heredoc fed to a shell is a script
         elif not quoted:
             for sub in _body_substitutions(body):
@@ -106,12 +116,18 @@ def _argv_commands(argv: list[str], fed: list[tuple[bool, str]], depth: int, *, 
     return result
 
 
+def _feeds_a_script(argv: list[str]) -> bool:
+    """True if ``argv``'s stdin is a script: its program, after assignments and ``env``, is a shell without ``-c``."""
+    program = argv[_assignment_prefix_len(argv) :]
+    return bool(program) and _is_posix_shell(program[0]) and command_flag_index(program) is None
+
+
 def _scan(text: str) -> tuple[str, list[str], list[tuple[bool, str]]]:
     """Remove comments, lift substitutions out and cut heredoc bodies.
 
     Returns the remaining text, the substitution bodies, and ``(quoted, body)`` per heredoc.
-    Each heredoc operator is replaced by a ``__HEREDOC_<k>__`` word, so the caller knows
-    which command it feeds.
+    Each heredoc operator is replaced by a ``<mark>k<mark>`` word (``_MARK``), so the caller
+    knows which command it feeds.
     """
     out: list[str] = []
     substitutions: list[str] = []
@@ -154,7 +170,7 @@ def _scan(text: str) -> tuple[str, list[str], list[tuple[bool, str]]]:
             delimiter = next(g for g in (m.group(2), m.group(3), m.group(5)) if g is not None)
             pending.append((len(heredocs), m.group(1) == "-", delimiter))
             heredocs.append((quoted, ""))
-            out.append(f" __HEREDOC_{len(heredocs) - 1}__ ")
+            out.append(f" {_MARK}{len(heredocs) - 1}{_MARK} ")
             i = m.end()
         elif c == "\n" and pending:
             out.append("\n")
@@ -310,8 +326,22 @@ def _is_posix_shell(arg0: str) -> bool:
     return program_name(arg0) in _POSIX_SHELLS
 
 
-def _command_flag_index(argv: list[str]) -> int | None:
-    """Index of a POSIX shell's ``-c`` option cluster (``-c``, ``-lc``, ``-ic``), or None."""
+def looks_like_shell(arg0: str) -> bool:
+    """True if ``arg0``'s basename ends in ``sh``: the open shell test of ``match_on: command_text``.
+
+    A predicate, not the :data:`_POSIX_SHELLS` allowlist: there the raw text stays a
+    haystack, so recall is safe. Here a shell's argv is replaced by its script, so a
+    false shell (``ssh``, ``./publish``) would lose its own command; the allowlist is used.
+    """
+    return arg0.rsplit("/", 1)[-1].endswith("sh")
+
+
+def command_flag_index(argv: list[str]) -> int | None:
+    """Index of a shell's ``-c`` option cluster in ``argv`` (``-c``, ``-lc``, ``-ic``), or None.
+
+    Options before it are skipped; the first positional word ends the search. ``--long``
+    and ``-o=val`` forms are not a ``-c`` cluster.
+    """
     for i, tok in enumerate(argv[1:], 1):
         if len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and tok[1:].isalpha() and "c" in tok[1:]:
             return i
@@ -320,11 +350,12 @@ def _command_flag_index(argv: list[str]) -> int | None:
     return None
 
 
-def _skip_options(argv: list[str], with_argument: frozenset[str]) -> list[str]:
-    """``argv`` without its leading options; an option in ``with_argument`` also takes the next token."""
-    while argv and argv[0].startswith("-") and argv[0] != "-":
-        argv = argv[2:] if argv[0] in with_argument else argv[1:]
-    return argv
+def _skip_options(argv: list[str], start: int, with_argument: frozenset[str]) -> int:
+    """Index of the first non-option word from ``start`` on; an option in ``with_argument`` takes the next word."""
+    i = start
+    while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
+        i += 2 if argv[i] in with_argument else 1
+    return i
 
 
 def _unwrap(argv: list[str], *, joined: bool) -> tuple[list[str], list[str], list[list[str]]]:
@@ -336,31 +367,31 @@ def _unwrap(argv: list[str], *, joined: bool) -> tuple[list[str], list[str], lis
     """
     scripts: list[str] = []
     extra: list[list[str]] = []
-    while argv:
-        name = program_name(argv[0])
-        if argv[0] in _KEYWORDS:
-            argv = argv[1:]
-        elif argv[0] in _HEADER_KEYWORDS:
+    i = 0  # walk an index and slice once: re-slicing per wrapper is quadratic in the wrapper run
+    while i < len(argv):
+        name = program_name(argv[i])
+        if argv[i] in _KEYWORDS or name in _PLAIN_WRAPPERS:
+            i += 1
+        elif argv[i] in _HEADER_KEYWORDS:
             return [], scripts, extra  # `for x in a b` lists words, it runs nothing
-        elif name in _PLAIN_WRAPPERS:
-            argv = argv[1:]
         elif name in _FLAG_WRAPPERS:
-            argv = _skip_options(argv[1:], _FLAG_WRAPPERS[name])
+            i = _skip_options(argv, i + 1, _FLAG_WRAPPERS[name])
             if name == "timeout":
-                argv = argv[1:]  # the duration
+                i += 1  # the duration
         elif name == "eval":
-            scripts.append(" ".join(argv[1:]))
+            scripts.append(" ".join(argv[i + 1 :]))
             return [], scripts, extra
-        elif _is_posix_shell(argv[0]) and (k := _command_flag_index(argv)) is not None:
-            rest = argv[k + 1 :] if joined else argv[k + 1 : k + 2]
+        elif _is_posix_shell(argv[i]) and (k := command_flag_index(argv[i:])) is not None:
+            rest = argv[i + k + 1 :] if joined else argv[i + k + 1 : i + k + 2]
             if rest:
                 scripts.append(" ".join(rest))
             return [], scripts, extra
         else:
             break
+    argv = argv[i:]
     prefix = _assignment_prefix_len(argv)
     program = argv[prefix:]
-    if program and _is_posix_shell(program[0]) and (k := _command_flag_index(program)) is not None:
+    if program and _is_posix_shell(program[0]) and (k := command_flag_index(program)) is not None:
         # `X=1 bash -c '...'`: the assignments stay, the script is parsed.
         scripts.extend(program[k + 1 : k + 2])
         argv = [*argv[: prefix + k + 1], SUBST]

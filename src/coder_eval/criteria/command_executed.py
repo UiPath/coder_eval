@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, LiveVerdict, register_criterion
 from coder_eval.models import CommandExecutedCriterion, CriterionResult
-from coder_eval.shell_commands import NON_POSIX_SHELLS, ShellSplitError, program_name, simple_commands
+from coder_eval.shell_commands import (
+    NON_POSIX_SHELLS,
+    ShellSplitError,
+    command_flag_index,
+    looks_like_shell,
+    program_name,
+    simple_commands,
+)
 
 
 if TYPE_CHECKING:
@@ -26,7 +33,7 @@ _WINDOW_OVERLAP = 256
 _LOGICAL_LINE_END = re.compile(r"(?<!\\)\n")
 # A command whose first word is a PowerShell or cmd.exe program: bare, with a path, or quoted
 # with a path that holds spaces (`"C:\Program Files\PowerShell\7\pwsh.exe" -Command ...`).
-_NON_POSIX_NAME = r"(?:pwsh|powershell|cmd)(?:\.exe)?"
+_NON_POSIX_NAME = rf"(?:{'|'.join(sorted(NON_POSIX_SHELLS))})(?:\.exe)?"
 _NON_POSIX_WORD = "|".join(
     (
         rf'"(?:[^"\n]{{0,260}}[\\/])?{_NON_POSIX_NAME}"',
@@ -41,31 +48,6 @@ _POWERSHELL_ENV = re.compile(r"\$env:\w")
 _POWERSHELL_CMDLET = re.compile(r"[A-Z][a-z]+-[A-Z][A-Za-z]+")
 _NOT_POSIX = "not POSIX shell"
 _UNPARSEABLE = "not splittable into simple commands"
-
-
-def _is_shell_program(arg0: str) -> bool:
-    """True if argv[0]'s basename looks like a POSIX shell.
-
-    A predicate rather than an enumerated allowlist: the set of shells is open
-    (``bash``/``sh`` on Linux, ``zsh`` on macOS — Codex shells through the host's
-    login shell, see codex_agent.py — plus ``dash``/``ksh``/…), and every common
-    shell basename ends in ``sh``. Matching is additive (the raw text stays a
-    haystack), so favouring recall over a hand-maintained list is safe.
-    """
-    return arg0.rsplit("/", 1)[-1].endswith("sh")
-
-
-def _is_command_flag(tok: str) -> bool:
-    """True for a short-option cluster carrying a ``-c`` command string.
-
-    Covers ``-c``, ``-lc``, ``-ic``, ``-lic`` (login/interactive + command) in
-    any order — a single ``-``-prefixed token whose option letters are all
-    alphabetic and include ``c``. ``--long`` options and ``-o=val`` forms are
-    rejected, so this is the first flag that actually introduces the command
-    string. The combined and split (``bash -l -c``) forms both work: a non-``c``
-    short flag like ``-l`` simply isn't the command flag and the scan continues.
-    """
-    return len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and tok[1:].isalpha() and "c" in tok[1:]
 
 
 @lru_cache(maxsize=1024)
@@ -94,26 +76,21 @@ def _normalize_shell(cmd_text: str) -> str | None:
     if not tokens:
         return None
     # Unwrap `bash -lc "<script>"` / `sh -c "<script>"`: the real command is
-    # everything after the -c/-lc flag.
-    if _is_shell_program(tokens[0]):
-        for i in range(1, len(tokens) - 1):
-            tok = tokens[i]
-            if _is_command_flag(tok):
-                rest = tokens[i + 1 :]
-                if len(rest) == 1:
-                    # Quoted whole-script form: one token that may hold inner
-                    # quotes -- re-split to resolve them.
-                    try:
-                        tokens = shlex.split(rest[0], posix=True)
-                    except ValueError:
-                        return None
-                else:
-                    # Argv-joined form: Codex rollout recovery joins argv without
-                    # re-quoting, so it already arrives split.
-                    tokens = rest
-                break
-            if not tok.startswith("-"):
-                break  # first positional before any -c: not a command wrapper
+    # everything after the -c/-lc flag (Codex shells through the host's login shell,
+    # see codex_agent.py, so the shell set is open: see looks_like_shell).
+    if looks_like_shell(tokens[0]) and (k := command_flag_index(tokens)) is not None and k < len(tokens) - 1:
+        rest = tokens[k + 1 :]
+        if len(rest) == 1:
+            # Quoted whole-script form: one token that may hold inner
+            # quotes -- re-split to resolve them.
+            try:
+                tokens = shlex.split(rest[0], posix=True)
+            except ValueError:
+                return None
+        else:
+            # Argv-joined form: Codex rollout recovery joins argv without
+            # re-quoting, so it already arrives split.
+            tokens = rest
     return " ".join(tokens)
 
 
@@ -179,7 +156,9 @@ def _simple_command_texts(cmd_text: str) -> tuple[str, ...] | str:
     """Each simple command ``cmd_text`` runs, as its argv joined by single spaces.
 
     A ``str`` instead is the reason the text is matched raw: it is PowerShell / cmd.exe,
-    or it cannot be split (see :mod:`coder_eval.shell_commands`).
+    it cannot be split (see :mod:`coder_eval.shell_commands`), or the splitter failed. A
+    splitter defect must not score the call 0.0 or disarm early stop, so any exception
+    falls back to raw text, logged and named in the details.
 
     Memoized -- a pure function of ``cmd_text``, re-asked on every early-stop event.
 
@@ -189,8 +168,11 @@ def _simple_command_texts(cmd_text: str) -> tuple[str, ...] | str:
         return _NOT_POSIX
     try:
         argvs = simple_commands(cmd_text)
-    except (ShellSplitError, RecursionError):
+    except ShellSplitError:
         return _UNPARSEABLE
+    except Exception as e:  # a splitter bug: degrade to raw text, never fail the check
+        logger.warning("simple_commands failed on a %d-char command: %r", len(cmd_text), e)
+        return f"splitter error {type(e).__name__}"
     if any(program_name(argv[0]) in NON_POSIX_SHELLS or _POWERSHELL_CMDLET.fullmatch(argv[0]) for argv in argvs):
         return _NOT_POSIX
     return tuple(" ".join(argv) for argv in argvs)
