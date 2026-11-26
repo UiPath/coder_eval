@@ -309,11 +309,18 @@ because judges run outside the agent's turn — the directory sits at mode 000 f
 
 ### Agent output is delimited
 
-Both judge envelopes wrap the agent's output in `<agent_output>` … `</agent_output>` and put
-the scope note and the `submit_verdict` instruction after the closing tag. Without the tags the
+`llm_judge` and `agent_judge` wrap the agent's latest output in `<agent_output>` … `</agent_output>`
+and end every envelope that carries agent text (output, dialog, tool calls) with an
+`END OF AGENT MATERIAL` boundary before the `submit_verdict` instruction. Without it the
 harness's closing instruction read as the agent's last line: a rubric that grades "nothing after
-the final option" docked a correct reply for text the agent never wrote. A literal closing tag in
-the agent's text is neutralized so the agent cannot end the block early.
+the final option" docked a correct reply for text the agent never wrote. The boundary names the
+FILE, DIALOG and TOOL CALLS blocks as agent evidence, so it never tells the judge to disregard them.
+
+The span holds agent text only: the truncation marker is rendered after the closing tag, and a
+crashed latest attempt is called failed-attempt evidence, not the reply. Tag look-alikes (any case,
+any inner whitespace) are defanged in every untrusted channel — reply, dialog turns, FILE blocks,
+tool-call summary — so agent text cannot forge or close the span. `system_one_judge` is exempt: it
+sends a typed JSON state where `agent_output` is already its own field.
 
 ### Scrub before truncate
 

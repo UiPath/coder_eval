@@ -8,13 +8,15 @@ from coder_eval.criteria.base import BaseCriterion, CheckContext, register_crite
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
 from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge_async
 from coder_eval.evaluation.judge_context import (
-    AGENT_OUTPUT_SCOPE_NOTE,
     JudgeContext,
     JudgeContextBuilder,
     build_judge_transcript,
     format_details,
     render_agent_output,
     render_dialog,
+    render_file_block,
+    render_harness_boundary,
+    render_tool_calls,
     scrub_reference,
 )
 from coder_eval.evaluation.judge_litellm import invoke_litellm_judge_async
@@ -260,23 +262,17 @@ def _render_user_message(prompt: str, context: JudgeContext) -> str:
     if context.reference is not None:
         reference_block = f"REFERENCE SOLUTION (for your review only):\n```\n{context.reference}\n```\n\n"
 
-    file_blocks = [
-        f"--- FILE: {f.path} ---\n{f.content if f.content is not None else '<file not found>'}" for f in context.files
-    ]
+    file_blocks = [render_file_block(f) for f in context.files]
     files_rendered = "\n".join(file_blocks) if file_blocks else "(no files specified)"
 
     agent_output = render_agent_output(context)
     agent_output_block = f"{agent_output}\n\n" if agent_output else ""
-    tool_calls_block = ""
-    if context.tool_calls_summary is not None:
-        tool_calls_block = (
-            f"{context.agent_section_title('AGENT TOOL CALLS')} (UNTRUSTED DATA):\n{context.tool_calls_summary}\n\n"
-        )
+    tool_calls = render_tool_calls(context)
+    tool_calls_block = f"{tool_calls}\n\n" if tool_calls else ""
     dialog = render_dialog(context)
     dialog_block = f"{dialog}\n\n" if dialog else ""
 
-    scope_note = f"{AGENT_OUTPUT_SCOPE_NOTE}\n" if agent_output else ""
-    closing = scope_note + (
+    closing = render_harness_boundary(context) + (
         "Call the submit_verdict tool exactly once with "
         '"score" (float 0..1), "rationale" (1-2 sentences), and '
         '"findings" (list of short observations).'
