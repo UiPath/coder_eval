@@ -113,11 +113,8 @@ def test_the_three_published_pass_rates_agree_on_one_set_of_counts() -> None:
 
 
 def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -> None:
-    """run.md showed 1.000 and experiment.md 0.500 for the same rows when each
-    surface kept its own copy of the averaging rule. Both now read
-    `measured_scores`; this pins that they agree on every status that matters."""
-    from coder_eval.reports import ReportGenerator
-
+    """run.md, suite.json and experiment.json each kept a copy of the averaging rule and
+    published different means for the same rows. One rule now feeds all three."""
     rows: list[tuple[FinalStatus, float | None]] = [
         (FinalStatus.SUCCESS, 1.0),
         (FinalStatus.FAILURE, 0.0),
@@ -125,26 +122,63 @@ def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -
         (FinalStatus.TIMEOUT, None),
         (FinalStatus.NOT_GRADED, None),
     ]
-    variant_rows = [
-        VariantResult(variant_id="v", task_id=f"t{i}", weighted_score=score, final_status=status, duration_seconds=1.0)
+    assert _published_means(rows) == (0.25, 0.25, 0.25)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known gap: VariantAggregate.average_score does not apply the nothing_was_measured gate yet. "
+        "See .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them"
+    ),
+)
+def test_every_surface_has_no_mean_when_nothing_was_measured() -> None:
+    rows: list[tuple[FinalStatus, float | None]] = [(FinalStatus.NOT_GRADED, None), (FinalStatus.ERROR, None)]
+    assert _published_means(rows) == (None, None, None)
+
+
+def _published_means(
+    rows: list[tuple[FinalStatus, float | None]],
+) -> tuple[float | None, float | None, float | None]:
+    """(run.md's Avg Reliability Score, suite.json's average_weighted_score, the variant mean) for one set of rows."""
+    import re
+
+    from coder_eval.models import EvaluationResult, TaskResult
+    from coder_eval.orchestration.batch import build_run_summary
+    from coder_eval.reports import ReportGenerator
+    from coder_eval.reports.markdown import _compute_suite_rollup
+
+    task_rows = [
+        TaskResult(
+            task_id=f"s/r{i}",
+            variant_id="v",
+            duration=1.0,
+            suite_id="s",
+            row_id=f"r{i}",
+            result=EvaluationResult(
+                task_id=f"s/r{i}",
+                task_description="t",
+                agent_type="claude-code",
+                started_at=datetime(2026, 1, 1),
+                final_status=status,
+                weighted_score=score,
+                iteration_count=1,
+            ),
+        )
         for i, (status, score) in enumerate(rows)
     ]
-    summary = _summary(
-        tasks_run=5,
-        tasks_succeeded=1,
-        tasks_failed=2,
-        tasks_error=1,
-        tasks_not_graded=1,
-        tasks_measured=2,
-        task_results=[
-            {"task_id": f"t{i}", "status": status, "weighted_score": score, "duration": 1.0}
+    summary = build_run_summary("r", task_rows, datetime(2026, 1, 1), datetime(2026, 1, 1))
+    run_md = re.search(r"- \*\*Avg Reliability Score\*\*: ([0-9.]+)", ReportGenerator.generate_markdown(summary))
+    suite = _compute_suite_rollup("s", "v", task_rows, Path("run")).average_weighted_score
+    variant = _mean_graded_score(
+        [
+            VariantResult(
+                variant_id="v", task_id=f"t{i}", weighted_score=score, final_status=status, duration_seconds=1.0
+            )
             for i, (status, score) in enumerate(rows)
-        ],
+        ]
     )
-
-    variant_mean = _mean_graded_score(variant_rows)
-    assert variant_mean == 0.25
-    assert f"- **Avg Reliability Score**: {variant_mean:.3f}" in ReportGenerator.generate_markdown(summary)
+    return (float(run_md.group(1)) if run_md else None), suite, variant
 
 
 def test_category_of_reads_a_serialized_status_and_counts_an_unknown_one_as_error() -> None:

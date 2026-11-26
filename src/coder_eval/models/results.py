@@ -968,7 +968,11 @@ class SuiteRollup(BaseModel):
         ),
     )
     average_weighted_score: float | None = Field(
-        default=None, description="Mean weighted_score across rows that produced one."
+        default=None,
+        description=(
+            "Mean weighted_score over every row except NOT_GRADED ones; a row with no score counts as 0.0. "
+            "None when no row counts, or when nothing_was_measured holds, as for pass_rate."
+        ),
     )
     criterion_stats: list[CriterionStats] = Field(default_factory=list)
     failed_samples: list[FailedRowSummary] = Field(
