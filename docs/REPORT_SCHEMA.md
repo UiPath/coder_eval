@@ -46,7 +46,7 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `total_duration_seconds` | `float` | Wall-clock. |
 | `tasks_run` | `int` | Total replicates executed. |
 | `tasks_succeeded` / `tasks_failed` / `tasks_error` | `int` | Category counts. **Invariant:** these three plus `tasks_not_graded` sum to `tasks_run`. |
-| `tasks_measured` | `int` | Rows carrying a criteria verdict (`weighted_score is not None`). NOT a bucket and not part of the task-count invariant: it is the evidence that gates `pass_rate` / `error_share`, because the four category buckets cannot tell a graded `FAILURE` from a `TIMEOUT` no criterion ever saw. Defaults to `0`, inert on pre-`execute` `run.json` (where `tasks_not_graded` is `0`). |
+| `tasks_measured` | `int` | Replicate rows carrying a criteria verdict (`weighted_score is not None`); `variant.json` counts tasks instead. NOT a bucket and not part of the task-count invariant: it is the evidence that gates `pass_rate` / `error_share`, because the four category buckets cannot tell a graded `FAILURE` from a `TIMEOUT` no criterion ever saw. Defaults to `0`, inert on pre-`execute` `run.json` (where `tasks_not_graded` is `0`). |
 | `tasks_not_graded` | `int` | Tasks run by `coder-eval execute` — executed, deliberately unscored. Excluded from **both** sides of `pass_rate`. Defaults to `0`, so pre-`execute` `run.json` still parses. |
 | `tasks_token_budget_exceeded` / `tasks_cost_budget_exceeded` | `int` | Sub-counters of `tasks_failed` (not part of the invariant). |
 | `skipped_tasks` | `list[{path, reason}]` | Load failures / `skip: true` opt-outs. |
@@ -291,10 +291,14 @@ the same weighted armed gate as a native fail),
 
 A single aggregate (not wrapped): `variant_id`, `tasks_run`, `tasks_succeeded`,
 `tasks_failed`, `tasks_error`, `tasks_not_graded` (same sum-to-`tasks_run` invariant),
-`average_score` (`float | None` — the mean over **measured** rows: an errored row counts
-as `0.0`, an ungraded one leaves both sides; `null` when nothing was measured),
-`average_duration`, `total_tokens`, `replicate_count`, `tasks_token_budget_exceeded`,
-`tasks_cost_budget_exceeded`.
+`tasks_graded` (`tasks_run - tasks_not_graded`), `tasks_measured` (tasks with at least one
+replicate that carries a criteria verdict, from `VariantResult.measured`; an errored
+replicate's `0.0` is not a verdict), `pass_rate` (`tasks_succeeded / tasks_graded`; `null`
+when `tasks_graded` is `0` or `nothing_was_measured` holds), `average_score`
+(`float | None` — the mean over **measured** rows: an errored row counts as `0.0`, an
+ungraded one leaves both sides; `null` when no row counts or `nothing_was_measured` holds,
+the same gate as `pass_rate`), `average_duration`, `total_tokens`, `replicate_count`,
+`tasks_token_budget_exceeded`, `tasks_cost_budget_exceeded`.
 
 ## `experiment.json` — `ExperimentResult`
 
@@ -303,17 +307,21 @@ The cross-variant summary:
 - `experiment_id`, `description`, `variant_ids`.
 - `task_summaries: list[TaskExperimentSummary]` — each
   `{task_id, variant_results, best_variant, is_tie, score_spread, replicate_count}`,
-  where each `VariantResult` carries `{variant_id, task_id, weighted_score,
+  where each `VariantResult` carries `{variant_id, task_id, weighted_score, measured,
   final_status, duration_seconds, total_tokens, iteration_count,
   total_assistant_turns, reference_similarity, replicate_index, replicate_count}`.
-  `weighted_score` is `float | None`: `null` only when every replicate was
-  **ungraded**. An **errored** replicate counts as `0.0` — same rule as
-  `VariantAggregate.average_score` above. That is deliberate: dropping errored
+  `weighted_score` is `float | None`: `null` when every replicate was **ungraded**,
+  and for every task of a variant where `nothing_was_measured` holds (an `execute`
+  run with a crash). Otherwise an **errored** replicate counts as `0.0`, the same rule
+  as `VariantAggregate.average_score` above. That is deliberate: dropping errored
   rows would let a nightly where one image build failed report a *higher*
-  headline score than a clean one.
+  headline score than a clean one. `measured` is `true` when at least one replicate
+  carries a criteria verdict. Only a non-`null` `weighted_score` can be
+  `best_variant` or count toward `score_spread`; a task with none is a tie.
 - `variant_aggregates: dict[str, VariantAggregate]` — keyed by variant id.
 - `total_duration_seconds`.
-- `per_replicate_scores: dict[variant_id -> dict[task_id -> list[float]]]`.
+- `per_replicate_scores: dict[variant_id -> dict[task_id -> list[float]]]` — empty lists for a
+  variant where `nothing_was_measured` holds.
 
 > **Statistics are render-time only.** Bootstrap/Wilson confidence intervals and the
 > Welch/paired mean-difference tests appear in `experiment.md` / HTML but are **not**

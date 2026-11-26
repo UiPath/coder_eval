@@ -933,17 +933,29 @@ Ungraded replicates — and ONLY those — drop out of a mean entirely: `or 0.0`
 a clean `execute` run down to a real-looking zero, while dropping an ERRORED one would pay
 it a bonus.
 
-The rule lives once, in `result_metrics.measured_scores`, read by `VariantAggregate.average_score`
-and run.md's Avg Reliability Score. run.md also hides that score whenever `nothing_was_measured`
-holds, as the pass rate beside it does. Two known gaps remain. Closing either one changes a
-serialized field that downstream consumers read, so each is a separate change:
+The rule lives once: `result_metrics.measured_scores` picks the rows, and `measured_mean` takes
+the headline mean, `None` when `nothing_was_measured` holds, as the pass rate beside it is.
+`VariantAggregate.average_score` and run.md's Avg Reliability Score both read `measured_mean`.
+
+The verdict evidence lives on the fold. `_fold_replicates` sets `VariantResult.measured` when
+any replicate carries a verdict, because its score turns an errored replicate into 0.0 and
+so cannot answer "was this measured". A variant where `nothing_was_measured` holds also loses
+its per-task scores, so the fold's 0.0 for a crash cannot win a task, set a spread or feed
+the replicate statistics. An `execute` run with a crash therefore has no `pass_rate` or
+`average_score` in experiment.json and wins no task, as run.json has no `pass_rate` and run.md
+shows no Avg Reliability Score. A graded run is unchanged: its errored rows still score 0.0
+and can still lose.
+
+Known gaps. Closing either changes a serialized value that downstream consumers read, so
+each is a separate change:
 
 - `SuiteRollup.average_weighted_score` (suite.json) still averages scored rows only, so an
   errored row leaves it.
-- `aggregate_results` counts `VariantAggregate.tasks_measured` after `_fold_replicates` has
-  turned an errored replicate's missing score into 0.0, so an `execute` run with a crash
-  reports `pass_rate` 0.0 and `average_score` 0.0 in experiment.json where run.json reports
-  `None`.
+- A task whose replicates are a crash plus ungraded runs folds to ERROR (`_pick_worst_status`
+  ranks ungraded last). A variant made only of such tasks has no ungraded task, so
+  `nothing_was_measured` cannot hold and experiment.json shows 0.0 where run.json shows no
+  rate. Pinned by the strict xfail
+  `tests/test_ungraded_reporting.py::test_a_variant_of_only_crashed_and_ungraded_replicates_has_no_rate_or_score`.
 
 Only graded variants can win or set a spread; including ungraded ones at 0.0 would name an
 arbitrary "best" among scores that do not exist. When NOTHING was scored there is no
@@ -952,10 +964,10 @@ happened to list first, so swapping the inputs flipped the reported winner while
 `is_tie=False` asserted it was a real result. It now sorts by `variant_id` for determinism
 and marks a tie among all arms, which is what "no arm outscored another" means.
 
-`tasks_measured` counts rows with a score, because a TIMEOUT lands in the `failed` bucket
-without any criterion having run — so the buckets alone cannot answer "was this measured
-at all". `average_score` is `None` rather than `0.000` when nothing was graded, since a
-zero beside "Pass Rate: n/a" is indistinguishable from "scored zero".
+`tasks_measured` counts evidence, not buckets, because a TIMEOUT lands in the `failed`
+bucket without any criterion having run, so the buckets alone cannot answer "was this
+measured at all". run.json counts replicate rows with a score; experiment.json counts tasks
+with a measured replicate. Only the gate they feed is shared.
 
 The status-priority map is annotated with the SAME `Literal` that `FinalStatus.category`
 returns and indexed directly rather than via `.get(..., -1)`. Adding the fourth `ungraded`

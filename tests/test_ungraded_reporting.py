@@ -20,8 +20,16 @@ from typing import Any
 
 import pytest
 
-from coder_eval.models import FinalStatus, RunSummary, VariantAggregate, VariantResult
-from coder_eval.orchestration.experiment import _mean_graded_score, _pick_worst_status
+from coder_eval.models import (
+    EvaluationResult,
+    FinalStatus,
+    RunSummary,
+    TaskResult,
+    VariantAggregate,
+    VariantResult,
+)
+from coder_eval.orchestration.batch import build_run_summary
+from coder_eval.orchestration.experiment import _mean_graded_score, _pick_worst_status, aggregate_results
 
 
 def _summary(**kwargs: object) -> RunSummary:
@@ -110,6 +118,148 @@ def test_the_three_published_pass_rates_agree_on_one_set_of_counts() -> None:
     assert summary.pass_rate is None
     assert summary.error_share is None
     assert aggregate.pass_rate is None
+
+
+def _task_row(
+    task_id: str, status: FinalStatus, score: float | None = None, replicate_index: int = 0, variant_id: str = "v"
+) -> TaskResult:
+    result = EvaluationResult(
+        task_id=task_id,
+        task_description="t",
+        variant_id=variant_id,
+        agent_type="claude-code",
+        started_at=datetime(2026, 1, 1),
+        final_status=status,
+        weighted_score=score,
+        duration_seconds=1.0,
+        iteration_count=1,
+    )
+    return TaskResult(
+        task_id=task_id, variant_id=variant_id, result=result, duration=1.0, replicate_index=replicate_index
+    )
+
+
+_NG, _ERR, _OK = FinalStatus.NOT_GRADED, FinalStatus.ERROR, FinalStatus.SUCCESS
+
+
+@pytest.mark.parametrize(
+    ("rows", "measured", "pass_rate", "average_score"),
+    [
+        pytest.param(
+            [*(_task_row(f"t{i}", _NG) for i in range(9)), _task_row("t9", _ERR)],
+            0,
+            None,
+            None,
+            id="execute-run-with-a-crash-has-no-rate-or-score",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t0", _NG, replicate_index=1), _task_row("t1", _NG)],
+            0,
+            None,
+            None,
+            id="a-crashed-replicate-is-not-a-verdict",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t0", _OK, 1.0, replicate_index=1), _task_row("t1", _NG)],
+            1,
+            0.0,
+            0.5,
+            id="one-scored-replicate-measures-the-task",
+        ),
+        pytest.param(
+            [_task_row("t0", _ERR), _task_row("t1", _ERR)],
+            0,
+            0.0,
+            0.0,
+            id="all-error-graded-run-still-scores-zero",
+        ),
+    ],
+)
+def test_variant_aggregate_counts_a_task_measured_only_when_a_replicate_has_a_verdict(
+    rows: list[TaskResult], measured: int, pass_rate: float | None, average_score: float | None
+) -> None:
+    aggregate = aggregate_results("e", "", ["v"], rows, 1.0).variant_aggregates["v"]
+
+    assert aggregate.tasks_measured == measured
+    assert aggregate.pass_rate == pass_rate
+    assert aggregate.average_score == average_score
+
+
+def test_run_json_and_experiment_json_agree_on_an_execute_run_with_a_crash() -> None:
+    from coder_eval.reports import ReportGenerator
+
+    rows = [*(_task_row(f"t{i}", _NG) for i in range(9)), _task_row("t9", _ERR)]
+
+    summary = build_run_summary("r", rows, datetime(2026, 1, 1), datetime(2026, 1, 1))
+    aggregate = aggregate_results("e", "", ["v"], rows, 1.0).variant_aggregates["v"]
+
+    assert (aggregate.tasks_measured, aggregate.pass_rate) == (summary.tasks_measured, summary.pass_rate) == (0, None)
+    assert aggregate.average_score is None
+    assert "Avg Reliability Score" not in ReportGenerator.generate_markdown(summary)
+
+
+def test_one_variants_verdict_does_not_measure_another() -> None:
+    rows = [
+        _task_row("t0", _OK, 1.0, variant_id="a"),
+        _task_row("t0", _ERR, variant_id="b"),
+        _task_row("t1", _NG, variant_id="b"),
+    ]
+    aggregates = aggregate_results("e", "", ["a", "b"], rows, 1.0).variant_aggregates
+
+    assert (aggregates["a"].tasks_measured, aggregates["a"].pass_rate, aggregates["a"].average_score) == (1, 1.0, 1.0)
+    assert (aggregates["b"].tasks_measured, aggregates["b"].pass_rate, aggregates["b"].average_score) == (0, None, None)
+
+
+def test_a_variant_with_no_verdict_wins_no_task_and_scores_no_cell() -> None:
+    from coder_eval.reports import ExperimentReportGenerator
+
+    rows = [
+        _task_row("t0", _ERR, variant_id="A"),
+        _task_row("t1", _NG, variant_id="A"),
+        _task_row("t0", _NG, variant_id="B"),
+        _task_row("t1", _NG, variant_id="B"),
+    ]
+    result = aggregate_results("e", "", ["A", "B"], rows, 1.0)
+    t0 = next(ts for ts in result.task_summaries if ts.task_id == "t0")
+
+    assert t0.is_tie
+    assert [vr.weighted_score for vr in t0.variant_results] == [None, None]
+    assert result.per_replicate_scores["A"]["t0"] == []
+    assert "- **A**: 0/2 tasks (0%)" in ExperimentReportGenerator.generate_experiment_report(result)
+
+
+def test_a_graded_variant_that_errors_still_scores_zero_and_can_lose() -> None:
+    rows = [
+        _task_row("t0", _ERR, variant_id="A"),
+        _task_row("t0", _OK, 0.5, variant_id="B"),
+        _task_row("t1", _ERR, variant_id="A"),
+        _task_row("t1", FinalStatus.FAILURE, 0.0, variant_id="B"),
+    ]
+    result = aggregate_results("e", "", ["A", "B"], rows, 1.0)
+    t0, t1 = result.task_summaries
+
+    assert (t0.best_variant, t0.is_tie, t0.score_spread) == ("B", False, 0.5)
+    assert t1.is_tie
+    assert result.variant_aggregates["A"].average_score == 0.0
+    assert result.per_replicate_scores["A"]["t0"] == [0.0]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known gap: a task whose replicates are a crash plus ungraded runs folds to ERROR, so the variant "
+        "has no ungraded task and nothing_was_measured cannot hold. "
+        "See .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them"
+    ),
+)
+def test_a_variant_of_only_crashed_and_ungraded_replicates_has_no_rate_or_score() -> None:
+    rows = [_task_row("t0", _ERR), _task_row("t0", _NG, replicate_index=1)]
+
+    summary = build_run_summary("r", rows, datetime(2026, 1, 1), datetime(2026, 1, 1))
+    aggregate = aggregate_results("e", "", ["v"], rows, 1.0).variant_aggregates["v"]
+
+    assert summary.pass_rate is None
+    assert (aggregate.pass_rate, aggregate.average_score) == (None, None)
 
 
 def test_run_md_and_the_variant_average_publish_one_mean_for_one_set_of_rows() -> None:

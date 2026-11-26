@@ -37,9 +37,10 @@ from ..models import (
     VariantAggregate,
     VariantResult,
     apply_prompt_mutations,
+    nothing_was_measured,
 )
 from ..path_utils import resolve_dir_template
-from ..result_metrics import measured_scores
+from ..result_metrics import measured_mean, measured_scores
 from .config import BatchRunConfig
 from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
 from .task_loader import (
@@ -804,10 +805,32 @@ def _measured_scores(rows: Sequence[VariantResult] | Sequence[TaskResult]) -> li
     return measured_scores((r.final_status, r.weighted_score) for r in results)
 
 
-def _mean_graded_score(vr_list: list[VariantResult]) -> float | None:
-    """Mean score over the measured rows; ``None`` when none were measured."""
-    scores = _measured_scores(vr_list)
-    return sum(scores) / len(scores) if scores else None
+def _verdict_evidence(vr_list: Sequence[VariantResult]) -> tuple[int, int]:
+    """``(not_graded, measured)`` task counts, the two inputs of ``nothing_was_measured``."""
+    return (
+        sum(1 for v in vr_list if v.final_status.category == "ungraded"),
+        sum(1 for v in vr_list if v.measured),
+    )
+
+
+def _mean_graded_score(vr_list: Sequence[VariantResult]) -> float | None:
+    """The variant's headline mean: measured rows only, ``None`` when the variant has no verdict."""
+    not_graded, measured = _verdict_evidence(vr_list)
+    return measured_mean(
+        ((v.final_status, v.weighted_score) for v in vr_list), not_graded=not_graded, measured=measured
+    )
+
+
+def _has_no_verdict(vr_list: Sequence[VariantResult]) -> bool:
+    not_graded, measured = _verdict_evidence(vr_list)
+    return nothing_was_measured(not_graded=not_graded, measured=measured)
+
+
+def _variants_without_a_verdict(folded: list[VariantResult]) -> set[str]:
+    by_variant: dict[str, list[VariantResult]] = {}
+    for vr in folded:
+        by_variant.setdefault(vr.variant_id, []).append(vr)
+    return {vid for vid, vr_list in by_variant.items() if _has_no_verdict(vr_list)}
 
 
 def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
@@ -840,6 +863,7 @@ def _fold_replicates(task_id: str, variant_id: str, reps: list[TaskResult]) -> V
         variant_id=variant_id,
         task_id=task_id,
         weighted_score=sum(scores) / len(scores) if scores else None,
+        measured=any(r.result.weighted_score is not None for r in reps),
         final_status=_pick_worst_status([r.result.final_status for r in reps]),
         duration_seconds=sum(durations),
         total_tokens=sum(token_vals) if token_vals else None,
@@ -848,6 +872,63 @@ def _fold_replicates(task_id: str, variant_id: str, reps: list[TaskResult]) -> V
         reference_similarity=_mean_reference_similarity(reps),
         replicate_index=0,  # aggregate — points at first replicate for link rendering
         replicate_count=len(reps),
+    )
+
+
+def _summarize_task(task_id: str, variants: list[VariantResult]) -> TaskExperimentSummary:
+    """Pick one task's winner and spread from its folded per-variant results."""
+    # Only GRADED variants can win or set a spread, and when nothing was
+    # scored the fallback must not invent a winner.
+    # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
+    scored = [(v, v.weighted_score) for v in variants if v.weighted_score is not None]
+    if scored:
+        best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0]
+        top_count = sum(1 for _, s in scored if s == best.weighted_score)
+    else:
+        best = min(variants, key=lambda v: v.variant_id)
+        top_count = len(variants)
+    scores = [s for _, s in scored]
+    rep_counts = {v.replicate_count for v in variants}
+    return TaskExperimentSummary(
+        task_id=task_id,
+        variant_results=variants,
+        best_variant=best.variant_id,
+        is_tie=top_count > 1,
+        score_spread=(max(scores) - min(scores)) if scores else 0.0,
+        replicate_count=min(rep_counts) if rep_counts else 1,
+    )
+
+
+def _aggregate_variant(vid: str, vr_list: list[VariantResult]) -> VariantAggregate:
+    """Roll one variant's folded per-task results into its VariantAggregate."""
+    if not vr_list:
+        return VariantAggregate(
+            variant_id=vid,
+            tasks_run=0,
+            tasks_succeeded=0,
+            tasks_failed=0,
+            tasks_error=0,
+            average_score=None,
+            average_duration=0.0,
+        )
+    token_values = [v.total_tokens for v in vr_list if v.total_tokens is not None]
+    tasks_not_graded, tasks_measured = _verdict_evidence(vr_list)
+    return VariantAggregate(
+        variant_id=vid,
+        tasks_run=len(vr_list),
+        tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
+        tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
+        tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
+        tasks_not_graded=tasks_not_graded,
+        tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
+        tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
+        # Verdict evidence: a TIMEOUT lands in `failed` with no criterion
+        # having run, so the buckets alone cannot answer this.
+        tasks_measured=tasks_measured,
+        average_score=_mean_graded_score(vr_list),
+        average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
+        total_tokens=sum(token_values) if token_values else None,
+        replicate_count=vr_list[0].replicate_count,
     )
 
 
@@ -880,77 +961,28 @@ def aggregate_results(
     for tr in task_results:
         task_variant_reps.setdefault((tr.task_id, tr.variant_id), []).append(tr)
 
+    folded = [_fold_replicates(task_id, variant_id, reps) for (task_id, variant_id), reps in task_variant_reps.items()]
+    # A variant with no verdict has no per-task score either: the fold's 0.0 for its
+    # crashed rows must not win a task, set a spread or feed the replicate statistics.
+    # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
+    no_verdict = _variants_without_a_verdict(folded)
+    folded = [vr.model_copy(update={"weighted_score": None}) if vr.variant_id in no_verdict else vr for vr in folded]
+
     # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats rendering.
     per_replicate_scores: dict[str, dict[str, list[float]]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        per_replicate_scores.setdefault(variant_id, {})[task_id] = _measured_scores(reps)
+        scores = [] if variant_id in no_verdict else _measured_scores(reps)
+        per_replicate_scores.setdefault(variant_id, {})[task_id] = scores
 
     task_variants: dict[str, list[VariantResult]] = {}
-    for (task_id, variant_id), reps in task_variant_reps.items():
-        task_variants.setdefault(task_id, []).append(_fold_replicates(task_id, variant_id, reps))
+    for vr in folded:
+        task_variants.setdefault(vr.task_id, []).append(vr)
+    task_summaries = [_summarize_task(task_id, variants) for task_id, variants in task_variants.items()]
 
-    # Build task summaries
-    task_summaries: list[TaskExperimentSummary] = []
-    for task_id, variants in task_variants.items():
-        # Only GRADED variants can win or set a spread, and when nothing was
-        # scored the fallback must not invent a winner.
-        # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
-        scored = [(v, v.weighted_score) for v in variants if v.weighted_score is not None]
-        if scored:
-            best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0]
-            top_count = sum(1 for _, s in scored if s == best.weighted_score)
-        else:
-            best = min(variants, key=lambda v: v.variant_id)
-            top_count = len(variants)
-        scores = [s for _, s in scored]
-        rep_counts = {v.replicate_count for v in variants}
-        task_summaries.append(
-            TaskExperimentSummary(
-                task_id=task_id,
-                variant_results=variants,
-                best_variant=best.variant_id,
-                is_tie=top_count > 1,
-                score_spread=(max(scores) - min(scores)) if scores else 0.0,
-                replicate_count=min(rep_counts) if rep_counts else 1,
-            )
-        )
-
-    # Build variant aggregates
-    variant_aggregates: dict[str, VariantAggregate] = {}
-    for vid in variant_ids:
-        vr_list = [vr for ts in task_summaries for vr in ts.variant_results if vr.variant_id == vid]
-        if not vr_list:
-            variant_aggregates[vid] = VariantAggregate(
-                variant_id=vid,
-                tasks_run=0,
-                tasks_succeeded=0,
-                tasks_failed=0,
-                tasks_error=0,
-                average_score=None,
-                average_duration=0.0,
-            )
-            continue
-
-        token_values = [v.total_tokens for v in vr_list if v.total_tokens is not None]
-        total_tokens = sum(token_values) if token_values else None
-        variant_aggregates[vid] = VariantAggregate(
-            variant_id=vid,
-            tasks_run=len(vr_list),
-            tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
-            tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
-            tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
-            tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
-            tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
-            tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            # Verdict evidence: a TIMEOUT lands in `failed` with no criterion
-            # having run, so the buckets alone cannot answer this.
-            tasks_measured=sum(1 for v in vr_list if v.weighted_score is not None),
-            # GRADED rows only, and None when there are none.
-            average_score=_mean_graded_score(vr_list),
-            average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
-            total_tokens=total_tokens,
-            replicate_count=vr_list[0].replicate_count if vr_list else 1,
-        )
+    variant_aggregates = {
+        vid: _aggregate_variant(vid, [vr for ts in task_summaries for vr in ts.variant_results if vr.variant_id == vid])
+        for vid in variant_ids
+    }
 
     return ExperimentResult(
         experiment_id=experiment_id,
