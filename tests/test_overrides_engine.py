@@ -30,6 +30,12 @@ from coder_eval.orchestration.overrides import (
 )
 
 
+_NO_SDK_OPTIONS_ON_OPENCODE = (
+    r"sdk_options cannot be used with agent type opencode\. "
+    + r"This option is only supported for claude-code, codex, delegate"
+)
+
+
 def _make_task(
     agent: object | None = None,
     run_limits: RunLimits | None = None,
@@ -149,8 +155,13 @@ class TestApplyOverrides:
 
     def test_sdk_options_other_key_on_codex_raises(self):
         task = _make_task(agent=parse_agent_config(type="codex"))
-        with pytest.raises(OverrideError, match="sdk_options"):
+        with pytest.raises(OverrideError, match="are not Codex options"):
             apply_overrides(task, {"agent.sdk_options.max_thinking_tokens": 1024})
+
+    def test_sdk_options_on_a_kind_without_them_raises_friendly(self):
+        task = _make_task(agent=parse_agent_config(type="opencode"))
+        with pytest.raises(OverrideError, match=_NO_SDK_OPTIONS_ON_OPENCODE):
+            apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_sdk_options_effort_on_delegate_applies(self):
         task = _make_task(agent=parse_agent_config(type="delegate"))
@@ -186,6 +197,11 @@ class TestApplyOverrides:
         task = _make_task(agent=parse_agent_config(type="claude-code"))
         apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
         assert task.agent.sdk_options == {"effort": "high"}
+
+    def test_sdk_options_with_agent_type_without_them_raises_friendly(self):
+        task = _make_task(agent=parse_agent_config(type="claude-code"))
+        with pytest.raises(OverrideError, match=_NO_SDK_OPTIONS_ON_OPENCODE):
+            apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="opencode")
 
     def test_unknown_root_raises(self):
         task = _make_task()

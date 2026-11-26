@@ -227,10 +227,10 @@ lines across this commit with that in mind.
 
 ### Reasoning Effort
 
-`agent.sdk_options.effort` is passed as `model_reasoning_effort` in the thread `config`,
-the same key a `$CODEX_HOME/config.toml` takes, which it overrides. It is one of Codex's
-tiers: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; a model may accept
-fewer, and another key or tier is a validation error at load. Unset, the host's
+`agent.sdk_options.effort` is sent as the `effort` of every turn, which overrides the
+`model_reasoning_effort` in `$CODEX_HOME/config.toml`. It is one of Codex's tiers: `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; a model may accept fewer, and
+another key or tier is a validation error at load. Unset, the host's
 `config.toml` value applies, or else the model's default. It is the same `sdk_options.effort`
 key Claude Code and Delegate take, so `-D agent.sdk_options.effort=high` drives all three.
 
