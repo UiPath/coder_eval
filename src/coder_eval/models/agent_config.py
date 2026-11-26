@@ -367,10 +367,51 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
         return self
 
 
+_EFFORT_ONLY_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})
+# openai_codex.api.ReasoningEffort at the pinned SDK, listed here because base installs load this
+# module without the SDK. A model may accept fewer tiers than Codex knows.
+_CODEX_EFFORT_TIERS: frozenset[str] = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
+def _validate_effort_only_sdk_options(
+    v: dict[str, Any], *, options: str, tiers: frozenset[str] | None = None
+) -> dict[str, Any]:
+    """Reject every ``sdk_options`` key but ``effort``, and an ``effort`` that is not a string in ``tiers``.
+
+    ``options`` names the keys' owner in the error, e.g. ``"Codex options"``. ``tiers=None``
+    accepts any string.
+    """
+    unknown = sorted(set(v) - _EFFORT_ONLY_SDK_OPTION_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"sdk_options keys {unknown} are not {options} coder_eval forwards "
+            + f"(valid keys: {sorted(_EFFORT_ONLY_SDK_OPTION_FIELDS)})"
+        )
+    if "effort" not in v:
+        return v
+    effort = v["effort"]
+    if not isinstance(effort, str):
+        raise ValueError(f"sdk_options.effort must be a string tier, got {effort!r}")
+    if tiers is not None and effort not in tiers:
+        raise ValueError(f"sdk_options.effort must be one of {sorted(tiers)}, got {effort!r}")
+    return v
+
+
 class CodexAgentConfig(BaseAgentConfig):
     """Codex agent configuration."""
 
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
+
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Pass-through options coder_eval forwards to Codex. Allowed keys: "
+            f"{sorted(_EFFORT_ONLY_SDK_OPTION_FIELDS)}. 'effort' is the reasoning-effort tier, sent "
+            f"as the effort of every turn; one of {sorted(_CODEX_EFFORT_TIERS)}, of which a model "
+            "may accept fewer. Unset leaves the model_reasoning_effort in the host "
+            "$CODEX_HOME/config.toml, or else the model's default."
+        ),
+    )
 
     # Codex clamps the value to the model's catalog maximum itself and compacts at 90% of it.
     # The floor rejects a window too small to work in, such as a dropped "000" or a YAML
@@ -391,6 +432,11 @@ class CodexAgentConfig(BaseAgentConfig):
             "host $CODEX_HOME/config.toml, or else Codex's own per-model default."
         ),
     )
+
+    @field_validator("sdk_options")
+    @classmethod
+    def _validate_sdk_options(cls, v: dict[str, Any]) -> dict[str, Any]:
+        return _validate_effort_only_sdk_options(v, options="Codex options", tiers=_CODEX_EFFORT_TIERS)
 
     def egress_hosts(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """The ``CODEX_BASE_URL`` host when it is forwarded, else ``api.openai.com``.
@@ -527,9 +573,6 @@ class PiAgentConfig(BaseAgentConfig):
         return (_PI_PROVIDER_HOSTS.get(provider if model_id else "", "openrouter.ai:443"),)
 
 
-_DELEGATE_SDK_OPTION_FIELDS: frozenset[str] = frozenset({"effort"})
-
-
 class DelegateAgentConfig(BaseAgentConfig):
     """Delegate agent configuration (UiPath Autopilot's Delegate agent).
 
@@ -554,7 +597,7 @@ class DelegateAgentConfig(BaseAgentConfig):
         default_factory=dict,
         description=(
             "Pass-through dict of delegate-stdio init options that coder_eval does not own "
-            f"directly. Allowed keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)}. 'effort' is the "
+            f"directly. Allowed keys: {sorted(_EFFORT_ONLY_SDK_OPTION_FIELDS)}. 'effort' is the "
             "reasoning-effort tier (documented values: low/medium/high/xhigh/max): it must be a "
             "string, forwarded as-is, and the host ignores a tier it does not recognize."
         ),
@@ -587,16 +630,8 @@ class DelegateAgentConfig(BaseAgentConfig):
 
     @field_validator("sdk_options")
     @classmethod
-    def _validate_sdk_options_keys(cls, v: dict[str, Any]) -> dict[str, Any]:
-        unknown = sorted(set(v) - _DELEGATE_SDK_OPTION_FIELDS)
-        if unknown:
-            raise ValueError(
-                f"sdk_options keys {unknown} are not delegate-stdio init options coder_eval forwards "
-                + f"(valid keys: {sorted(_DELEGATE_SDK_OPTION_FIELDS)})"
-            )
-        if "effort" in v and not isinstance(v["effort"], str):
-            raise ValueError(f"sdk_options.effort must be a string tier, got {v['effort']!r}")
-        return v
+    def _validate_sdk_options(cls, v: dict[str, Any]) -> dict[str, Any]:
+        return _validate_effort_only_sdk_options(v, options="delegate-stdio init options")
 
 
 class NoneAgentConfig(BaseAgentConfig):

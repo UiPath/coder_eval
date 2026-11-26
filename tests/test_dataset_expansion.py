@@ -773,8 +773,8 @@ class TestDatasetRepeatsFanout:
         """A per-task layer-5 resolution failure skips just that task, not the suite.
 
         `--type codex` (config.agent_type) rewrites a task whose YAML carries the
-        Claude-only `sdk_options` into a CodexAgentConfig, which forbids that field
-        (`extra="forbid"`). The incompatibility raises during layer-5 resolution;
+        Claude-only `sdk_options` key into a CodexAgentConfig, whose `sdk_options`
+        takes only `effort`. The incompatibility raises during layer-5 resolution;
         the task must land in `skipped` while a sibling still resolves — rather than
         aborting the whole coder-eval run (as it did before this isolation).
         """
@@ -788,12 +788,12 @@ class TestDatasetRepeatsFanout:
             "sandbox": {"driver": "tempdir"},
             "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
         }
-        # Valid as claude-code (sdk_options is Claude-only); becomes invalid only
+        # Valid as claude-code (max_thinking_tokens is Claude-only); becomes invalid only
         # once --type codex rewrites the agent kind at layer 5.
         claude_only = {
             **good,
             "task_id": "claude-only-task",
-            "agent": {"type": "claude-code", "sdk_options": {"effort": "high"}},
+            "agent": {"type": "claude-code", "sdk_options": {"max_thinking_tokens": 1024}},
         }
         good_file = tmp_path / "good.yaml"
         good_file.write_text(yaml.dump(good))
@@ -819,9 +819,9 @@ class TestDatasetRepeatsFanout:
     def test_config_resolution_failure_skips_whole_file_no_partial_fanout(self, tmp_path: Path) -> None:
         """A variant that fails resolution rolls back its whole file's fan-out.
 
-        `bad.yaml` carries Claude-only `sdk_options`: it resolves cleanly under
-        the claude-code variant but fails under the codex variant (which forbids
-        the field). Because a file's resolved tasks are buffered and committed as
+        `bad.yaml` carries a Claude-only `sdk_options` key: it resolves cleanly under
+        the claude-code variant but fails under the codex variant (which takes
+        only `effort`). Because a file's resolved tasks are buffered and committed as
         a unit, the clean claude-code entry is rolled back with the failing codex
         one — the file is skipped whole, never left as a lopsided partial fan-out
         that would skew an A/B comparison. Sibling `good.yaml` (no sdk_options)
@@ -846,10 +846,10 @@ class TestDatasetRepeatsFanout:
         good_file = tmp_path / "good.yaml"
         good_file.write_text(yaml.dump(_task("good-task")))
         bad_file = tmp_path / "bad.yaml"
-        # Claude-only sdk_options: valid under the claude-code variant, forbidden
+        # A Claude-only sdk_options key: valid under the claude-code variant, rejected
         # once the codex variant rewrites the agent kind.
         bad_file.write_text(
-            yaml.dump(_task("bad-task", agent={"type": "claude-code", "sdk_options": {"effort": "high"}}))
+            yaml.dump(_task("bad-task", agent={"type": "claude-code", "sdk_options": {"max_thinking_tokens": 1024}}))
         )
 
         experiment = ExperimentDefinition(
@@ -875,7 +875,7 @@ class TestDatasetRepeatsFanout:
     def test_every_task_failing_resolution_aborts_as_value_error(self, tmp_path: Path) -> None:
         """When EVERY attempted task fails resolution, abort rather than return empty.
 
-        Two task files that BOTH carry Claude-only `sdk_options` under `--type
+        Two task files that BOTH carry a Claude-only `sdk_options` key under `--type
         codex`: with no sibling resolving, `len(resolution_errors) == attempted`,
         so the suite must not silently produce an empty run. It aborts with the
         first task's own error (a Pydantic ValidationError — a ValueError — so it
@@ -890,7 +890,7 @@ class TestDatasetRepeatsFanout:
                 "initial_prompt": "p",
                 "sandbox": {"driver": "tempdir"},
                 "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
-                "agent": {"type": "claude-code", "sdk_options": {"effort": "high"}},
+                "agent": {"type": "claude-code", "sdk_options": {"max_thinking_tokens": 1024}},
             }
 
         file_a = tmp_path / "a.yaml"

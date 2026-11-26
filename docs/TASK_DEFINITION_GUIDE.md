@@ -195,6 +195,8 @@ validates its own keys at YAML load:
   dataclass; framework-managed keys (`model`, `allowed_tools`,
   `permission_mode`, `hooks`, `mcp_servers`, …) are rejected. See the
   [Claude Code guide](agents/CLAUDE_CODE.md).
+- `codex` — only `effort`, sent as the reasoning effort of every turn. See the
+  [Codex guide](agents/CODEX.md#reasoning-effort).
 - `delegate` — only `effort`. See the [Delegate guide](agents/DELEGATE.md).
 
 Deep-merged across the 5-layer config chain. Override via CLI with the
@@ -220,7 +222,7 @@ See [Codex](agents/CODEX.md#tool-output-cap).
 > **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given Coder Eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
 
 **Agent Types:**
-- `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
+- `claude-code` (default) — Claude Code SDK agent. Supports `claude_settings` and all permission modes.
 - `codex` — OpenAI Codex agent (requires `[codex]` extra; set `CODEX_API_KEY` and optional `CODEX_BASE_URL` environment variables).
 - `none` — No-op agent: no coding agent runs and no model API call is made. See [No-op / System Tasks](#no-op--system-tasks-type-none) below.
 

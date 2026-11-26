@@ -1803,6 +1803,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         return options
 
+    def _build_turn_options(self) -> dict[str, Any]:
+        """Build ``thread.turn`` options from agent config: the reasoning effort, when one is set."""
+        effort = self.config.sdk_options.get("effort")
+        if effort is None:
+            return {}
+        from openai_codex.api import ReasoningEffort  # pyright: ignore[reportPrivateImportUsage]
+
+        return {"effort": ReasoningEffort(effort)}
+
     def _log_config_enforcement(self) -> None:
         """Log configuration settings."""
         if self.config.allowed_tools:
@@ -1855,7 +1864,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         latches on) and BEFORE the next notification is pulled.
         """
         # Starts the turn without blocking, and opens the event stream.
-        turn_handle = await self._run_async(self.thread.turn, state.user_input)
+        turn_handle = await self._run_async(self.thread.turn, state.user_input, **self._build_turn_options())
         self._active_turn_handle = turn_handle
         stream = await self._run_async(turn_handle.stream)
 

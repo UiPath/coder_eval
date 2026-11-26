@@ -116,6 +116,9 @@ def collect_agent_settings_rows(
     run is visibly an append run rather than indistinguishable from a
     pre-marker one; when absent (older runs) the regime is inferred from the
     persisted prompt's shape and only surfaced if it was ``replace``.
+
+    An ``agent_config`` source (``is_sdk`` false) shows its ``sdk_options.effort``, so
+    a Codex run, which records no SDK options, still shows its effort.
     """
     rows: list[tuple[str, str]] = [
         ("Permission Mode", str(settings_source.get("permission_mode", "N/A"))),
@@ -153,6 +156,10 @@ def collect_agent_settings_rows(
         prompt_mode = system_prompt_semantics or inferred_mode
         if prompt_mode is not None:
             rows.append(("System Prompt Mode", prompt_mode))
+    else:
+        configured = settings_source.get("sdk_options")
+        if isinstance(configured, dict) and configured.get("effort") is not None:
+            rows.append(("Effort", str(configured["effort"])))
 
     plugins = settings_source.get("plugins")
     if isinstance(plugins, list):
