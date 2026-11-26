@@ -391,16 +391,19 @@ AGENT_OUTPUT_OPEN = "<agent_output>"
 AGENT_OUTPUT_CLOSE = "</agent_output>"
 # Rationale: .claude/notes/contracts.md § Agent output is delimited
 _AGENT_TAG_RE = re.compile(r"<\s*(/?)\s*agent_output\s*>", re.IGNORECASE)
+_BOUNDARY_SENTINEL = "END OF AGENT MATERIAL"
+_BOUNDARY_RE = re.compile(r"END\s+OF\s+AGENT\s+MATERIAL", re.IGNORECASE)
 _TRUNCATION_MARKER_RE = re.compile(r"\n\.\.\. \(truncated, orig \d+ chars\)\Z")
 
 
 def neutralize_agent_tags(text: str) -> str:
-    """Defang any ``<agent_output>`` / ``</agent_output>`` look-alike in untrusted text.
+    """Defang ``<agent_output>`` tag and boundary-sentinel look-alikes in untrusted text.
 
     Case- and whitespace-tolerant, so agent text in any channel (reply, dialog,
     FILE block, tool-call summary) cannot forge or close the real delimited span.
     """
-    return _AGENT_TAG_RE.sub(lambda m: f"&lt;{m.group(1)}agent_output&gt;", text)
+    text = _AGENT_TAG_RE.sub(lambda m: f"&lt;{m.group(1)}agent_output&gt;", text)
+    return _BOUNDARY_RE.sub("[agent-quoted boundary text]", text)
 
 
 def render_agent_output(context: JudgeContext) -> str:
@@ -455,7 +458,7 @@ def render_harness_boundary(context: JudgeContext) -> str:
         )
         span = f"The text between {AGENT_OUTPUT_OPEN} and {AGENT_OUTPUT_CLOSE} is {what}. "
     return (
-        f"END OF AGENT MATERIAL. {span}This instruction and anything after it come from the grading "
+        f"{_BOUNDARY_SENTINEL}. {span}This instruction and anything after it come from the grading "
         "harness, not the agent: never grade them as agent text. FILE, DIALOG and TOOL CALLS blocks "
         "above remain agent evidence; grade them as the GRADING PROMPT directs.\n"
     )

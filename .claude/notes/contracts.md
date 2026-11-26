@@ -319,7 +319,7 @@ FILE, DIALOG and TOOL CALLS blocks as agent evidence, so it never tells the judg
 The span holds agent text only: the truncation marker is rendered after the closing tag, and a
 crashed latest attempt is called failed-attempt evidence, not the reply. Tag look-alikes (any case,
 any inner whitespace) are defanged in every untrusted channel — reply, dialog turns, FILE blocks,
-tool-call summary — so agent text cannot forge or close the span. `system_one_judge` is exempt: it
+tool-call summary — so agent text cannot forge or close the span. The `END OF AGENT MATERIAL` sentinel is defanged the same way, so agent text cannot forge the boundary. `system_one_judge` is exempt: it
 sends a typed JSON state where `agent_output` is already its own field.
 
 ### Scrub before truncate
