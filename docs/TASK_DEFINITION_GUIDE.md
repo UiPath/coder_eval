@@ -1259,7 +1259,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `prompt` | *required* | Grading instructions shown to the judge |
 | `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem, relative to the task YAML's parent directory and to the staged reference directory respectively (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family, or `$REFERENCE_DIR/rubric.md` for one asset out of the reference — which works regardless of `include_reference`). Missing files render as `<file not found>`. |
 | `include_reference` | `true` | Inline the WHOLE reference directory into the judge prompt, one labelled block per file (silently omitted if no reference is configured). Never shown to the agent. Set `false` and use `$REFERENCE_DIR/<path>` entries in `files` to attach only specific assets. |
-| `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
+| `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA, between `<agent_output>` and `</agent_output>`; rubrics can refer to that span) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
 | `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). In simulation mode the user side may invent premises, so the block is wrapped as `UNTRUSTED DATA` (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text rendered into the judge prompt (per-message cap is `max_file_chars`). When exceeded, trailing turns are dropped and a degraded note is recorded. |
@@ -1282,7 +1282,7 @@ The `direct`-mode transport is resolved once at startup, logged on the `API rout
 
 **Security**
 
-- The opt-in context blocks (`files`, `include_agent_output`, `include_tool_calls`, `include_dialog`) are wrapped with `UNTRUSTED DATA` / "may invent premises" preambles to mitigate prompt-injection via tool output and to flag simulator-generated user turns.
+- The opt-in context blocks (`files`, `include_agent_output`, `include_tool_calls`, `include_dialog`) are wrapped with `UNTRUSTED DATA` / "may invent premises" preambles to mitigate prompt-injection via tool output and to flag simulator-generated user turns. The agent's output sits between `<agent_output>` and `</agent_output>`, and an `END OF AGENT MATERIAL` line separates all agent text from the closing `submit_verdict` instruction, so that instruction is never graded as agent text. Tag look-alikes in agent text are defanged.
 - The reference solution is shown only to the judge — never to the agent — and any occurrence of the reference is scrubbed from `CriterionResult.details` before persistence.
 
 **Failure modes** — each sets `score=0.0` and populates `error`:
@@ -1334,7 +1334,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `prompt` | *required* | Evaluation instructions for the judge agent |
 | `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem — relative to the task YAML's parent directory and to the staged reference directory respectively (`$REFERENCE_DIR/` works regardless of `include_reference`) — and are inlined into the prompt only. |
 | `include_reference` | `true` | Mount the reference tree at `_reference/` for the judge to Read/Glob (not inlined into the prompt). Use `$REFERENCE_DIR/<path>` entries in `files` to pre-attach specific assets as text. |
-| `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
+| `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED, between `<agent_output>` and `</agent_output>`) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
 | `include_dialog` | `false` | Include the user↔agent conversation across **all** turns, retaining failed agent attempts and unanswered questions as evidence and grading final answers by logical turn number. Standalone stop messages and duplicate user telemetry are excluded; see [attempt semantics](DIALOG_MODE.md#grading-a-dialog). The block is wrapped as `UNTRUSTED DATA` and warns about simulator-generated premises (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text (per-message cap is `max_file_chars`). Trailing turns are dropped past the cap. |

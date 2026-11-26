@@ -307,6 +307,21 @@ task attaches SPECIFIC grading assets instead of the whole tree, and it is reada
 because judges run outside the agent's turn — the directory sits at mode 000 for the whole of
 `agent.communicate`.
 
+### Agent output is delimited
+
+`llm_judge` and `agent_judge` wrap the agent's latest output in `<agent_output>` … `</agent_output>`
+and end every envelope that carries agent text (output, dialog, tool calls) with an
+`END OF AGENT MATERIAL` boundary before the `submit_verdict` instruction. Without it the
+harness's closing instruction read as the agent's last line: a rubric that grades "nothing after
+the final option" docked a correct reply for text the agent never wrote. The boundary names the
+FILE, DIALOG and TOOL CALLS blocks as agent evidence, so it never tells the judge to disregard them.
+
+The span holds agent text only: the truncation marker is rendered after the closing tag, and a
+crashed latest attempt is called failed-attempt evidence, not the reply. Tag look-alikes (any case,
+any inner whitespace) are defanged in every untrusted channel — reply, dialog turns, FILE blocks,
+tool-call summary — so agent text cannot forge or close the span. The `END OF AGENT MATERIAL` sentinel is defanged the same way, so agent text cannot forge the boundary. `system_one_judge` is exempt: it
+sends a typed JSON state where `agent_output` is already its own field.
+
 ### Scrub before truncate
 
 `scrub_reference` redacts by exact substring, so ordering is load-bearing everywhere it is
